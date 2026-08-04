@@ -1,38 +1,191 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
-from datetime import datetime
+import os
+import logging
+from typing import List, Dict, Any
+from datetime import datetime, timezone
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
+from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
+# Utility imports from your backend/utils directory
+from backend.utils.db_utils import get_db
+from backend.utils.isolation_auth import get_current_user
+from backend.services.github_service import GitHubOpsService
+from backend.middleware.rbac import require_role
 
-# --- LOG SCHEMAS ---
-class LogCreate(BaseModel):
-    service_name: str
-    environment: str = "production"
-    level: str = "ERROR"
-    message: str
-    stack_trace: str
-    metadata: Optional[Dict[str, Any]] = None
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ErrAgent Logger")
 
-# --- AI POST-MORTEM SCHEMA ---
-class SuspectCommit(BaseModel):
-    commit_sha: str
-    author: str
-    message: str
-    diff_snippet: Optional[str] = None
+app = FastAPI(title="errAgent Incident Engine", version="1.0.0")
 
-class PostMortem(BaseModel):
-    root_cause: str
-    suspect_commit: Optional[SuspectCommit] = None
-    suggested_fix: str
-    confidence_score: float = Field(ge=0.0, le=1.0)
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+github_service = GitHubOpsService()
 
-# --- INCIDENT SCHEMA ---
-class IncidentResponse(BaseModel):
-    id: str = Field(alias="_id")
-    title: str
-    service_name: str
-    status: str = "OPEN"
-    severity: str = "HIGH"
-    occurrences_count: int = 1
-    first_seen_at: datetime
-    last_seen_at: datetime
-    post_mortem: Optional[PostMortem] = None
+# Enable CORS for Frontend development
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# --- 1. HEALTH CHECK ENDPOINT ---
+@app.get("/health", tags=["Health"])
+def health_check():
+    return {"status": "ok", "service": "ErrAgent Backend Engine"}
+
+
+# --- 2. LIST ALL INCIDENTS ---
+@app.get("/api/v1/incidents", response_model=List[Dict[str, Any]], tags=["Incidents"])
+async def list_incidents(current_user: dict = Depends(get_current_user)):
+    """Fetches all incidents from MongoDB, ordered by most recent."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    
+    incidents = list(db["incidents"].find({}).sort("created_at", -1))
+    for inc in incidents:
+        inc["_id"] = str(inc["_id"])
+    return incidents
+
+
+# --- 3. GET SINGLE INCIDENT DETAILS ---
+@app.get("/api/v1/incidents/{incident_id}", tags=["Incidents"])
+async def get_incident_detail(incident_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Joins and returns the complete context for an incident:
+    Raw Error Log + AI Root Cause Analysis + Pending Remediation Action
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    incident = db["incidents"].find_one({"_id": incident_id})
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found.")
+
+    analysis = db["analyses"].find_one({"incident_id": incident_id}) or {}
+    remediation = db["remediations"].find_one({"incident_id": incident_id}) or {}
+
+    return {
+        "incident": incident,
+        "analysis": analysis,
+        "remediation": remediation
+    }
+
+
+# --- 4. INGEST NEW ERROR INCIDENT ---
+@app.post("/api/v1/incidents", status_code=status.HTTP_201_CREATED, tags=["Incidents"])
+async def ingest_incident(payload: Dict[str, Any], current_user: dict = Depends(get_current_user)):
+    """
+    Webhook / Ingestion endpoint for logging incoming application crashes.
+    Called by external monitoring (Sentry, Datadog, or app logger).
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    now = datetime.now(timezone.utc)
+    incident_id = f"inc_{int(now.timestamp())}"
+
+    incident_doc = {
+        "_id": incident_id,
+        "service_name": payload.get("service_name", "unknown-service"),
+        "environment": payload.get("environment", "production"),
+        "error_message": payload.get("error_message", "Unhandled Exception"),
+        "stack_trace": payload.get("stack_trace", ""),
+        "repository": payload.get("repository", ""),
+        "status": "open",
+        "metadata": payload.get("metadata", {}),
+        "created_at": now,
+        "updated_at": now
+    }
+
+    db["incidents"].insert_one(incident_doc)
+
+    # Log audit entry
+    db["audit_logs"].insert_one({
+        "incident_id": incident_id,
+        "actor": current_user.get("username", "INGESTION_WEBHOOK"),
+        "action": "INCIDENT_CREATED",
+        "details": {"service_name": incident_doc["service_name"]},
+        "timestamp": now
+    })
+
+    return {"status": "created", "incident_id": incident_id}
+
+
+# --- 5. APPROVE AND EXECUTE HOTFIX PR ---
+@app.post("/api/v1/incidents/{incident_id}/approve-hotfix", tags=["Incidents"])
+async def approve_and_execute_hotfix(
+    incident_id: str, 
+    current_user: dict = Depends(require_role("Incident_Managers"))
+):
+    """
+    Human-In-The-Loop action endpoint:
+    Triggers GitHub PR creation and updates MongoDB states.
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    actor_username = current_user.get("username", "admin")
+
+    # 1. Fetch pending remediation doc
+    remediation = db["remediations"].find_one({"incident_id": incident_id})
+    if not remediation:
+        raise HTTPException(status_code=404, detail="No remediation draft found for this incident.")
+
+    if remediation.get("status") == "executed":
+        return {
+            "status": "already_executed",
+            "message": "Hotfix PR has already been created on GitHub.",
+            "pr_url": remediation.get("pr_url")
+        }
+
+    # 2. Execute GitHub API call
+    repo = remediation["target_repo"]
+    title = remediation["pr_title"]
+    body = remediation["pr_body"]
+    head = remediation["head_branch"]
+    base = remediation["base_branch"]
+
+    logger.info(f"Opening GitHub PR for {repo} ({head} -> {base})...")
+    
+    # ✅ Added 'await' here
+    gh_response = await github_service.create_pull_request(
+        repo=repo, title=title, body=body, head=head, base=base
+    )
+
+    if gh_response.get("status_code") not in [200, 201]:
+        error_msg = gh_response.get("data", {}).get("message", "Failed to create PR on GitHub.")
+        raise HTTPException(status_code=400, detail=f"GitHub API Error: {error_msg}")
+
+    pr_url = gh_response["data"].get("html_url")
+
+    # 3. Update Database states upon success
+    now = datetime.now(timezone.utc)
+    
+    db["remediations"].update_one(
+        {"incident_id": incident_id},
+        {"$set": {"status": "executed", "approved_by": actor_username, "pr_url": pr_url, "updated_at": now}}
+    )
+    
+    db["incidents"].update_one(
+        {"_id": incident_id},
+        {"$set": {"status": "resolved", "updated_at": now}}
+    )
+
+    # 4. Audit Log
+    db["audit_logs"].insert_one({
+        "incident_id": incident_id,
+        "actor": actor_username,
+        "action": "HOTFIX_APPROVED_AND_EXECUTED",
+        "details": {"pr_url": pr_url},
+        "timestamp": now
+    })
+
+    return {
+        "status": "success",
+        "message": "Hotfix Pull Request opened successfully!",
+        "pr_url": pr_url
+    }
