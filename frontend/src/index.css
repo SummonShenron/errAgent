@@ -13,6 +13,71 @@ body {
 	min-height: 100vh;
 }
 
+button {
+	font: inherit;
+}
+
+.landing-shell {
+	min-height: 100vh;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+}
+
+.landing-card {
+	width: min(720px, 100%);
+	background: rgba(255, 255, 255, 0.82);
+	border: 1px solid #e2e8f0;
+	border-radius: 20px;
+	box-shadow: 0 20px 48px rgba(15, 23, 42, 0.12);
+	padding: 40px;
+	backdrop-filter: blur(10px);
+}
+
+.landing-card h1 {
+	margin: 0 0 12px;
+	font-size: 3.3rem;
+	line-height: 1;
+	letter-spacing: -0.04em;
+}
+
+.landing-copy {
+	max-width: 54ch;
+	font-size: 1.05rem;
+	line-height: 1.7;
+	color: #334155;
+	margin: 0 0 24px;
+}
+
+.landing-actions {
+	display: flex;
+	gap: 12px;
+	margin-bottom: 20px;
+}
+
+.primary-action {
+	border: 0;
+	border-radius: 999px;
+	padding: 12px 20px;
+	background: linear-gradient(135deg, #0f172a, #1d4ed8);
+	color: #fff;
+	font-weight: 700;
+	cursor: pointer;
+	box-shadow: 0 12px 24px rgba(29, 78, 216, 0.18);
+	transition: transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.primary-action:hover {
+	transform: translateY(-1px);
+	box-shadow: 0 16px 28px rgba(29, 78, 216, 0.24);
+}
+
+.landing-note {
+	margin: 0;
+	font-size: 0.92rem;
+	color: #64748b;
+}
+
 .app-shell {
 	max-width: 1200px;
 	margin: 0 auto;
@@ -252,5 +317,13 @@ body {
 
 	.topbar h1 {
 		font-size: 1.6rem;
+	}
+
+	.landing-card {
+		padding: 28px;
+	}
+
+	.landing-card h1 {
+		font-size: 2.6rem;
 	}
 }

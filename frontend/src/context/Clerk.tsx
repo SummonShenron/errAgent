@@ -4,12 +4,14 @@ import { useUser, useAuth } from '@clerk/clerk-react';
 interface UserContextType {
   principal: string | null;
   isReady: boolean;
+  isSignedIn: boolean;
   getToken: () => Promise<string | null>;
 }
 
 const UserContext = createContext<UserContextType>({
   principal: null,
   isReady: false,
+  isSignedIn: false,
   getToken: async () => null,
 });
 
@@ -23,8 +25,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (user?.primaryEmailAddress?.emailAddress) {
         localStorage.setItem('principal', user.primaryEmailAddress.emailAddress);
       } else if (!user) {
-        // Fallback for guest mode when no user is signed in
-        localStorage.setItem('principal', 'guest-recruiter@example.com');
+        localStorage.removeItem('principal');
       }
       setIsReady(true);
     }
@@ -35,6 +36,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         principal: localStorage.getItem('principal'),
         isReady,
+        isSignedIn: Boolean(user),
         getToken,
       }}
     >

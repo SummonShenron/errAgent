@@ -51,7 +51,7 @@ const statusTone: Record<string, string> = {
 };
 
 export default function App() {
-  const { principal, getToken } = useAppUser();
+  const { principal, getToken, isSignedIn } = useAppUser();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<IncidentDetailResponse | null>(null);
@@ -65,9 +65,19 @@ export default function App() {
 
   useEffect(() => {
     async function fetchIncidents() {
+      if (!isSignedIn) {
+        setIncidents([]);
+        setSelectedIncidentId(null);
+        setLoading(false);
+        return;
+      }
+
       try {
-        // Fetch Clerk JWT or fallback to guest sandbox token
-        const token = (await getToken()) || 'guest-sandbox-token';
+        const token = await getToken();
+        if (!token) {
+          setLoading(false);
+          return;
+        }
 
         const response = await fetch(`${API_BASE_URL}/incidents`, {
           headers: {
@@ -91,18 +101,22 @@ export default function App() {
     }
 
     fetchIncidents();
-  }, [getToken]);
+  }, [getToken, isSignedIn]);
 
   useEffect(() => {
     async function fetchIncidentDetail() {
-      if (!selectedIncidentId) {
+      if (!isSignedIn || !selectedIncidentId) {
         setSelectedIncidentDetail(null);
         return;
       }
 
       try {
         setDetailLoading(true);
-        const token = (await getToken()) || 'guest-sandbox-token';
+        const token = await getToken();
+        if (!token) {
+          setSelectedIncidentDetail(null);
+          return;
+        }
         const response = await fetch(`${API_BASE_URL}/incidents/${selectedIncidentId}`, {
           headers: {
             'Content-Type': 'application/json',
@@ -125,7 +139,28 @@ export default function App() {
     }
 
     fetchIncidentDetail();
-  }, [selectedIncidentId, getToken]);
+  }, [selectedIncidentId, getToken, isSignedIn]);
+
+  if (!isSignedIn) {
+    return (
+      <div className="landing-shell">
+        <section className="landing-card">
+          <p className="eyebrow">Incident Operations Console</p>
+          <h1>errAgent</h1>
+          <p className="landing-copy">
+            Private incident-response workspace for approved operators. Sign in with your Clerk account to review active incidents,
+            AI analysis, and remediation drafts.
+          </p>
+          <div className="landing-actions">
+            <SignInButton mode="modal">
+              <button type="button" className="primary-action">Sign In</button>
+            </SignInButton>
+          </div>
+          <p className="landing-note">Access is limited to authorized responders and reviewers.</p>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell">

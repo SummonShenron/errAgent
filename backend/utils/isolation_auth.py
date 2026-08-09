@@ -16,6 +16,7 @@ security = HTTPBearer()
 
 _cached_jwks = None
 JWT_CLOCK_SKEW_SECONDS = 60
+GUEST_ACCESS_ENABLED = os.getenv("ENABLE_GUEST_ACCESS", "false").lower() == "true"
 
 class MockUser:
     def __init__(self, email: str):
@@ -51,7 +52,7 @@ async def get_current_user(request: Request) -> dict:
     token = auth_header.split(" ")[1]
     
     # 1. GUEST BYPASS: Check for sandbox token first
-    if token == "guest-sandbox-token":
+    if token == "guest-sandbox-token" and GUEST_ACCESS_ENABLED:
         logger.info("Guest session detected. Bypassing JWT verification.")
         return {
             "sub": "guest-recruiter@example.com",
