@@ -1,6 +1,6 @@
 # backend/middleware/rbac.py
 from fastapi import HTTPException, Depends, status
-from backend.utils.auth_utils import get_current_user
+from backend.utils.isolation_auth import get_current_user
 from backend.utils.db_utils import get_db
 
 def require_role(required_group: str):
