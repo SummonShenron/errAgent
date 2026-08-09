@@ -20,6 +20,7 @@ app = FastAPI(title="errAgent Incident Engine", version="1.0.0")
 
 github_service = GitHubOpsService()
 SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
+INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
 
@@ -76,6 +77,14 @@ def _require_sentry_secret(incoming_secret: str | None):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 
+def _require_ingest_secret(incoming_secret: str | None):
+    if not INGEST_WEBHOOK_SECRET:
+        logger.error("INGEST_WEBHOOK_SECRET is not configured.")
+        raise HTTPException(status_code=500, detail="Ingest configuration error")
+    if incoming_secret != INGEST_WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid ingest secret")
+
+
 def _extract_repository_from_tag_collection(tag_collection: Any) -> str | None:
     """Supports Sentry tags as dict, list[{key,value}], or list[[key,value]]."""
     if isinstance(tag_collection, dict):
@@ -100,7 +109,18 @@ def _extract_repository_from_tag_collection(tag_collection: Any) -> str | None:
     return None
 
 
-def _resolve_target_repository(payload: Dict[str, Any]) -> str:
+def _lookup_repo_from_service_registry(db, service_name: str) -> str | None:
+    if not service_name:
+        return None
+    registry_entry = db["service_registry"].find_one({"service_name": service_name}) or {}
+    for key in ("target_repo", "repository", "repo"):
+        value = registry_entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _resolve_target_repository(db, payload: Dict[str, Any]) -> str:
     direct_repo = payload.get("repository")
     if isinstance(direct_repo, str) and direct_repo.strip():
         return direct_repo.strip()
@@ -117,7 +137,37 @@ def _resolve_target_repository(payload: Dict[str, Any]) -> str:
     if isinstance(extra_repo, str) and extra_repo.strip():
         return extra_repo.strip()
 
+    service_name = payload.get("service_name") or payload.get("project_name") or payload.get("logger")
+    if isinstance(service_name, str):
+        resolved_from_registry = _lookup_repo_from_service_registry(db, service_name.strip())
+        if resolved_from_registry:
+            return resolved_from_registry
+
     return DEFAULT_TARGET_REPO
+
+
+def _ingest_machine_payload(
+    db,
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any],
+    actor: str,
+    incident_id: str | None = None,
+) -> str:
+    normalized_payload = dict(payload)
+    normalized_payload["service_name"] = (
+        normalized_payload.get("service_name")
+        or normalized_payload.get("project_name")
+        or normalized_payload.get("logger")
+        or "unknown-service"
+    )
+    normalized_payload["repository"] = _resolve_target_repository(db, normalized_payload)
+    return _store_incident_and_queue_analysis(
+        db,
+        background_tasks,
+        normalized_payload,
+        actor,
+        incident_id=incident_id,
+    )
 
 # Enable CORS for Frontend development
 app.add_middleware(
@@ -182,7 +232,7 @@ async def ingest_incident(
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
-    incident_id = _store_incident_and_queue_analysis(
+    incident_id = _ingest_machine_payload(
         db,
         background_tasks,
         payload,
@@ -268,6 +318,24 @@ async def approve_and_execute_hotfix(
         "pr_url": pr_url
     }
 
+
+# --- Generic Machine Ingest Webhook ---
+@app.post("/api/v1/webhooks/ingest", tags=["Webhooks"])
+async def handle_machine_ingest(
+    payload: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+    x_ingest_secret: str | None = Header(default=None),
+):
+    """Generic machine-to-machine incident ingest endpoint secured by shared secret."""
+    _require_ingest_secret(x_ingest_secret)
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    incident_id = _ingest_machine_payload(db, background_tasks, payload, "MACHINE_INGEST")
+    return {"status": "accepted", "incident_id": incident_id}
+
 # --- Vercel Webhook ---
 @app.post("/api/v1/webhooks/vercel", tags=["Webhooks"])
 async def handle_vercel_log_drain(logs: List[Dict[str, Any]], background_tasks: BackgroundTasks):
@@ -291,7 +359,7 @@ async def handle_vercel_log_drain(logs: List[Dict[str, Any]], background_tasks: 
             }
 
             db = get_db()
-            _store_incident_and_queue_analysis(db, background_tasks, payload, "VERCEL_WEBHOOK")
+            _ingest_machine_payload(db, background_tasks, payload, "VERCEL_WEBHOOK")
             
     return {"status": "processed"}
 
@@ -316,7 +384,7 @@ async def handle_render_log_drain(payload: Dict[str, Any], background_tasks: Bac
         }
 
         db = get_db()
-        _store_incident_and_queue_analysis(db, background_tasks, incident_data, "RENDER_WEBHOOK")
+        _ingest_machine_payload(db, background_tasks, incident_data, "RENDER_WEBHOOK")
 
     return {"status": "ok"}
 
@@ -348,7 +416,6 @@ async def handle_sentry_webhook(
         "environment": payload.get("environment", "production"),
         "error_message": first_exception.get("value") or payload.get("message") or payload.get("title") or "Sentry event",
         "stack_trace": rendered_stack or str(payload.get("exception")) or str(payload),
-        "repository": _resolve_target_repository(payload),
         "metadata": {
             "event_id": payload.get("event_id"),
             "level": payload.get("level"),
@@ -358,7 +425,7 @@ async def handle_sentry_webhook(
     }
 
     incident_id = f"sentry_{payload.get('event_id') or int(datetime.now(timezone.utc).timestamp())}"
-    _store_incident_and_queue_analysis(
+    _ingest_machine_payload(
         db,
         background_tasks,
         incident_data,
