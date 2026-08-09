@@ -20,6 +20,7 @@ app = FastAPI(title="errAgent Incident Engine", version="1.0.0")
 
 github_service = GitHubOpsService()
 SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
+DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
 
 def _serialize_mongo_doc(value: Any) -> Any:
@@ -73,6 +74,50 @@ def _require_sentry_secret(incoming_secret: str | None):
         raise HTTPException(status_code=500, detail="Webhook configuration error")
     if incoming_secret != SENTRY_WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+
+def _extract_repository_from_tag_collection(tag_collection: Any) -> str | None:
+    """Supports Sentry tags as dict, list[{key,value}], or list[[key,value]]."""
+    if isinstance(tag_collection, dict):
+        for key in ("repository", "repo", "target_repo", "github_repo"):
+            value = tag_collection.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    if isinstance(tag_collection, list):
+        for item in tag_collection:
+            if isinstance(item, dict):
+                key = str(item.get("key", "")).strip().lower()
+                value = item.get("value")
+                if key in {"repository", "repo", "target_repo", "github_repo"} and isinstance(value, str) and value.strip():
+                    return value.strip()
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                key = str(item[0]).strip().lower()
+                value = item[1]
+                if key in {"repository", "repo", "target_repo", "github_repo"} and isinstance(value, str) and value.strip():
+                    return value.strip()
+
+    return None
+
+
+def _resolve_target_repository(payload: Dict[str, Any]) -> str:
+    direct_repo = payload.get("repository")
+    if isinstance(direct_repo, str) and direct_repo.strip():
+        return direct_repo.strip()
+
+    for collection in (
+        payload.get("tags"),
+        (payload.get("data") or {}).get("tags"),
+    ):
+        resolved = _extract_repository_from_tag_collection(collection)
+        if resolved:
+            return resolved
+
+    extra_repo = (payload.get("extra") or {}).get("repository")
+    if isinstance(extra_repo, str) and extra_repo.strip():
+        return extra_repo.strip()
+
+    return DEFAULT_TARGET_REPO
 
 # Enable CORS for Frontend development
 app.add_middleware(
@@ -303,7 +348,7 @@ async def handle_sentry_webhook(
         "environment": payload.get("environment", "production"),
         "error_message": first_exception.get("value") or payload.get("message") or payload.get("title") or "Sentry event",
         "stack_trace": rendered_stack or str(payload.get("exception")) or str(payload),
-        "repository": (payload.get("tags") or {}).get("repository", "SummonShenron/errAgent"),
+        "repository": _resolve_target_repository(payload),
         "metadata": {
             "event_id": payload.get("event_id"),
             "level": payload.get("level"),

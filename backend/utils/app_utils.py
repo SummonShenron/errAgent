@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
 import logging
+import os
 from backend.utils.db_utils import get_db
 logger = logging.getLogger("errAgent Logger")
+
+DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
 async def run_ai_analysis_pipeline(incident_id: str, payload: dict):
     db = get_db()
@@ -32,7 +35,7 @@ async def run_ai_analysis_pipeline(incident_id: str, payload: dict):
         db["remediations"].insert_one({
             "incident_id": incident_id,
             "action_type": "create_pull_request",
-            "target_repo": payload.get("repository", "SummonShenron/errAgent"),
+            "target_repo": payload.get("repository") or DEFAULT_TARGET_REPO,
             "base_branch": "main",
             "head_branch": suggested_branch,
             "pr_title": f"fix(autofix): resolve error in {payload.get('service_name')}",
