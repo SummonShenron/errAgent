@@ -9,6 +9,11 @@ import './index.css';
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 if (!PUBLISHABLE_KEY) {
+  const root = document.getElementById('root');
+  if (root) {
+    root.innerHTML =
+      '<div style="font-family: sans-serif; padding: 24px; color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; margin: 24px;">Missing VITE_CLERK_PUBLISHABLE_KEY in environment variables.</div>';
+  }
   throw new Error('Missing VITE_CLERK_PUBLISHABLE_KEY in environment variables.');
 }
 
