@@ -2,6 +2,7 @@ import os
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timezone
+from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
@@ -17,6 +18,16 @@ logger = logging.getLogger("ErrAgent Logger")
 app = FastAPI(title="errAgent Incident Engine", version="1.0.0")
 
 github_service = GitHubOpsService()
+
+
+def _serialize_mongo_doc(value: Any) -> Any:
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _serialize_mongo_doc(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize_mongo_doc(item) for item in value]
+    return value
 
 # Enable CORS for Frontend development
 app.add_middleware(
@@ -43,9 +54,7 @@ async def list_incidents(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     
     incidents = list(db["incidents"].find({}).sort("created_at", -1))
-    for inc in incidents:
-        inc["_id"] = str(inc["_id"])
-    return incidents
+    return _serialize_mongo_doc(incidents)
 
 
 # --- 3. GET SINGLE INCIDENT DETAILS ---
@@ -67,9 +76,9 @@ async def get_incident_detail(incident_id: str, current_user: dict = Depends(get
     remediation = db["remediations"].find_one({"incident_id": incident_id}) or {}
 
     return {
-        "incident": incident,
-        "analysis": analysis,
-        "remediation": remediation
+        "incident": _serialize_mongo_doc(incident),
+        "analysis": _serialize_mongo_doc(analysis),
+        "remediation": _serialize_mongo_doc(remediation)
     }
 
 
