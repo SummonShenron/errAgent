@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 from bson import ObjectId
-from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
 # Utility imports from your backend/utils directory
@@ -19,6 +19,7 @@ logger = logging.getLogger("ErrAgent Logger")
 app = FastAPI(title="errAgent Incident Engine", version="1.0.0")
 
 github_service = GitHubOpsService()
+SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
 
 
 def _serialize_mongo_doc(value: Any) -> Any:
@@ -29,6 +30,49 @@ def _serialize_mongo_doc(value: Any) -> Any:
     if isinstance(value, list):
         return [_serialize_mongo_doc(item) for item in value]
     return value
+
+
+def _store_incident_and_queue_analysis(
+    db,
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any],
+    actor: str,
+    incident_id: str | None = None,
+) -> str:
+    now = datetime.now(timezone.utc)
+    incident_id = incident_id or f"inc_{int(now.timestamp())}"
+
+    incident_doc = {
+        "_id": incident_id,
+        "service_name": payload.get("service_name", "unknown-service"),
+        "environment": payload.get("environment", "production"),
+        "error_message": payload.get("error_message", "Unhandled Exception"),
+        "stack_trace": payload.get("stack_trace", ""),
+        "repository": payload.get("repository", ""),
+        "status": "open",
+        "metadata": payload.get("metadata", {}),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    db["incidents"].insert_one(incident_doc)
+    db["audit_logs"].insert_one({
+        "incident_id": incident_id,
+        "actor": actor,
+        "action": "INCIDENT_CREATED",
+        "details": {"service_name": incident_doc["service_name"]},
+        "timestamp": now,
+    })
+    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
+    return incident_id
+
+
+def _require_sentry_secret(incoming_secret: str | None):
+    if not SENTRY_WEBHOOK_SECRET:
+        logger.error("SENTRY_WEBHOOK_SECRET is not configured.")
+        raise HTTPException(status_code=500, detail="Webhook configuration error")
+    if incoming_secret != SENTRY_WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 # Enable CORS for Frontend development
 app.add_middleware(
@@ -93,35 +137,12 @@ async def ingest_incident(
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
-
-    now = datetime.now(timezone.utc)
-    incident_id = f"inc_{int(now.timestamp())}"
-
-    incident_doc = {
-        "_id": incident_id,
-        "service_name": payload.get("service_name", "unknown-service"),
-        "environment": payload.get("environment", "production"),
-        "error_message": payload.get("error_message", "Unhandled Exception"),
-        "stack_trace": payload.get("stack_trace", ""),
-        "repository": payload.get("repository", ""),
-        "status": "open",
-        "metadata": payload.get("metadata", {}),
-        "created_at": now,
-        "updated_at": now
-    }
-
-    db["incidents"].insert_one(incident_doc)
-
-    db["audit_logs"].insert_one({
-        "incident_id": incident_id,
-        "actor": current_user.get("username", "INGESTION_WEBHOOK"),
-        "action": "INCIDENT_CREATED",
-        "details": {"service_name": incident_doc["service_name"]},
-        "timestamp": now
-    })
-
-    # AUTOMATIC: Queue AI analysis & hotfix PR drafting
-    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
+    incident_id = _store_incident_and_queue_analysis(
+        db,
+        background_tasks,
+        payload,
+        current_user.get("username", "INGESTION_WEBHOOK"),
+    )
 
     return {"status": "created", "incident_id": incident_id}
 
@@ -223,22 +244,9 @@ async def handle_vercel_log_drain(logs: List[Dict[str, Any]], background_tasks: 
                 "stack_trace": message,
                 "repository": f"SummonShenron/{service_name}"
             }
-            
-            # Re-use your ingestion & Gemini analysis pipeline!
-            now = datetime.now(timezone.utc)
-            incident_id = f"inc_{int(now.timestamp())}"
-            
-            # Store in MongoDB and trigger background analysis
+
             db = get_db()
-            db["incidents"].insert_one({
-                "_id": incident_id,
-                **payload,
-                "status": "open",
-                "created_at": now,
-                "updated_at": now
-            })
-            
-            background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
+            _store_incident_and_queue_analysis(db, background_tasks, payload, "VERCEL_WEBHOOK")
             
     return {"status": "processed"}
 
@@ -261,19 +269,56 @@ async def handle_render_log_drain(payload: Dict[str, Any], background_tasks: Bac
             "stack_trace": log_text,
             "repository": f"SummonShenron/{service_name}"
         }
-        
-        now = datetime.now(timezone.utc)
-        incident_id = f"inc_{int(now.timestamp())}"
-        
+
         db = get_db()
-        db["incidents"].insert_one({
-            "_id": incident_id,
-            **incident_data,
-            "status": "open",
-            "created_at": now,
-            "updated_at": now
-        })
-        
-        background_tasks.add_task(run_ai_analysis_pipeline, incident_id, incident_data)
+        _store_incident_and_queue_analysis(db, background_tasks, incident_data, "RENDER_WEBHOOK")
 
     return {"status": "ok"}
+
+
+# --- Sentry Webhook ---
+@app.post("/api/v1/webhooks/sentry", tags=["Webhooks"])
+async def handle_sentry_webhook(
+    payload: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+    x_webhook_secret: str | None = Header(default=None),
+):
+    """Ingests Sentry webhook payloads using a shared secret rather than Clerk auth."""
+    _require_sentry_secret(x_webhook_secret)
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    exception_values = ((payload.get("exception") or {}).get("values") or [{}])
+    first_exception = exception_values[0] if exception_values else {}
+    stack_frames = ((first_exception.get("stacktrace") or {}).get("frames") or [])
+    rendered_stack = "\n".join(
+        f"{frame.get('filename', 'unknown')}:{frame.get('lineno', '?')} in {frame.get('function', 'unknown')}"
+        for frame in stack_frames[-10:]
+    )
+
+    incident_data = {
+        "service_name": payload.get("project_name") or payload.get("logger") or "sentry-project",
+        "environment": payload.get("environment", "production"),
+        "error_message": first_exception.get("value") or payload.get("message") or payload.get("title") or "Sentry event",
+        "stack_trace": rendered_stack or str(payload.get("exception")) or str(payload),
+        "repository": (payload.get("tags") or {}).get("repository", "SummonShenron/errAgent"),
+        "metadata": {
+            "event_id": payload.get("event_id"),
+            "level": payload.get("level"),
+            "culprit": payload.get("culprit"),
+            "url": payload.get("url"),
+        },
+    }
+
+    incident_id = f"sentry_{payload.get('event_id') or int(datetime.now(timezone.utc).timestamp())}"
+    _store_incident_and_queue_analysis(
+        db,
+        background_tasks,
+        incident_data,
+        "SENTRY_WEBHOOK",
+        incident_id=incident_id,
+    )
+
+    return {"status": "accepted", "incident_id": incident_id}
