@@ -328,7 +328,7 @@ async def handle_machine_ingest(
 ):
     """Generic machine-to-machine incident ingest endpoint secured by shared secret."""
     _require_ingest_secret(x_ingest_secret)
-
+    logger.info(f"called /api/v1/webhooks/ingest with payload: {payload}")
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
