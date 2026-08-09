@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/clerk-react';
 import { useAppUser } from './context/Clerk';
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+
 export default function App() {
   const { principal, getToken } = useAppUser();
   const [incidents, setIncidents] = useState<any[]>([]);
@@ -13,7 +15,7 @@ export default function App() {
         // Fetch Clerk JWT or fallback to guest sandbox token
         const token = (await getToken()) || 'guest-sandbox-token';
 
-        const response = await fetch('http://127.0.0.1:8000/api/v1/incidents', {
+        const response = await fetch(`${API_BASE_URL}/incidents`, {
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
