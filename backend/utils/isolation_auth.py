@@ -2,15 +2,20 @@ import os
 import jwt
 import logging
 import requests
+from pathlib import Path
 from datetime import datetime, timezone
 from fastapi import Request, HTTPException
 from fastapi.security import HTTPBearer
 from backend.utils.db_utils import get_db
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=True)
 
 logger = logging.getLogger("Incident Ops Logger")
 security = HTTPBearer()
 
 _cached_jwks = None
+JWT_CLOCK_SKEW_SECONDS = 60
 
 class MockUser:
     def __init__(self, email: str):
@@ -68,7 +73,12 @@ async def get_current_user(request: Request) -> dict:
         public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
         
         # Verify and decode
-        payload = jwt.decode(token, public_key, algorithms=["RS256"])
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            leeway=JWT_CLOCK_SKEW_SECONDS,
+        )
         
         # Ensure 'username' exists for compatibility with rbac.py
         if "username" not in payload:

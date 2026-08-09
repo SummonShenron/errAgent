@@ -2,11 +2,13 @@ import os
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, Depends, status
+from bson import ObjectId
+from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
 # Utility imports from your backend/utils directory
 from backend.utils.db_utils import get_db
+from backend.utils.app_utils import run_ai_analysis_pipeline
 from backend.utils.isolation_auth import get_current_user
 from backend.services.github_service import GitHubOpsService
 from backend.middleware.rbac import require_role
@@ -17,6 +19,16 @@ logger = logging.getLogger("ErrAgent Logger")
 app = FastAPI(title="errAgent Incident Engine", version="1.0.0")
 
 github_service = GitHubOpsService()
+
+
+def _serialize_mongo_doc(value: Any) -> Any:
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _serialize_mongo_doc(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize_mongo_doc(item) for item in value]
+    return value
 
 # Enable CORS for Frontend development
 app.add_middleware(
@@ -43,9 +55,7 @@ async def list_incidents(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     
     incidents = list(db["incidents"].find({}).sort("created_at", -1))
-    for inc in incidents:
-        inc["_id"] = str(inc["_id"])
-    return incidents
+    return _serialize_mongo_doc(incidents)
 
 
 # --- 3. GET SINGLE INCIDENT DETAILS ---
@@ -67,19 +77,19 @@ async def get_incident_detail(incident_id: str, current_user: dict = Depends(get
     remediation = db["remediations"].find_one({"incident_id": incident_id}) or {}
 
     return {
-        "incident": incident,
-        "analysis": analysis,
-        "remediation": remediation
+        "incident": _serialize_mongo_doc(incident),
+        "analysis": _serialize_mongo_doc(analysis),
+        "remediation": _serialize_mongo_doc(remediation)
     }
 
 
 # --- 4. INGEST NEW ERROR INCIDENT ---
 @app.post("/api/v1/incidents", status_code=status.HTTP_201_CREATED, tags=["Incidents"])
-async def ingest_incident(payload: Dict[str, Any], current_user: dict = Depends(get_current_user)):
-    """
-    Webhook / Ingestion endpoint for logging incoming application crashes.
-    Called by external monitoring (Sentry, Datadog, or app logger).
-    """
+async def ingest_incident(
+    payload: Dict[str, Any], 
+    background_tasks: BackgroundTasks,  # Injected background task runner
+    current_user: dict = Depends(get_current_user)
+):
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
@@ -102,7 +112,6 @@ async def ingest_incident(payload: Dict[str, Any], current_user: dict = Depends(
 
     db["incidents"].insert_one(incident_doc)
 
-    # Log audit entry
     db["audit_logs"].insert_one({
         "incident_id": incident_id,
         "actor": current_user.get("username", "INGESTION_WEBHOOK"),
@@ -110,6 +119,9 @@ async def ingest_incident(payload: Dict[str, Any], current_user: dict = Depends(
         "details": {"service_name": incident_doc["service_name"]},
         "timestamp": now
     })
+
+    # AUTOMATIC: Queue AI analysis & hotfix PR drafting
+    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
 
     return {"status": "created", "incident_id": incident_id}
 
@@ -151,7 +163,7 @@ async def approve_and_execute_hotfix(
 
     logger.info(f"Opening GitHub PR for {repo} ({head} -> {base})...")
     
-    # ✅ Added 'await' here
+    # Added 'await' here
     gh_response = await github_service.create_pull_request(
         repo=repo, title=title, body=body, head=head, base=base
     )
@@ -189,3 +201,79 @@ async def approve_and_execute_hotfix(
         "message": "Hotfix Pull Request opened successfully!",
         "pr_url": pr_url
     }
+
+# --- Vercel Webhook ---
+@app.post("/api/v1/webhooks/vercel", tags=["Webhooks"])
+async def handle_vercel_log_drain(logs: List[Dict[str, Any]], background_tasks: BackgroundTasks):
+    """
+    Ingests raw log streams directly from Vercel Log Drains.
+    Zero app code modifications needed!
+    """
+    for log in logs:
+        message = log.get("message", "")
+        
+        # Check if the log contains an unhandled exception or error
+        if log.get("type") == "stderr" or "Traceback" in message or "ERROR:" in message:
+            service_name = log.get("source", "vercel-app")
+            
+            payload = {
+                "service_name": service_name,
+                "environment": "production",
+                "error_message": message.split("\n")[-1] if "\n" in message else message,
+                "stack_trace": message,
+                "repository": f"SummonShenron/{service_name}"
+            }
+            
+            # Re-use your ingestion & Gemini analysis pipeline!
+            now = datetime.now(timezone.utc)
+            incident_id = f"inc_{int(now.timestamp())}"
+            
+            # Store in MongoDB and trigger background analysis
+            db = get_db()
+            db["incidents"].insert_one({
+                "_id": incident_id,
+                **payload,
+                "status": "open",
+                "created_at": now,
+                "updated_at": now
+            })
+            
+            background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
+            
+    return {"status": "processed"}
+
+# --- Render Webhook ---
+@app.post("/api/v1/webhooks/render", tags=["Webhooks"])
+async def handle_render_log_drain(payload: Dict[str, Any], background_tasks: BackgroundTasks):
+    """
+    Ingests raw log streams from Render Log Drains.
+    """
+    # Render sends log lines in payload["logs"] or payload["message"]
+    log_text = payload.get("message", "") or str(payload)
+    
+    if "Traceback" in log_text or "ERROR" in log_text or "CRITICAL" in log_text:
+        service_name = payload.get("service", {}).get("name", "render-fastapi-service")
+        
+        incident_data = {
+            "service_name": service_name,
+            "environment": "production",
+            "error_message": log_text.split("\n")[-1] if "\n" in log_text else "Render Runtime Error",
+            "stack_trace": log_text,
+            "repository": f"SummonShenron/{service_name}"
+        }
+        
+        now = datetime.now(timezone.utc)
+        incident_id = f"inc_{int(now.timestamp())}"
+        
+        db = get_db()
+        db["incidents"].insert_one({
+            "_id": incident_id,
+            **incident_data,
+            "status": "open",
+            "created_at": now,
+            "updated_at": now
+        })
+        
+        background_tasks.add_task(run_ai_analysis_pipeline, incident_id, incident_data)
+
+    return {"status": "ok"}

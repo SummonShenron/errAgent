@@ -2,12 +2,66 @@ import React, { useEffect, useState } from 'react';
 import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/clerk-react';
 import { useAppUser } from './context/Clerk';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || (isLocalHost ? 'http://127.0.0.1:8000/api/v1' : '/api/v1');
+
+type Incident = {
+  _id: string;
+  service_name?: string;
+  status?: string;
+  environment?: string;
+  error_message?: string;
+  stack_trace?: string;
+  repository?: string;
+  created_at?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type IncidentAnalysis = {
+  root_cause?: string;
+  root_cause_summary?: string;
+  summary?: string;
+  confidence_score?: number;
+  severity?: string;
+  suggested_fix?: string;
+};
+
+type IncidentRemediation = {
+  status?: string;
+  target_repo?: string;
+  base_branch?: string;
+  head_branch?: string;
+  pr_title?: string;
+  pr_body?: string;
+};
+
+type IncidentDetailResponse = {
+  incident?: Incident;
+  analysis?: IncidentAnalysis;
+  remediation?: IncidentRemediation;
+};
+
+const statusTone: Record<string, string> = {
+  open: 'status-open',
+  analyzing: 'status-analyzing',
+  fix_proposed: 'status-fix',
+  resolved: 'status-resolved',
+  closed: 'status-closed',
+};
 
 export default function App() {
   const { principal, getToken } = useAppUser();
-  const [incidents, setIncidents] = useState<any[]>([]);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
+  const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<IncidentDetailResponse | null>(null);
+  const [detailLoading, setDetailLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
+
+  const selectedIncident = incidents.find((inc) => inc._id === selectedIncidentId) || incidents[0] || null;
+  const selectedIncidentFromDetail = selectedIncidentDetail?.incident || selectedIncident;
+  const selectedAnalysis = selectedIncidentDetail?.analysis || null;
+  const selectedRemediation = selectedIncidentDetail?.remediation || null;
 
   useEffect(() => {
     async function fetchIncidents() {
@@ -25,6 +79,9 @@ export default function App() {
         if (response.ok) {
           const data = await response.json();
           setIncidents(data);
+          if (data.length > 0) {
+            setSelectedIncidentId(data[0]._id);
+          }
         }
       } catch (err) {
         console.error('Error fetching incidents:', err);
@@ -36,12 +93,48 @@ export default function App() {
     fetchIncidents();
   }, [getToken]);
 
+  useEffect(() => {
+    async function fetchIncidentDetail() {
+      if (!selectedIncidentId) {
+        setSelectedIncidentDetail(null);
+        return;
+      }
+
+      try {
+        setDetailLoading(true);
+        const token = (await getToken()) || 'guest-sandbox-token';
+        const response = await fetch(`${API_BASE_URL}/incidents/${selectedIncidentId}`, {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        if (response.ok) {
+          const data = (await response.json()) as IncidentDetailResponse;
+          setSelectedIncidentDetail(data);
+        } else {
+          setSelectedIncidentDetail(null);
+        }
+      } catch (err) {
+        console.error('Error fetching incident details:', err);
+        setSelectedIncidentDetail(null);
+      } finally {
+        setDetailLoading(false);
+      }
+    }
+
+    fetchIncidentDetail();
+  }, [selectedIncidentId, getToken]);
+
   return (
-    <div style={{ fontFamily: 'sans-serif', padding: '2rem', maxWidth: '800px', margin: '0 auto' }}>
-      {/* Header & Auth Controls */}
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
-        <h2>errAgent Dashboard</h2>
+    <div className="app-shell">
+      <header className="topbar">
         <div>
+          <p className="eyebrow">Incident Operations Console</p>
+          <h1>errAgent Dashboard</h1>
+        </div>
+        <div className="auth-chip">
           <SignedIn>
             <UserButton />
           </SignedIn>
@@ -51,42 +144,132 @@ export default function App() {
         </div>
       </header>
 
-      {/* Session Info */}
-      <section style={{ background: '#f4f4f5', padding: '1rem', borderRadius: '8px', marginBottom: '2rem' }}>
-        <p style={{ margin: 0 }}>
-          <strong>Active Session Principal:</strong> {principal || 'Guest Sandbox Mode'}
-        </p>
+      <section className="session-band">
+        <span className="session-label">Active Session Principal</span>
+        <span className="session-value">{principal || 'Guest Sandbox Mode'}</span>
       </section>
 
-      {/* Incidents List Placeholder */}
-      <section>
-        <h3>Ingested Incidents</h3>
-        {loading ? (
-          <p>Loading incidents from backend...</p>
-        ) : incidents.length === 0 ? (
-          <p>No incidents found. Run `seed_db.py` on backend or trigger an error webhook!</p>
-        ) : (
-          <ul style={{ listStyle: 'none', padding: 0 }}>
-            {incidents.map((inc) => (
-              <li
-                key={inc._id}
-                style={{
-                  border: '1px solid #e4e4e7',
-                  padding: '1rem',
-                  borderRadius: '6px',
-                  marginBottom: '0.75rem',
-                }}
-              >
-                <div style={{ fontWeight: 'bold' }}>
-                  [{inc.status?.toUpperCase()}] {inc.service_name}
+      <main className="dashboard-grid">
+        <section className="panel">
+          <div className="panel-header">
+            <h2>Ingested Incidents</h2>
+            <span className="count-pill">{incidents.length}</span>
+          </div>
+
+          {loading ? (
+            <p className="muted">Loading incidents from backend...</p>
+          ) : incidents.length === 0 ? (
+            <p className="muted">No incidents found. Run seed_db.py on backend or trigger an error webhook.</p>
+          ) : (
+            <ul className="incident-list">
+              {incidents.map((inc) => {
+                const tone = statusTone[inc.status || ''] || 'status-open';
+                const isActive = selectedIncident?._id === inc._id;
+
+                return (
+                  <li key={inc._id}>
+                    <button
+                      type="button"
+                      className={`incident-card ${isActive ? 'active' : ''}`}
+                      onClick={() => setSelectedIncidentId(inc._id)}
+                    >
+                      <div className="incident-card-top">
+                        <span className={`status-chip ${tone}`}>{(inc.status || 'open').replace('_', ' ').toUpperCase()}</span>
+                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>
+                      </div>
+                      <p className="incident-error">{inc.error_message || 'Unhandled exception'}</p>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        <section className="panel detail-panel">
+          <div className="panel-header">
+            <h2>Incident Details</h2>
+          </div>
+
+          {!selectedIncident ? (
+            <p className="muted">Pick an incident to see full context.</p>
+          ) : (
+            <>
+              {detailLoading && <p className="muted">Refreshing analysis and remediation data...</p>}
+
+              <div className="detail-grid">
+                <div>
+                  <label>Incident ID</label>
+                  <p>{selectedIncidentFromDetail?._id || 'n/a'}</p>
                 </div>
-                <div style={{ color: '#ef4444', fontSize: '0.9rem', marginTop: '0.25rem' }}>
-                  {inc.error_message}
+                <div>
+                  <label>Service</label>
+                  <p>{selectedIncidentFromDetail?.service_name || 'unknown-service'}</p>
                 </div>
-              </li>
-            ))}
-          </ul>
-        )}
+                <div>
+                  <label>Environment</label>
+                  <p>{selectedIncidentFromDetail?.environment || 'production'}</p>
+                </div>
+                <div>
+                  <label>Status</label>
+                  <p>{(selectedIncidentFromDetail?.status || 'open').replace('_', ' ')}</p>
+                </div>
+                <div>
+                  <label>Repository</label>
+                  <p>{selectedIncidentFromDetail?.repository || selectedRemediation?.target_repo || 'n/a'}</p>
+                </div>
+                <div>
+                  <label>Created At</label>
+                  <p>{selectedIncidentFromDetail?.created_at ? new Date(selectedIncidentFromDetail.created_at).toLocaleString() : 'n/a'}</p>
+                </div>
+              </div>
+
+              <div className="detail-block">
+                <label>Error Message</label>
+                <p>{selectedIncidentFromDetail?.error_message || 'No message available.'}</p>
+              </div>
+
+              <div className="detail-block">
+                <label>Stack Trace</label>
+                <pre>{selectedIncidentFromDetail?.stack_trace || 'No stack trace captured.'}</pre>
+              </div>
+
+              <div className="detail-block">
+                <label>AI Root Cause Analysis</label>
+                <p>{selectedAnalysis?.root_cause_summary || selectedAnalysis?.root_cause || selectedAnalysis?.summary || 'No analysis generated yet.'}</p>
+              </div>
+
+              <div className="detail-grid">
+                <div>
+                  <label>Confidence Score</label>
+                  <p>{typeof selectedAnalysis?.confidence_score === 'number' ? `${Math.round(selectedAnalysis.confidence_score * 100)}%` : 'n/a'}</p>
+                </div>
+                <div>
+                  <label>Severity</label>
+                  <p>{selectedAnalysis?.severity || 'n/a'}</p>
+                </div>
+              </div>
+
+              <div className="detail-block">
+                <label>Suggested Fix</label>
+                <p>{selectedAnalysis?.suggested_fix || 'Waiting for LLM remediation guidance.'}</p>
+              </div>
+
+              <div className="detail-block">
+                <label>Proposed PR</label>
+                <p><strong>Title:</strong> {selectedRemediation?.pr_title || 'No PR draft yet.'}</p>
+                <p><strong>Status:</strong> {(selectedRemediation?.status || 'not_created').replace('_', ' ')}</p>
+                <p><strong>Branches:</strong> {(selectedRemediation?.head_branch || 'n/a')} {'->'} {(selectedRemediation?.base_branch || 'n/a')}</p>
+                <p><strong>Repository:</strong> {selectedRemediation?.target_repo || selectedIncidentFromDetail?.repository || 'n/a'}</p>
+                <pre>{selectedRemediation?.pr_body || 'No PR body generated yet.'}</pre>
+              </div>
+            </>
+          )}
+        </section>
+      </main>
+
+      <section className="footer-note">
+        <p>Live incident feed connected to your backend API and Clerk session.</p>
       </section>
     </div>
   );

@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "node ./node_modules/vite/bin/vite.js",
+    "dev:8080": "node ./node_modules/vite/bin/vite.js --port 8080 --strictPort",
+    "dev:reset": "node ./node_modules/vite/bin/vite.js --force --port 8080 --strictPort",
     "build": "node ./node_modules/vite/bin/vite.js build",
     "preview": "node ./node_modules/vite/bin/vite.js preview"
   },
