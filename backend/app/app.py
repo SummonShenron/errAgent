@@ -1,4 +1,5 @@
 import os
+import hmac
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timezone
@@ -20,7 +21,8 @@ app = FastAPI(title="errAgent Incident Engine", version="1.0.0")
 
 github_service = GitHubOpsService()
 SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
-INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET")
+# Backward-compatible legacy shared secret for existing app-to-app clients.
+INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET") or os.getenv("ERRAGENT_INGEST_SECRET")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
 
@@ -77,12 +79,46 @@ def _require_sentry_secret(incoming_secret: str | None):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 
-def _require_ingest_secret(incoming_secret: str | None):
+def _authenticate_ingest_client(db, incoming_secret: str | None, app_id: str | None) -> Dict[str, Any]:
+    """
+    Returns ingestion context:
+    {
+      "actor": str,
+      "app_id": str | None,
+      "default_repo": str | None,
+    }
+
+    Behavior:
+    - If x-app-id is provided, validate against ingest_clients collection.
+    - If no x-app-id, fallback to legacy shared secret for backward compatibility.
+    """
+    if not incoming_secret:
+        raise HTTPException(status_code=401, detail="Missing ingest secret")
+
+    if app_id:
+        client = db["ingest_clients"].find_one({"app_id": app_id, "enabled": True}) or {}
+        expected_secret = client.get("secret")
+        if not expected_secret or not hmac.compare_digest(str(incoming_secret), str(expected_secret)):
+            raise HTTPException(status_code=401, detail="Invalid ingest credentials")
+
+        return {
+            "actor": f"MACHINE_INGEST:{app_id}",
+            "app_id": app_id,
+            "default_repo": client.get("default_repo"),
+        }
+
     if not INGEST_WEBHOOK_SECRET:
-        logger.error("INGEST_WEBHOOK_SECRET is not configured.")
+        logger.error("INGEST_WEBHOOK_SECRET (or ERRAGENT_INGEST_SECRET) is not configured.")
         raise HTTPException(status_code=500, detail="Ingest configuration error")
-    if incoming_secret != INGEST_WEBHOOK_SECRET:
+
+    if not hmac.compare_digest(str(incoming_secret), str(INGEST_WEBHOOK_SECRET)):
         raise HTTPException(status_code=401, detail="Invalid ingest secret")
+
+    return {
+        "actor": "MACHINE_INGEST",
+        "app_id": None,
+        "default_repo": None,
+    }
 
 
 def _extract_repository_from_tag_collection(tag_collection: Any) -> str | None:
@@ -109,10 +145,18 @@ def _extract_repository_from_tag_collection(tag_collection: Any) -> str | None:
     return None
 
 
-def _lookup_repo_from_service_registry(db, service_name: str) -> str | None:
+def _lookup_repo_from_service_registry(db, service_name: str, app_id: str | None = None) -> str | None:
     if not service_name:
         return None
-    registry_entry = db["service_registry"].find_one({"service_name": service_name}) or {}
+
+    # Prefer app-specific service mapping when app_id is present.
+    registry_entry = {}
+    if app_id:
+        registry_entry = db["service_registry"].find_one({"service_name": service_name, "app_id": app_id}) or {}
+
+    if not registry_entry:
+        registry_entry = db["service_registry"].find_one({"service_name": service_name}) or {}
+
     for key in ("target_repo", "repository", "repo"):
         value = registry_entry.get(key)
         if isinstance(value, str) and value.strip():
@@ -120,7 +164,12 @@ def _lookup_repo_from_service_registry(db, service_name: str) -> str | None:
     return None
 
 
-def _resolve_target_repository(db, payload: Dict[str, Any]) -> str:
+def _resolve_target_repository(
+    db,
+    payload: Dict[str, Any],
+    app_id: str | None = None,
+    app_default_repo: str | None = None,
+) -> str:
     direct_repo = payload.get("repository")
     if isinstance(direct_repo, str) and direct_repo.strip():
         return direct_repo.strip()
@@ -139,9 +188,12 @@ def _resolve_target_repository(db, payload: Dict[str, Any]) -> str:
 
     service_name = payload.get("service_name") or payload.get("project_name") or payload.get("logger")
     if isinstance(service_name, str):
-        resolved_from_registry = _lookup_repo_from_service_registry(db, service_name.strip())
+        resolved_from_registry = _lookup_repo_from_service_registry(db, service_name.strip(), app_id=app_id)
         if resolved_from_registry:
             return resolved_from_registry
+
+    if isinstance(app_default_repo, str) and app_default_repo.strip():
+        return app_default_repo.strip()
 
     return DEFAULT_TARGET_REPO
 
@@ -152,6 +204,8 @@ def _ingest_machine_payload(
     payload: Dict[str, Any],
     actor: str,
     incident_id: str | None = None,
+    app_id: str | None = None,
+    app_default_repo: str | None = None,
 ) -> str:
     normalized_payload = dict(payload)
     normalized_payload["service_name"] = (
@@ -160,7 +214,17 @@ def _ingest_machine_payload(
         or normalized_payload.get("logger")
         or "unknown-service"
     )
-    normalized_payload["repository"] = _resolve_target_repository(db, normalized_payload)
+    normalized_payload["repository"] = _resolve_target_repository(
+        db,
+        normalized_payload,
+        app_id=app_id,
+        app_default_repo=app_default_repo,
+    )
+    if app_id:
+        metadata = normalized_payload.get("metadata") or {}
+        if isinstance(metadata, dict):
+            metadata["app_id"] = app_id
+            normalized_payload["metadata"] = metadata
     return _store_incident_and_queue_analysis(
         db,
         background_tasks,
@@ -325,15 +389,28 @@ async def handle_machine_ingest(
     payload: Dict[str, Any],
     background_tasks: BackgroundTasks,
     x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
 ):
     """Generic machine-to-machine incident ingest endpoint secured by shared secret."""
-    _require_ingest_secret(x_ingest_secret)
-    logger.info(f"called /api/v1/webhooks/ingest with payload: {payload}")
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
-    incident_id = _ingest_machine_payload(db, background_tasks, payload, "MACHINE_INGEST")
+    ingest_context = _authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    logger.info(
+        "called /api/v1/webhooks/ingest app_id=%s payload=%s",
+        ingest_context.get("app_id"),
+        payload,
+    )
+
+    incident_id = _ingest_machine_payload(
+        db,
+        background_tasks,
+        payload,
+        ingest_context["actor"],
+        app_id=ingest_context.get("app_id"),
+        app_default_repo=ingest_context.get("default_repo"),
+    )
     return {"status": "accepted", "incident_id": incident_id}
 
 # --- Vercel Webhook ---
