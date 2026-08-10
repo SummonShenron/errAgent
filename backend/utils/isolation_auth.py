@@ -44,7 +44,10 @@ def get_clerk_public_key():
     return _cached_jwks
 
 async def get_current_user(request: Request) -> dict:
-    """Extracts and validates the Bearer JWT or handles the guest sandbox bypass."""
+    """Extracts and validates the Bearer JWT or handles the guest sandbox bypass,
+
+    then auto-provisions or retrieves the user's RBAC profile from MongoDB 'directory'.
+    """
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -54,42 +57,77 @@ async def get_current_user(request: Request) -> dict:
     # 1. GUEST BYPASS: Check for sandbox token first
     if token == "guest-sandbox-token" and GUEST_ACCESS_ENABLED:
         logger.info("Guest session detected. Bypassing JWT verification.")
-        return {
-            "sub": "guest-recruiter@example.com",
+        payload = {
+            "sub": "user_guest_sandbox_123",
             "email": "guest@example.com",
-            "username": "guest-recruiter@example.com"
+            "username": "guest-recruiter@example.com",
+            "full_name": "Guest Recruiter"
         }
+    else:
+        # 2. Clerk JWT verification logic
+        try:
+            # Get header to find the 'kid' (Key ID)
+            header = jwt.get_unverified_header(token)
+            jwks = get_clerk_public_key()
+            
+            # Find matching key
+            key_data = next((k for k in jwks['keys'] if k['kid'] == header['kid']), None)
+            if not key_data:
+                raise HTTPException(status_code=401, detail="Invalid token key ID")
 
-    # 2. Clerk JWT verification logic
-    try:
-        # Get header to find the 'kid' (Key ID)
-        header = jwt.get_unverified_header(token)
-        jwks = get_clerk_public_key()
-        
-        # Find matching key
-        key_data = next((k for k in jwks['keys'] if k['kid'] == header['kid']), None)
-        if not key_data:
-            raise HTTPException(status_code=401, detail="Invalid token key ID")
+            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+            
+            # Verify and decode
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=["RS256"],
+                leeway=JWT_CLOCK_SKEW_SECONDS,
+            )
+            
+            # Ensure 'username' exists for compatibility with rbac.py
+            if "username" not in payload:
+                payload["username"] = payload.get("sub")
 
-        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
-        
-        # Verify and decode
-        payload = jwt.decode(
-            token,
-            public_key,
-            algorithms=["RS256"],
-            leeway=JWT_CLOCK_SKEW_SECONDS,
-        )
-        
-        # Ensure 'username' exists for compatibility with rbac.py
-        if "username" not in payload:
-            payload["username"] = payload.get("sub")
+        except Exception as e:
+            logger.error(f"Manual JWT verification failed: {e}")
+            raise HTTPException(status_code=401, detail="Authentication failed")
 
-        return payload 
-        
-    except Exception as e:
-        logger.error(f"Manual JWT verification failed: {e}")
-        raise HTTPException(status_code=401, detail="Authentication failed")
+    # 3. DIRECTORY AUTO-PROVISIONING & RBAC SYNC
+    db = get_db()
+    if db is not None:
+        clerk_id = payload.get("sub")
+        email = payload.get("email", f"{clerk_id}@example.com")
+
+        # Search for existing user profile in directory
+        user_doc = db["directory"].find_one({
+            "$or": [
+                {"clerk_id": clerk_id},
+                {"email": email}
+            ]
+        })
+
+        # Auto-provision if user doesn't exist yet
+        if not user_doc:
+            logger.info(f"Auto-provisioning new user into directory for clerk_id={clerk_id}")
+            user_doc = {
+                "clerk_id": clerk_id,
+                "email": email,
+                "full_name": payload.get("full_name") or payload.get("name") or "errAgent Operator",
+                "groups": ["Developers"], 
+                "created_at": datetime.now(timezone.utc)
+            }
+            res = db["directory"].insert_one(user_doc)
+            user_doc["_id"] = str(res.inserted_id)
+        else:
+            user_doc["_id"] = str(user_doc["_id"])
+
+        # Attach directory DB fields (groups, db id) directly onto returned user payload
+        payload["groups"] = user_doc.get("groups", [])
+        payload["directory_id"] = user_doc.get("_id")
+        payload["full_name"] = user_doc.get("full_name")
+
+    return payload
 
 def record_login_event(user_id: str, email: str, is_guest: bool = False, ip_address: str = None):
     """Writes a single login document to MongoDB."""

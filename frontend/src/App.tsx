@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/clerk-react';
 import { useAppUser } from './context/Clerk';
 import { CodeDiffView } from './components/CodeDiffView';
@@ -54,18 +54,25 @@ const statusTone: Record<string, string> = {
 
 export default function App() {
   const { principal, getToken, isSignedIn } = useAppUser();
+  
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<IncidentDetailResponse | null>(null);
+  
   const [detailLoading, setDetailLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
+  
+  const [isApproving, setIsApproving] = useState(false);
+  const [reanalyzeInstructions, setReanalyzeInstructions] = useState('');
+  const [isReanalyzing, setIsReanalyzing] = useState(false);
+
   const selectedIncident = incidents.find((inc) => inc._id === selectedIncidentId) || incidents[0] || null;
   const selectedIncidentFromDetail = selectedIncidentDetail?.incident || selectedIncident;
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
-  const [isApproving, setIsApproving] = useState(false);
-  const [reanalyzeInstructions, setReanalyzeInstructions] = useState('');
-  const [isReanalyzing, setIsReanalyzing] = useState(false);
+
+  // --- ACTIONS ---
+
   const handleReanalyzeWithInstructions = async (incidentId: string) => {
     if (!reanalyzeInstructions.trim()) {
       alert("Please provide instructions first!");
@@ -86,7 +93,7 @@ export default function App() {
       if (response.ok) {
         alert(`Re-analysis triggered! Check back in a few seconds.`);
         setReanalyzeInstructions(''); // Clear input
-        // Optionally reset view or status locally
+        await fetchIncidents(); // Instant UI refetch
       } else {
         const errData = await response.json().catch(() => ({}));
         alert(`Failed to trigger re-analysis: ${errData.detail || response.statusText}`);
@@ -98,6 +105,7 @@ export default function App() {
       setIsReanalyzing(false);
     }
   };
+
   const handleApproveHotfix = async (incidentId: string) => {
     setIsApproving(true);
     try {
@@ -114,12 +122,14 @@ export default function App() {
       if (response.ok) {
         const data = await response.json();
         alert(`Hotfix Approved! GitHub PR Created: ${data.pr_url || 'Success'}`);   
-        // Update local state to reflect resolved status
+        
+        // Optimistic local update
         setIncidents((prev) =>
           prev.map((inc) =>
             inc._id === incidentId ? { ...inc, status: 'resolved' } : inc
           )
         );
+        await fetchIncidents(); // Instant UI refetch
       } else {
         const errData = await response.json().catch(() => ({}));
         alert(`Failed to approve hotfix: ${errData.detail || response.statusText}`);
@@ -131,6 +141,7 @@ export default function App() {
       setIsApproving(false);
     }
   };
+
   const handleDismiss = async (incidentId: string, e?: React.MouseEvent) => {
     // Prevent event bubbling if clicked inside incident card button
     if (e) e.stopPropagation();
@@ -161,42 +172,59 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    async function fetchIncidents() {
-      if (!isSignedIn) {
-        setIncidents([]);
-        setSelectedIncidentId(null);
-        setLoading(false);
-        return;
-      }
-      try {
-        const token = await getToken();
-        if (!token) {
-          setLoading(false);
-          return;
+  // --- DATA FETCHING & POLLING ---
+
+  const fetchIncidents = useCallback(async () => {
+    if (!isSignedIn) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+
+      const res = await fetch(`${API_BASE_URL}/incidents`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setIncidents(data);
+        
+        // Auto-select the first incident if none is selected yet or if the selected one was removed
+        if (data.length > 0) {
+          setSelectedIncidentId((prevId) => {
+            const currentStillExists = data.some((inc: Incident) => inc._id === prevId);
+            return currentStillExists ? prevId : data[0]._id;
+          });
         }
-        const response = await fetch(`${API_BASE_URL}/incidents`, {
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-        });
-        if (response.ok) {
-          const data = await response.json();
-          setIncidents(data);
-          if (data.length > 0) {
-            setSelectedIncidentId(data[0]._id);
-          }
-        }
-      } catch (err) {
-        console.error('Error fetching incidents:', err);
-      } finally {
-        setLoading(false);
       }
+    } catch (err) {
+      console.error('Error polling incidents:', err);
+    } finally {
+      setLoading(false);
     }
-    fetchIncidents();
   }, [getToken, isSignedIn]);
 
+  // Unified Polling Loop
+  useEffect(() => {
+    if (!isSignedIn) {
+      setIncidents([]);
+      setSelectedIncidentId(null);
+      setLoading(false);
+      return;
+    }
+
+    // Fetch immediately on initial mount
+    fetchIncidents();
+
+    // Set up 4-second polling loop
+    const intervalId = setInterval(() => {
+      fetchIncidents();
+    }, 4000);
+
+    // Clean up interval when component unmounts
+    return () => clearInterval(intervalId);
+  }, [fetchIncidents, isSignedIn]);
+
+  // Fetch Incident Details when selection changes
   useEffect(() => {
     async function fetchIncidentDetail() {
       if (!isSignedIn || !selectedIncidentId) {
@@ -232,6 +260,8 @@ export default function App() {
     }
     fetchIncidentDetail();
   }, [selectedIncidentId, getToken, isSignedIn]);
+
+  // --- RENDER ---
 
   if (!isSignedIn) {
     return (
@@ -294,7 +324,7 @@ export default function App() {
                     <div className={`incident-card ${isActive ? 'active' : ''}`} onClick={() => setSelectedIncidentId(inc._id)}>
                       <div className="incident-card-top">
                         <span className={`status-chip ${tone}`}>{(inc.status || 'open').replace('_', ' ').toUpperCase()}</span>
-                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>           
+                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>          
                         {/* Dismiss Button */}
                         <button
                           type="button"
@@ -432,7 +462,7 @@ export default function App() {
                       transition: 'background-color 0.2s ease',
                     }}
                   >
-                    {isReanalyzing ? '⏳ Re-running Gemini...' : '🤖 Regenerate PR Draft'}
+                    {isReanalyzing ? 'Re-running Gemini...' : 'Regenerate PR Draft'}
                   </button>
                 </div>
               )}
