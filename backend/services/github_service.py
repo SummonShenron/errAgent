@@ -119,3 +119,13 @@ class GitHubOpsService:
         async with httpx.AsyncClient() as client:
             res = await client.post(url, headers=self.headers, json=payload)
             return {"status_code": res.status_code, "data": res.json()}
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    async def merge_pull_request(self, repo: str, pull_number: int, commit_message: str = "Auto-merged hotfix by errAgent") -> dict:
+        """Merges an open pull request automatically."""
+        url = f"{self.api_base}/repos/{repo}/pulls/{pull_number}/merge"
+        payload = {"commit_message": commit_message, "merge_method": "merge"}
+        
+        async with httpx.AsyncClient() as client:
+            res = await client.put(url, headers=self.headers, json=payload)
+            return {"status_code": res.status_code, "data": res.json()}

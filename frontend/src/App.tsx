@@ -36,6 +36,10 @@ type IncidentRemediation = {
   pr_title?: string;
   pr_body?: string;
   code_patch?: string;
+  pr_url?: string;
+  pr_number?: number;
+  approved_by?: string;
+  updated_at?: string;
 };
 
 type IncidentDetailResponse = {
@@ -54,25 +58,47 @@ const statusTone: Record<string, string> = {
 
 export default function App() {
   const { principal, getToken, isSignedIn } = useAppUser();
-  
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<IncidentDetailResponse | null>(null);
-  
   const [detailLoading, setDetailLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
-  
   const [isApproving, setIsApproving] = useState(false);
   const [reanalyzeInstructions, setReanalyzeInstructions] = useState('');
   const [isReanalyzing, setIsReanalyzing] = useState(false);
-
   const selectedIncident = incidents.find((inc) => inc._id === selectedIncidentId) || incidents[0] || null;
   const selectedIncidentFromDetail = selectedIncidentDetail?.incident || selectedIncident;
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
-
+  const [isMerging, setIsMerging] = useState(false);
   // --- ACTIONS ---
+  const handleMergeHotfix = async (incidentId: string) => {
+    setIsMerging(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
 
+      const response = await fetch(`${API_BASE_URL}/incidents/${incidentId}/merge-hotfix`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (response.ok) {
+        alert(`Success! Hotfix merged into main branch.`);
+        await fetchIncidents();
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        alert(`Failed to merge: ${errData.detail || response.statusText}`);
+      }
+    } catch (err) {
+      console.error('Error merging PR:', err);
+      alert('An error occurred during merge.');
+    } finally {
+      setIsMerging(false);
+    }
+  };
   const handleReanalyzeWithInstructions = async (incidentId: string) => {
     if (!reanalyzeInstructions.trim()) {
       alert("Please provide instructions first!");
@@ -474,30 +500,63 @@ export default function App() {
                 
                 <pre>{selectedRemediation?.pr_body || 'No PR body generated yet.'}</pre>
               </div>
-              {selectedIncident?.status === 'fix_proposed' && (
-                <div className="proposed-pr-container" style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #333' }}>
-                  <button
-                    type="button"
-                    className="approve-btn"
-                    disabled={isApproving}
-                    onClick={() => handleApproveHotfix(selectedIncident._id)}
-                    style={{
-                      width: '100%',
-                      padding: '0.75rem 1.25rem',
-                      backgroundColor: '#10b981', // Success green
-                      color: '#ffffff',
-                      border: 'none',
-                      borderRadius: '6px',
-                      fontWeight: 'bold',
-                      fontSize: '1rem',
-                      cursor: isApproving ? 'not-allowed' : 'pointer',
-                      opacity: isApproving ? 0.7 : 1,
-                      transition: 'background-color 0.2s ease',
-                    }}
-                  >
-                    {isApproving ? 'Opening GitHub Pull Request...' : 'Approve & Create GitHub PR'}
-                  </button>
+              {selectedRemediation?.pr_url ? (
+                <div className="pr-actions-container" style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #333' }}>
+                  <p style={{ marginBottom: '0.75rem', color: '#10b981', fontWeight: 'bold' }}>
+                    ✓ Pull Request Open on GitHub
+                  </p>
+                  <div style={{ display: 'flex', gap: '10px' }}>
+                    <a 
+                      href={selectedRemediation.pr_url} 
+                      target="_blank" 
+                      rel="noreferrer"
+                      className="secondary-action"
+                      style={{ 
+                        flex: 1, textAlign: 'center', padding: '0.75rem', background: '#21262d', 
+                        color: '#c9d1d9', borderRadius: '6px', textDecoration: 'none', fontWeight: 'bold' 
+                      }}
+                    >
+                      Review / Checkout on GitHub ↗
+                    </a>
+                    <button
+                      type="button"
+                      disabled={isMerging}
+                      onClick={() => handleMergeHotfix(selectedIncident._id)}
+                      style={{
+                        flex: 1, padding: '0.75rem', backgroundColor: '#238636', color: '#ffffff',
+                        border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: isMerging ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      {isMerging ? 'Merging...' : 'Auto-Merge into Main'}
+                    </button>
+                  </div>
                 </div>
+              ) : (
+                selectedIncident?.status === 'fix_proposed' && (
+                  <div className="proposed-pr-container" style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #333' }}>
+                    <button
+                      type="button"
+                      className="approve-btn"
+                      disabled={isApproving}
+                      onClick={() => handleApproveHotfix(selectedIncident._id)}
+                      style={{
+                        width: '100%',
+                        padding: '0.75rem 1.25rem',
+                        backgroundColor: '#1f6feb', // Blue for step 1
+                        color: '#ffffff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        fontWeight: 'bold',
+                        fontSize: '1rem',
+                        cursor: isApproving ? 'not-allowed' : 'pointer',
+                        opacity: isApproving ? 0.7 : 1,
+                        transition: 'background-color 0.2s ease',
+                      }}
+                    >
+                      {isApproving ? 'Creating Branch & Opening PR...' : 'Approve & Create GitHub PR'}
+                    </button>
+                  </div>
+                )
               )}
             </>
           )}

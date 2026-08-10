@@ -430,6 +430,84 @@ async def approve_and_execute_hotfix(
         "pr_url": pr_url
     }
 
+# --- 5A. APPROVE & CREATE GITHUB PR (Stage 1) ---
+@app.post("/api/v1/incidents/{incident_id}/approve-hotfix", tags=["Incidents"])
+async def approve_and_create_pr(
+    incident_id: str, 
+    current_user: dict = Depends(require_role("Incident_Managers"))
+):
+    db = get_db()
+    remediation = db["remediations"].find_one({"incident_id": incident_id})
+    if not remediation:
+        raise HTTPException(status_code=404, detail="No remediation draft found.")
+
+    repo = remediation["target_repo"]
+    title = remediation["pr_title"]
+    body = remediation["pr_body"]
+    head = remediation["head_branch"]
+    base = remediation["base_branch"]
+    file_path = remediation.get("target_file_path", "main.py")
+    file_content = remediation.get("code_patch", "")
+
+    # 1. Push branch & commit
+    await github_service.create_branch_and_commit(
+        repo=repo, base_branch=base, new_branch=head, 
+        file_path=file_path, file_content=file_content, commit_message=f"Fix incident: {title}"
+    )
+
+    # 2. Open PR
+    gh_response = await github_service.create_pull_request(repo=repo, title=title, body=body, head=head, base=base)
+    if gh_response.get("status_code") not in [200, 201]:
+        error_msg = gh_response.get("data", {}).get("message", "Failed to create PR.")
+        raise HTTPException(status_code=400, detail=f"GitHub API Error: {error_msg}")
+
+    pr_data = gh_response["data"]
+    pr_url = pr_data.get("html_url")
+    pr_number = pr_data.get("number")
+    now = datetime.now(timezone.utc)
+
+    # Update state: PR is created, waiting for human merge decision
+    db["remediations"].update_one(
+        {"incident_id": incident_id},
+        {"$set": {
+            "status": "pr_created", 
+            "pr_url": pr_url, 
+            "pr_number": pr_number, 
+            "approved_by": current_user.get("username"),
+            "updated_at": now
+        }}
+    )
+    db["incidents"].update_one({"_id": incident_id}, {"$set": {"status": "fix_proposed", "updated_at": now}})
+
+    return {"status": "success", "message": "PR created successfully!", "pr_url": pr_url}
+
+
+# --- 5B. MERGE PR INTO MAIN (Stage 2 - HITL Final Step) ---
+@app.post("/api/v1/incidents/{incident_id}/merge-hotfix", tags=["Incidents"])
+async def merge_hotfix_pr(
+    incident_id: str, 
+    current_user: dict = Depends(require_role("Incident_Managers"))
+):
+    db = get_db()
+    remediation = db["remediations"].find_one({"incident_id": incident_id})
+    if not remediation or not remediation.get("pr_number"):
+        raise HTTPException(status_code=404, detail="No active PR found to merge.")
+
+    repo = remediation["target_repo"]
+    pr_number = remediation["pr_number"]
+
+    # Execute Merge via GitHub API
+    merge_response = await github_service.merge_pull_request(repo=repo, pull_number=pr_number)
+    if merge_response.get("status_code") not in [200, 201]:
+        error_msg = merge_response.get("data", {}).get("message", "Merge failed.")
+        raise HTTPException(status_code=400, detail=f"GitHub Merge Error: {error_msg}")
+
+    now = datetime.now(timezone.utc)
+    db["remediations"].update_one({"incident_id": incident_id}, {"$set": {"status": "merged", "updated_at": now}})
+    db["incidents"].update_one({"_id": incident_id}, {"$set": {"status": "resolved", "updated_at": now}})
+
+    return {"status": "success", "message": "Pull request successfully merged into main!"}
+
 @app.post("/api/v1/incidents/{incident_id}/reanalyze", tags=["Incidents"])
 async def reanalyze_incident(
     incident_id: str,
