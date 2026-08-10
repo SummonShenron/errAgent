@@ -12,13 +12,16 @@ DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
 class AIAnalysisSchema(BaseModel):
     root_cause_summary: str = Field(description="Concise 2-3 sentence root cause breakdown.")
-    severity: str = Field(description="Severity classification: LOW, MEDIUM, HIGH, or CRITICAL.")
-    suggested_fix: str = Field(description="Detailed explanation of how to fix the code.")
-    head_branch: str = Field(description="Git branch name for the fix, e.g., fix/zero-division-handler.")
-    base_branch: str = Field(default="main", description="Target base branch, usually main or master.")
-    pr_title: str = Field(description="Concise GitHub Pull Request title.")
-    pr_body: str = Field(description="Markdown-formatted Pull Request body explaining the fix and impact.")
-    confidence_score: float = Field(default=0.95, description="Confidence score between 0.0 and 1.0.")
+    severity: str = Field(description="Severity rating: LOW, MEDIUM, HIGH, or CRITICAL.")
+    suggested_fix: str = Field(description="Detailed explanation of the code fix.")
+    code_patch: str = Field(
+        description="Unified git diff or code snippet showing the exact before/after change, e.g.:\n"
+                    "--- a/app.py\n+++ b/app.py\n@@ -1133,1 +1133,3 @@\n-return 1 / 0\n+if denominator == 0:\n+    return 0\n+return numerator / denominator"
+    )
+    head_branch: str = Field(description="Git branch name for the fix.")
+    base_branch: str = Field(default="main", description="Target base branch.")
+    pr_title: str = Field(description="Concise GitHub PR title.")
+    pr_body: str = Field(description="Markdown PR body explaining the fix.")
 
 def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     """
@@ -87,6 +90,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             "incident_id": incident_id,
             "status": "draft",
             "target_repo": target_repo,
+            "code_patch": result.code_patch,
             "base_branch": result.base_branch,
             "head_branch": result.head_branch,
             "pr_title": result.pr_title,

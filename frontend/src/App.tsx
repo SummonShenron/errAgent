@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/clerk-react';
 import { useAppUser } from './context/Clerk';
+import { CodeDiffView } from './components/CodeDiffView';
 
 const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL =
@@ -34,6 +35,7 @@ type IncidentRemediation = {
   head_branch?: string;
   pr_title?: string;
   pr_body?: string;
+  code_patch?: string;
 };
 
 type IncidentDetailResponse = {
@@ -61,6 +63,42 @@ export default function App() {
   const selectedIncidentFromDetail = selectedIncidentDetail?.incident || selectedIncident;
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
+  const [isApproving, setIsApproving] = useState(false);
+  const handleApproveHotfix = async (incidentId: string) => {
+    setIsApproving(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+
+      const response = await fetch(`${API_BASE_URL}/incidents/${incidentId}/approve-hotfix`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Hotfix Approved! GitHub PR Created: ${data.pr_url || 'Success'}`);
+        
+        // Update local state to reflect resolved status
+        setIncidents((prev) =>
+          prev.map((inc) =>
+            inc._id === incidentId ? { ...inc, status: 'resolved' } : inc
+          )
+        );
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        alert(`Failed to approve hotfix: ${errData.detail || response.statusText}`);
+      }
+    } catch (err) {
+      console.error('Error approving hotfix:', err);
+      alert('An error occurred while approving the hotfix.');
+    } finally {
+      setIsApproving(false);
+    }
+  };
   const handleDismiss = async (incidentId: string, e?: React.MouseEvent) => {
     // Prevent event bubbling if clicked inside incident card button
     if (e) e.stopPropagation();
@@ -334,13 +372,46 @@ export default function App() {
               </div>
 
               <div className="detail-block">
-                <label>Proposed PR</label>
+                <label style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#61dafb' }}>
+                  Proposed Code Changes
+                </label>
+                
+                {/* 🎨 Renders the diff with GitHub-like red/green highlights */}
+                <CodeDiffView patch={selectedRemediation?.code_patch} />
+
+                <label style={{ marginTop: '1rem' }}>Proposed PR Details</label>
                 <p><strong>Title:</strong> {selectedRemediation?.pr_title || 'No PR draft yet.'}</p>
                 <p><strong>Status:</strong> {(selectedRemediation?.status || 'not_created').replace('_', ' ')}</p>
                 <p><strong>Branches:</strong> {(selectedRemediation?.head_branch || 'n/a')} {'->'} {(selectedRemediation?.base_branch || 'n/a')}</p>
                 <p><strong>Repository:</strong> {selectedRemediation?.target_repo || selectedIncidentFromDetail?.repository || 'n/a'}</p>
+                
                 <pre>{selectedRemediation?.pr_body || 'No PR body generated yet.'}</pre>
               </div>
+              {selectedIncident?.status === 'fix_proposed' && (
+                <div className="proposed-pr-container" style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #333' }}>
+                  <button
+                    type="button"
+                    className="approve-btn"
+                    disabled={isApproving}
+                    onClick={() => handleApproveHotfix(selectedIncident._id)}
+                    style={{
+                      width: '100%',
+                      padding: '0.75rem 1.25rem',
+                      backgroundColor: '#10b981', // Success green
+                      color: '#ffffff',
+                      border: 'none',
+                      borderRadius: '6px',
+                      fontWeight: 'bold',
+                      fontSize: '1rem',
+                      cursor: isApproving ? 'not-allowed' : 'pointer',
+                      opacity: isApproving ? 0.7 : 1,
+                      transition: 'background-color 0.2s ease',
+                    }}
+                  >
+                    {isApproving ? 'Opening GitHub Pull Request...' : 'Approve & Create GitHub PR'}
+                  </button>
+                </div>
+              )}
             </>
           )}
         </section>
