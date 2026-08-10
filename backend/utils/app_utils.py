@@ -77,7 +77,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     )
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",  # Or your active model version
+            model="gemini-3.5-flash",  # Or your active model version
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
