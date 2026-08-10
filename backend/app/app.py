@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
 # Utility imports from your backend/utils directory
 from backend.utils.db_utils import get_db
@@ -25,6 +26,8 @@ SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
 INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET") or os.getenv("ERRAGENT_INGEST_SECRET")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
+class ReanalyzeRequest(BaseModel):
+    instructions: str
 
 def _serialize_mongo_doc(value: Any) -> Any:
     if isinstance(value, ObjectId):
@@ -411,6 +414,39 @@ async def approve_and_execute_hotfix(
         "pr_url": pr_url
     }
 
+@app.post("/api/v1/incidents/{incident_id}/reanalyze", tags=["Incidents"])
+async def reanalyze_incident(
+    incident_id: str,
+    request: ReanalyzeRequest, # Pydantic model for input validation
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
+):
+    """Triggers a re-analysis of the incident using Gemini, passing engineering instructions."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database unavailable.")
+
+    # 1. Verify Incident exists and is in 'fix_proposed' state
+    incident = db["incidents"].find_one({"_id": incident_id})
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found.")
+    
+    # Optional: ensure status is appropriate for re-analysis
+    if incident.get("status") not in ["fix_proposed", "analysis_failed"]:
+         raise HTTPException(status_code=400, detail="Incident cannot be re-analyzed in current state.")
+
+    # 2. Add 'instructions' to the original payload metadata
+    original_payload = incident.get("raw_payload", {}) # Assuming you saved this!
+    if "metadata" not in original_payload:
+        original_payload["metadata"] = {}
+    
+    # Store engineering instructions in metadata
+    original_payload["metadata"]["engineering_instructions"] = request.instructions
+
+    # 3. Fire the LLM re-analysis pipeline in the background
+    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, original_payload)
+
+    return {"status": "accepted", "message": "Re-analysis triggered successfully!"}
 # --- Generic Machine Ingest Webhook ---
 @app.post("/api/v1/webhooks/ingest", tags=["Webhooks"])
 async def handle_machine_ingest(

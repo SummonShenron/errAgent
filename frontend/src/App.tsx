@@ -64,6 +64,40 @@ export default function App() {
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
   const [isApproving, setIsApproving] = useState(false);
+  const [reanalyzeInstructions, setReanalyzeInstructions] = useState('');
+  const [isReanalyzing, setIsReanalyzing] = useState(false);
+  const handleReanalyzeWithInstructions = async (incidentId: string) => {
+    if (!reanalyzeInstructions.trim()) {
+      alert("Please provide instructions first!");
+      return;
+    }
+    setIsReanalyzing(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const response = await fetch(`${API_BASE_URL}/incidents/${incidentId}/reanalyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ instructions: reanalyzeInstructions }),
+      });
+      if (response.ok) {
+        alert(`Re-analysis triggered! Check back in a few seconds.`);
+        setReanalyzeInstructions(''); // Clear input
+        // Optionally reset view or status locally
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        alert(`Failed to trigger re-analysis: ${errData.detail || response.statusText}`);
+      }
+    } catch (err) {
+      console.error('Error re-analyzing:', err);
+      alert('An error occurred during re-analysis.');
+    } finally {
+      setIsReanalyzing(false);
+    }
+  };
   const handleApproveHotfix = async (incidentId: string) => {
     setIsApproving(true);
     try {
@@ -77,11 +111,9 @@ export default function App() {
           Authorization: `Bearer ${token}`,
         },
       });
-
       if (response.ok) {
         const data = await response.json();
-        alert(`Hotfix Approved! GitHub PR Created: ${data.pr_url || 'Success'}`);
-        
+        alert(`Hotfix Approved! GitHub PR Created: ${data.pr_url || 'Success'}`);   
         // Update local state to reflect resolved status
         setIncidents((prev) =>
           prev.map((inc) =>
@@ -137,21 +169,18 @@ export default function App() {
         setLoading(false);
         return;
       }
-
       try {
         const token = await getToken();
         if (!token) {
           setLoading(false);
           return;
         }
-
         const response = await fetch(`${API_BASE_URL}/incidents`, {
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
         });
-
         if (response.ok) {
           const data = await response.json();
           setIncidents(data);
@@ -165,7 +194,6 @@ export default function App() {
         setLoading(false);
       }
     }
-
     fetchIncidents();
   }, [getToken, isSignedIn]);
 
@@ -175,7 +203,6 @@ export default function App() {
         setSelectedIncidentDetail(null);
         return;
       }
-
       try {
         setDetailLoading(true);
         const token = await getToken();
@@ -203,7 +230,6 @@ export default function App() {
         setDetailLoading(false);
       }
     }
-
     fetchIncidentDetail();
   }, [selectedIncidentId, getToken, isSignedIn]);
 
@@ -244,19 +270,16 @@ export default function App() {
           </SignedOut>
         </div>
       </header>
-
       <section className="session-band">
         <span className="session-label">Active Session Principal</span>
         <span className="session-value">{principal || 'Guest Sandbox Mode'}</span>
       </section>
-
       <main className="dashboard-grid">
         <section className="panel">
           <div className="panel-header">
             <h2>Ingested Incidents</h2>
             <span className="count-pill">{incidents.length}</span>
           </div>
-
           {loading ? (
             <p className="muted">Loading incidents from backend...</p>
           ) : incidents.length === 0 ? (
@@ -266,14 +289,12 @@ export default function App() {
               {incidents.map((inc) => {
                 const tone = statusTone[inc.status || ''] || 'status-open';
                 const isActive = selectedIncident?._id === inc._id;
-
                 return (
                   <li key={inc._id}>
                     <div className={`incident-card ${isActive ? 'active' : ''}`} onClick={() => setSelectedIncidentId(inc._id)}>
                       <div className="incident-card-top">
                         <span className={`status-chip ${tone}`}>{(inc.status || 'open').replace('_', ' ').toUpperCase()}</span>
-                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>
-                        
+                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>           
                         {/* Dismiss Button */}
                         <button
                           type="button"
@@ -292,7 +313,6 @@ export default function App() {
             </ul>
           )}
         </section>
-
         <section className="panel detail-panel">
           <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2>Incident Details</h2>
@@ -312,7 +332,6 @@ export default function App() {
           ) : (
             <>
               {detailLoading && <p className="muted">Refreshing analysis and remediation data...</p>}
-
               <div className="detail-grid">
                 <div>
                   <label>Incident ID</label>
@@ -339,22 +358,18 @@ export default function App() {
                   <p>{selectedIncidentFromDetail?.created_at ? new Date(selectedIncidentFromDetail.created_at).toLocaleString() : 'n/a'}</p>
                 </div>
               </div>
-
               <div className="detail-block">
                 <label>Error Message</label>
                 <p>{selectedIncidentFromDetail?.error_message || 'No message available.'}</p>
               </div>
-
               <div className="detail-block">
                 <label>Stack Trace</label>
                 <pre>{selectedIncidentFromDetail?.stack_trace || 'No stack trace captured.'}</pre>
               </div>
-
               <div className="detail-block">
                 <label>AI Root Cause Analysis</label>
                 <p>{selectedAnalysis?.root_cause_summary || selectedAnalysis?.root_cause || selectedAnalysis?.summary || 'No analysis generated yet.'}</p>
               </div>
-
               <div className="detail-grid">
                 <div>
                   <label>Confidence Score</label>
@@ -365,20 +380,62 @@ export default function App() {
                   <p>{selectedAnalysis?.severity || 'n/a'}</p>
                 </div>
               </div>
-
               <div className="detail-block">
                 <label>Suggested Fix</label>
                 <p>{selectedAnalysis?.suggested_fix || 'Waiting for LLM remediation guidance.'}</p>
               </div>
-
               <div className="detail-block">
                 <label style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#61dafb' }}>
                   Proposed Code Changes
-                </label>
-                
-                {/* 🎨 Renders the diff with GitHub-like red/green highlights */}
+                </label>    
+                {/* Renders the diff with GitHub-like red/green highlights */}
                 <CodeDiffView patch={selectedRemediation?.code_patch} />
-
+                {selectedIncident?.status === 'fix_proposed' && (
+                <div className="reanalyze-container" style={{ marginTop: '1.5rem', borderTop: '1px solid #333', paddingTop: '1rem' }}>
+                  <label style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#61dafb' }}>
+                    Refine with AI Instructions
+                  </label>
+                  <textarea
+                    value={reanalyzeInstructions}
+                    onChange={(e) => setReanalyzeInstructions(e.target.value)}
+                    placeholder="e.g., Don't use HTTPException. Wrap the division operation in a try/except ZeroDivisionError block and call report_error."
+                    style={{
+                      width: '100%',
+                      minHeight: '80px',
+                      marginTop: '0.75rem',
+                      padding: '0.75rem',
+                      backgroundColor: '#0d1117',
+                      color: '#ffffff',
+                      border: '1px solid #30363d',
+                      borderRadius: '6px',
+                      fontFamily: 'sans-serif',
+                      resize: 'vertical',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="reanalyze-btn"
+                    disabled={isReanalyzing}
+                    onClick={() => handleReanalyzeWithInstructions(selectedIncident._id)}
+                    style={{
+                      width: '100%',
+                      marginTop: '0.75rem',
+                      padding: '0.75rem 1.25rem',
+                      backgroundColor: '#4f46e5', // Indigo
+                      color: '#ffffff',
+                      border: 'none',
+                      borderRadius: '6px',
+                      fontWeight: 'bold',
+                      fontSize: '1rem',
+                      cursor: isReanalyzing ? 'not-allowed' : 'pointer',
+                      opacity: isReanalyzing ? 0.7 : 1,
+                      transition: 'background-color 0.2s ease',
+                    }}
+                  >
+                    {isReanalyzing ? '⏳ Re-running Gemini...' : '🤖 Regenerate PR Draft'}
+                  </button>
+                </div>
+              )}
                 <label style={{ marginTop: '1rem' }}>Proposed PR Details</label>
                 <p><strong>Title:</strong> {selectedRemediation?.pr_title || 'No PR draft yet.'}</p>
                 <p><strong>Status:</strong> {(selectedRemediation?.status || 'not_created').replace('_', ' ')}</p>

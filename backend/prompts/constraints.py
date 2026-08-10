@@ -22,4 +22,5 @@ INSTRUCTIONS:
    - base_branch: The base branch to target (default "main").
    - pr_title: A concise title for the GitHub Pull Request.
    - pr_body: A detailed Markdown summary for the PR description explaining the bug and the resolution.
+CRITICAL: If ADDITIONAL METADATA contains 'engineering_instructions', you MUST prioritize those explicit instructions when generating the patch and PR draft.
 """
