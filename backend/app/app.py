@@ -372,10 +372,26 @@ async def approve_and_execute_hotfix(
     body = remediation["pr_body"]
     head = remediation["head_branch"]
     base = remediation["base_branch"]
+    
+    # Extract target file and code patch stored in remediation document
+    file_path = remediation.get("target_file_path", "main.py") 
+    file_content = remediation.get("code_patch", "")
+
+    logger.info(f"Creating branch {head} and pushing commit for {repo}...")
+    
+    # Step A: Create the branch and commit the code fix first
+    await github_service.create_branch_and_commit(
+        repo=repo,
+        base_branch=base,
+        new_branch=head,
+        file_path=file_path,
+        file_content=file_content,
+        commit_message=f"Fix incident: {title}"
+    )
 
     logger.info(f"Opening GitHub PR for {repo} ({head} -> {base})...")
     
-    # Added 'await' here
+    # Step B: Open the Pull Request successfully
     gh_response = await github_service.create_pull_request(
         repo=repo, title=title, body=body, head=head, base=base
     )

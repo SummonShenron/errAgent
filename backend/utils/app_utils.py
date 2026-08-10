@@ -56,8 +56,9 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         environment=payload.get("environment", "production"),
         stack_trace=payload.get("stack_trace", "No stack trace provided."),
         git_diffs=payload.get("git_diffs", "No git diff context provided."),
-        metadata=payload.get("metadata", {})
-        )
+        metadata=payload.get("metadata", {}),
+        engineering_instructions=payload.get("engineering_instructions", "")
+    )
     try:
         # Request structured Pydantic response from Gemini Flash
         response = client.models.generate_content(
