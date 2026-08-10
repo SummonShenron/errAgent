@@ -137,6 +137,7 @@ export default function App() {
   }, [getToken, isSignedIn]);
 
   // Unified Polling Loop
+  // Unified Polling Loop for List and Active Details
   useEffect(() => {
     if (!isSignedIn) {
       setIncidents([]);
@@ -145,14 +146,22 @@ export default function App() {
       return;
     }
 
+    // Initial fetch
     fetchIncidents();
+    if (selectedIncidentId) {
+      fetchIncidentDetail(selectedIncidentId);
+    }
 
+    // Poll both list and active detail every 4 seconds
     const intervalId = setInterval(() => {
       fetchIncidents();
+      if (selectedIncidentId) {
+        fetchIncidentDetail(selectedIncidentId);
+      }
     }, 4000);
 
     return () => clearInterval(intervalId);
-  }, [fetchIncidents, isSignedIn]);
+  }, [fetchIncidents, fetchIncidentDetail, selectedIncidentId, isSignedIn]);
 
   // Fetch Incident Details when selection changes
   useEffect(() => {
