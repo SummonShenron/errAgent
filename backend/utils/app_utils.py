@@ -23,17 +23,29 @@ class AIAnalysisSchema(BaseModel):
     pr_title: str = Field(description="Concise GitHub PR title.")
     pr_body: str = Field(description="Markdown PR body explaining the fix.")
 
+def _extract_target_file_path(stack_trace: str) -> str:
+    """Scans the stack trace for the user's source file, ignoring virtual environments."""
+    if not stack_trace:
+        return "app.py"
+    
+    lines = stack_trace.splitlines()
+    for line in lines:
+        if 'File "' in line:
+            match = re.search(r'File "([^"]+)"', line)
+            if match:
+                filepath = match.group(1)
+                # Skip python internals and site-packages to find actual app code
+                if "site-packages" not in filepath and "venv" not in filepath and "lib/python" not in filepath:
+                    return filepath.split("/")[-1]
+                    
+    return "app.py"
+
 def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
-    """
-    Agentic pipeline that analyzes an error incident via Gemini Flash
-    and constructs a remediation draft in MongoDB.
-    """
     db = get_db()
     if db is None:
         logger.error("Database unavailable during AI analysis for %s", incident_id)
         return
 
-    # Update status to 'analyzing'
     db["incidents"].update_one(
         {"_id": incident_id},
         {"$set": {"status": "analyzing", "updated_at": datetime.now(timezone.utc)}}
@@ -50,20 +62,22 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
 
     client = genai.Client(api_key=api_key)
 
-    # Agent Prompt Instruction
+    # Extract target file path to pass into prompt and save into remediation
+    stack_trace = payload.get("stack_trace", "No stack trace provided.")
+    target_file = _extract_target_file_path(stack_trace)
+
     prompt = INCIDENT_ANALYSIS_PROMPT.format(
         service_name=payload.get("service_name", "unknown-service"),
         environment=payload.get("environment", "production"),
-        stack_trace=payload.get("stack_trace", "No stack trace provided."),
+        stack_trace=stack_trace,
         git_diffs=payload.get("git_diffs", "No git diff context provided."),
         metadata=payload.get("metadata", {}),
         engineering_instructions=payload.get("engineering_instructions", ""),
-        target_file_path=payload.get("target_file_path", "unknown-file.py")
+        target_file_path=target_file
     )
     try:
-        # Request structured Pydantic response from Gemini Flash
         response = client.models.generate_content(
-            model="gemini-3.5-flash",  # Or "gemini-1.5-flash"
+            model="gemini-2.5-flash",  # Or your active model version
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -72,7 +86,6 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             ),
         )
 
-        # Parse output directly into Pydantic model
         result: AIAnalysisSchema = response.parsed
         now = datetime.now(timezone.utc)
 
@@ -86,7 +99,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             "created_at": now,
         })
 
-        # 2. Store Remediation PR Draft
+        # 2. Store Remediation PR Draft with target_file_path included!
         target_repo = payload.get("repository") or DEFAULT_TARGET_REPO
         db["remediations"].insert_one({
             "incident_id": incident_id,
@@ -97,6 +110,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             "head_branch": result.head_branch,
             "pr_title": result.pr_title,
             "pr_body": result.pr_body,
+            "target_file_path": target_file, # <--- Saved here for frontend display
             "created_at": now,
             "updated_at": now,
         })
