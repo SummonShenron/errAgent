@@ -327,3 +327,20 @@ button {
 		font-size: 2.6rem;
 	}
 }
+
+.dismiss-btn {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 0.9rem;
+  margin-left: auto;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.dismiss-btn:hover {
+  color: #ff4d4f;
+  background: rgba(255, 77, 79, 0.1);
+}

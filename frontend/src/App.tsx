@@ -57,11 +57,39 @@ export default function App() {
   const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<IncidentDetailResponse | null>(null);
   const [detailLoading, setDetailLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
-
   const selectedIncident = incidents.find((inc) => inc._id === selectedIncidentId) || incidents[0] || null;
   const selectedIncidentFromDetail = selectedIncidentDetail?.incident || selectedIncident;
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
+  const handleDismiss = async (incidentId: string, e?: React.MouseEvent) => {
+    // Prevent event bubbling if clicked inside incident card button
+    if (e) e.stopPropagation();
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const response = await fetch(`${API_BASE_URL}/incidents/${incidentId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (response.ok) {
+        setIncidents((prevIncidents) => {
+          const nextIncidents = prevIncidents.filter((inc) => inc._id !== incidentId); 
+          // If we dismissed the currently active incident, automatically shift selection
+          if (selectedIncidentId === incidentId) {
+            setSelectedIncidentId(nextIncidents.length > 0 ? nextIncidents[0]._id : null);
+          }
+          return nextIncidents;
+        });
+      } else {
+        console.error('Failed to dismiss incident:', response.statusText);
+      }
+    } catch (err) {
+      console.error('Error dismissing incident:', err);
+    }
+  };
 
   useEffect(() => {
     async function fetchIncidents() {
@@ -203,17 +231,23 @@ export default function App() {
 
                 return (
                   <li key={inc._id}>
-                    <button
-                      type="button"
-                      className={`incident-card ${isActive ? 'active' : ''}`}
-                      onClick={() => setSelectedIncidentId(inc._id)}
-                    >
+                    <div className={`incident-card ${isActive ? 'active' : ''}`} onClick={() => setSelectedIncidentId(inc._id)}>
                       <div className="incident-card-top">
                         <span className={`status-chip ${tone}`}>{(inc.status || 'open').replace('_', ' ').toUpperCase()}</span>
                         <span className="service-name">{inc.service_name || 'unknown-service'}</span>
+                        
+                        {/* Dismiss Button */}
+                        <button
+                          type="button"
+                          className="dismiss-btn"
+                          title="Dismiss Incident"
+                          onClick={(e) => handleDismiss(inc._id, e)}
+                        >
+                          ✕
+                        </button>
                       </div>
                       <p className="incident-error">{inc.error_message || 'Unhandled exception'}</p>
-                    </button>
+                    </div>
                   </li>
                 );
               })}
@@ -222,10 +256,19 @@ export default function App() {
         </section>
 
         <section className="panel detail-panel">
-          <div className="panel-header">
+          <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2>Incident Details</h2>
+            {selectedIncident && (
+              <button
+                type="button"
+                className="secondary-action"
+                style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', cursor: 'pointer' }}
+                onClick={() => handleDismiss(selectedIncident._id)}
+              >
+                Dismiss Incident
+              </button>
+            )}
           </div>
-
           {!selectedIncident ? (
             <p className="muted">Pick an incident to see full context.</p>
           ) : (

@@ -305,6 +305,35 @@ async def ingest_incident(
 
     return {"status": "created", "incident_id": incident_id}
 
+@app.delete("/api/v1/incidents/{incident_id}", tags=["Incidents"])
+async def delete_incident(
+    incident_id: str, 
+    current_user: dict = Depends(get_current_user)
+):
+    """Deletes an incident and its associated records from MongoDB."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    # 1. Delete primary incident document
+    result = db["incidents"].delete_one({"_id": incident_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Incident not found.")
+
+    # 2. Cascade cleanup for linked AI analyses and remediations
+    db["analyses"].delete_one({"incident_id": incident_id})
+    db["remediations"].delete_one({"incident_id": incident_id})
+
+    # 3. Log audit event
+    actor = current_user.get("username", "operator")
+    db["audit_logs"].insert_one({
+        "incident_id": incident_id,
+        "actor": actor,
+        "action": "INCIDENT_DISMISSED",
+        "timestamp": datetime.now(timezone.utc)
+    })
+
+    return {"status": "deleted", "incident_id": incident_id}
 
 # --- 5. APPROVE AND EXECUTE HOTFIX PR ---
 @app.post("/api/v1/incidents/{incident_id}/approve-hotfix", tags=["Incidents"])
