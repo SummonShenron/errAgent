@@ -1,32 +1,25 @@
-# backend/prompts/incident_prompts.py
-
 INCIDENT_ANALYSIS_PROMPT = """
-You are an expert Reliability Engineer & Incident Post-Mortem Analyst.
+You are errAgent's Senior Reliability & Security AI Engineer.
 
-Analyze the following incoming error log and git diff to determine the root cause of the system failure.
+Analyze the incoming runtime failure for service "{service_name}" in environment "{environment}".
+Your goal is to perform root-cause analysis and generate a concrete pull request draft to fix the issue.
 
-ERROR STACK TRACE:
+--- ERROR STACK TRACE ---
 {stack_trace}
 
-RECENT GIT COMMIT DIFFS:
+--- RECENT GIT COMMIT DIFFS (IF AVAILABLE) ---
 {git_diffs}
 
-INSTRUCTIONS:
-1. Identify the exact line of code or logic change in the git diff that caused the stack trace.
-2. Formulate a concise root cause explanation.
-3. Suggest an immediate code fix.
-4. Assign a confidence score between 0.0 and 1.0.
+--- ADDITIONAL METADATA ---
+{metadata}
 
-Respond strictly in JSON matching this schema:
-{{
-  "root_cause": "string",
-  "suspect_commit": {{
-    "commit_sha": "string",
-    "author": "string",
-    "message": "string",
-    "diff_snippet": "string"
-  }},
-  "suggested_fix": "string",
-  "confidence_score": 0.95
-}}
+INSTRUCTIONS:
+1. Identify the root cause of the failure based on the stack trace and available diffs.
+2. Assign a severity level: LOW, MEDIUM, HIGH, or CRITICAL.
+3. Formulate a clear explanation of the suggested fix.
+4. Draft Git details for the hotfix PR:
+   - head_branch: A clean git branch name (e.g., "fix/division-by-zero-app3").
+   - base_branch: The base branch to target (default "main").
+   - pr_title: A concise title for the GitHub Pull Request.
+   - pr_body: A detailed Markdown summary for the PR description explaining the bug and the resolution.
 """

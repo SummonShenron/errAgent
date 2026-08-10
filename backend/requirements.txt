@@ -8,3 +8,4 @@ PyJwt
 Requests
 cryptography
 google-genai
+langchain-google-genai

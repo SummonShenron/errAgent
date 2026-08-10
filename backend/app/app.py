@@ -411,7 +411,6 @@ async def approve_and_execute_hotfix(
         "pr_url": pr_url
     }
 
-
 # --- Generic Machine Ingest Webhook ---
 @app.post("/api/v1/webhooks/ingest", tags=["Webhooks"])
 async def handle_machine_ingest(
@@ -424,14 +423,12 @@ async def handle_machine_ingest(
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
-
     ingest_context = _authenticate_ingest_client(db, x_ingest_secret, x_app_id)
     logger.info(
         "called /api/v1/webhooks/ingest app_id=%s payload=%s",
         ingest_context.get("app_id"),
         payload,
     )
-
     incident_id = _ingest_machine_payload(
         db,
         background_tasks,
@@ -440,6 +437,7 @@ async def handle_machine_ingest(
         app_id=ingest_context.get("app_id"),
         app_default_repo=ingest_context.get("default_repo"),
     )
+    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
     return {"status": "accepted", "incident_id": incident_id}
 
 # --- Vercel Webhook ---

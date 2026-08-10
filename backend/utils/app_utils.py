@@ -1,52 +1,111 @@
 from datetime import datetime, timezone
+from pydantic import BaseModel, Field
 import logging
 import os
 from backend.utils.db_utils import get_db
+from backend.prompts.constraints import INCIDENT_ANALYSIS_PROMPT
+from google import genai
+from google.genai import types
 logger = logging.getLogger("errAgent Logger")
 
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
-async def run_ai_analysis_pipeline(incident_id: str, payload: dict):
+class AIAnalysisSchema(BaseModel):
+    root_cause_summary: str = Field(description="Concise 2-3 sentence root cause breakdown.")
+    severity: str = Field(description="Severity classification: LOW, MEDIUM, HIGH, or CRITICAL.")
+    suggested_fix: str = Field(description="Detailed explanation of how to fix the code.")
+    head_branch: str = Field(description="Git branch name for the fix, e.g., fix/zero-division-handler.")
+    base_branch: str = Field(default="main", description="Target base branch, usually main or master.")
+    pr_title: str = Field(description="Concise GitHub Pull Request title.")
+    pr_body: str = Field(description="Markdown-formatted Pull Request body explaining the fix and impact.")
+    confidence_score: float = Field(default=0.95, description="Confidence score between 0.0 and 1.0.")
+
+def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
+    """
+    Agentic pipeline that analyzes an error incident via Gemini Flash
+    and constructs a remediation draft in MongoDB.
+    """
     db = get_db()
     if db is None:
+        logger.error("Database unavailable during AI analysis for %s", incident_id)
         return
 
-    # Update status to ANALYZING
-    db["incidents"].update_one({"_id": incident_id}, {"$set": {"status": "analyzing"}})
+    # Update status to 'analyzing'
+    db["incidents"].update_one(
+        {"_id": incident_id},
+        {"$set": {"status": "analyzing", "updated_at": datetime.now(timezone.utc)}}
+    )
 
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        logger.error("GOOGLE_API_KEY is not configured.")
+        db["incidents"].update_one(
+            {"_id": incident_id},
+            {"$set": {"status": "analysis_failed", "updated_at": datetime.now(timezone.utc)}}
+        )
+        return
+
+    client = genai.Client(api_key=api_key)
+
+    # Agent Prompt Instruction
+    prompt = INCIDENT_ANALYSIS_PROMPT.format(
+        service_name=payload.get("service_name", "unknown-service"),
+        environment=payload.get("environment", "production"),
+        stack_trace=payload.get("stack_trace", "No stack trace provided."),
+        git_diffs=payload.get("git_diffs", "No git diff context provided."),
+        metadata=payload.get("metadata", {})
+        )
     try:
-        # -------------------------------------------------------------
-        # TODO: Call your Llama / LangGraph Agent graph here!
-        # Example agent execution output:
-        # -------------------------------------------------------------
-        root_cause = f"Exception caused by null payload in {payload.get('service_name')} execution flow."
-        suggested_branch = f"fix/{incident_id}"
-        
-        # 1. Store Root Cause Analysis
+        # Request structured Pydantic response from Gemini Flash
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",  # Or "gemini-1.5-flash"
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=AIAnalysisSchema,
+                temperature=0.1,
+            ),
+        )
+
+        # Parse output directly into Pydantic model
+        result: AIAnalysisSchema = response.parsed
+        now = datetime.now(timezone.utc)
+
+        # 1. Store AI Analysis Record
         db["analyses"].insert_one({
             "incident_id": incident_id,
-            "root_cause": root_cause,
-            "summary": f"Detected unhandled exception in {payload.get('service_name')}.",
-            "severity": "HIGH",
-            "created_at": datetime.now(timezone.utc)
+            "root_cause_summary": result.root_cause_summary,
+            "severity": result.severity,
+            "suggested_fix": result.suggested_fix,
+            "confidence_score": 0.95,
+            "created_at": now,
         })
 
-        # 2. Store Draft Remediation Action for Human Approval
+        # 2. Store Remediation PR Draft
+        target_repo = payload.get("repository") or "SummonShenron/SAAPP"
         db["remediations"].insert_one({
             "incident_id": incident_id,
-            "action_type": "create_pull_request",
-            "target_repo": payload.get("repository") or DEFAULT_TARGET_REPO,
-            "base_branch": "main",
-            "head_branch": suggested_branch,
-            "pr_title": f"fix(autofix): resolve error in {payload.get('service_name')}",
-            "pr_body": f"## AI Remediation Summary\n\n{root_cause}\n\n*Generated automatically by errAgent.*",
-            "status": "pending_approval",
-            "created_at": datetime.now(timezone.utc)
+            "status": "draft",
+            "target_repo": target_repo,
+            "base_branch": result.base_branch,
+            "head_branch": result.head_branch,
+            "pr_title": result.pr_title,
+            "pr_body": result.pr_body,
+            "created_at": now,
+            "updated_at": now,
         })
 
-        # Update status to FIX_PROPOSED
-        db["incidents"].update_one({"_id": incident_id}, {"$set": {"status": "fix_proposed"}})
+        # 3. Advance Incident State to 'fix_proposed'
+        db["incidents"].update_one(
+            {"_id": incident_id},
+            {"$set": {"status": "fix_proposed", "updated_at": now}}
+        )
 
-    except Exception as e:
-        logger.error(f"Failed to execute AI analysis background task: {e}")
-        db["incidents"].update_one({"_id": incident_id}, {"$set": {"status": "open"}})
+        logger.info("--> [errAgent AI] Successfully generated fix proposal for incident: %s", incident_id)
+
+    except Exception as exc:
+        logger.error("--> [errAgent AI] Analysis pipeline failed for %s: %s", incident_id, str(exc))
+        db["incidents"].update_one(
+            {"_id": incident_id},
+            {"$set": {"status": "analysis_failed", "updated_at": datetime.now(timezone.utc)}}
+        )
