@@ -447,9 +447,11 @@ async def approve_and_create_pr(
     head = remediation["head_branch"]
     base = remediation["base_branch"]
     file_path = remediation.get("target_file_path", "main.py")
-    file_content = remediation.get("code_patch", "")
+    
+    # Use full_file_content so GitHub updates the file properly without wiping it!
+    file_content = remediation.get("full_file_content") or remediation.get("code_patch", "")
 
-    # 1. Push branch & commit
+    # 1. Push branch & commit full file content
     await github_service.create_branch_and_commit(
         repo=repo, base_branch=base, new_branch=head, 
         file_path=file_path, file_content=file_content, commit_message=f"Fix incident: {title}"
@@ -466,7 +468,6 @@ async def approve_and_create_pr(
     pr_number = pr_data.get("number")
     now = datetime.now(timezone.utc)
 
-    # Update state: PR is created, waiting for human merge decision
     db["remediations"].update_one(
         {"incident_id": incident_id},
         {"$set": {
@@ -480,7 +481,6 @@ async def approve_and_create_pr(
     db["incidents"].update_one({"_id": incident_id}, {"$set": {"status": "fix_proposed", "updated_at": now}})
 
     return {"status": "success", "message": "PR created successfully!", "pr_url": pr_url}
-
 
 # --- 5B. MERGE PR INTO MAIN (Stage 2 - HITL Final Step) ---
 @app.post("/api/v1/incidents/{incident_id}/merge-hotfix", tags=["Incidents"])

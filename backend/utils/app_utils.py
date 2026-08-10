@@ -1,45 +1,38 @@
+import os
+import re
+import logging
+import difflib
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
-import logging
-import os
 from backend.utils.db_utils import get_db
 from backend.prompts.constraints import INCIDENT_ANALYSIS_PROMPT
 from google import genai
 from google.genai import types
-import re
 
 logger = logging.getLogger("errAgent Logger")
-
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
 class AIAnalysisSchema(BaseModel):
     root_cause_summary: str = Field(description="Concise 2-3 sentence root cause breakdown.")
     severity: str = Field(description="Severity rating: LOW, MEDIUM, HIGH, or CRITICAL.")
     suggested_fix: str = Field(description="Detailed explanation of the code fix.")
-    code_patch: str = Field(
-        description="Unified git diff or code snippet showing the exact before/after change, e.g.:\n"
-                    "--- a/app.py\n+++ b/app.py\n@@ -1133,1 +1133,3 @@\n-return 1 / 0\n+if denominator == 0:\n+    return 0\n+return numerator / denominator"
-    )
+    full_file_content: str = Field(description="The ENTIRE updated content of the target file with the fix applied, preserving all existing code.")
     head_branch: str = Field(description="Git branch name for the fix.")
     base_branch: str = Field(default="main", description="Target base branch.")
     pr_title: str = Field(description="Concise GitHub PR title.")
     pr_body: str = Field(description="Markdown PR body explaining the fix.")
 
 def _extract_target_file_path(stack_trace: str) -> str:
-    """Scans the stack trace for the user's source file, ignoring virtual environments."""
     if not stack_trace:
         return "app.py"
-    
     lines = stack_trace.splitlines()
     for line in lines:
         if 'File "' in line:
             match = re.search(r'File "([^"]+)"', line)
             if match:
                 filepath = match.group(1)
-                # Skip python internals and site-packages to find actual app code
                 if "site-packages" not in filepath and "venv" not in filepath and "lib/python" not in filepath:
                     return filepath.split("/")[-1]
-                    
     return "app.py"
 
 def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
@@ -63,8 +56,6 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         return
 
     client = genai.Client(api_key=api_key)
-
-    # Extract target file path to pass into prompt and save into remediation
     stack_trace = payload.get("stack_trace", "No stack trace provided.")
     target_file = _extract_target_file_path(stack_trace)
 
@@ -77,9 +68,10 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         engineering_instructions=payload.get("engineering_instructions", ""),
         target_file_path=target_file
     )
+
     try:
         response = client.models.generate_content(
-            model="gemini-3.5-flash",  # Or your active model version
+            model="gemini-3.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -91,7 +83,28 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         result: AIAnalysisSchema = response.parsed
         now = datetime.now(timezone.utc)
 
-        # 1. Store AI Analysis Record
+        # 1. Read original file from disk to generate a clean diff for the UI
+        original_file_content = ""
+        try:
+            if os.path.exists(target_file):
+                with open(target_file, "r", encoding="utf-8") as f:
+                    original_file_content = f.read()
+        except Exception as e:
+            logger.warning(f"Could not read local file {target_file} for diffing: {e}")
+
+        original_lines = original_file_content.splitlines(keepends=True)
+        new_lines = result.full_file_content.splitlines(keepends=True)
+
+        diff_generator = difflib.unified_diff(
+            original_lines,
+            new_lines,
+            fromfile=f"a/{target_file}",
+            tofile=f"b/{target_file}",
+            lineterm=""
+        )
+        generated_code_patch = "\n".join(diff_generator)
+
+        # 2. Store AI Analysis Record
         db["analyses"].insert_one({
             "incident_id": incident_id,
             "root_cause_summary": result.root_cause_summary,
@@ -101,23 +114,24 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             "created_at": now,
         })
 
-        # 2. Store Remediation PR Draft with target_file_path included!
+        # 3. Store Remediation PR Draft (storing both diff for UI and full file for GitHub)
         target_repo = payload.get("repository") or DEFAULT_TARGET_REPO
         db["remediations"].insert_one({
             "incident_id": incident_id,
             "status": "draft",
             "target_repo": target_repo,
-            "code_patch": result.code_patch,
+            "code_patch": generated_code_patch,        # <--- Used by UI CodeDiffView
+            "full_file_content": result.full_file_content, # <--- Used when committing to GitHub
             "base_branch": result.base_branch,
             "head_branch": result.head_branch,
             "pr_title": result.pr_title,
             "pr_body": result.pr_body,
-            "target_file_path": target_file, # <--- Saved here for frontend display
+            "target_file_path": target_file,
             "created_at": now,
             "updated_at": now,
         })
 
-        # 3. Advance Incident State to 'fix_proposed'
+        # 4. Advance Incident State to 'fix_proposed'
         db["incidents"].update_one(
             {"_id": incident_id},
             {"$set": {"status": "fix_proposed", "updated_at": now}}
