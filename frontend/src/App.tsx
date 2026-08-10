@@ -29,6 +29,7 @@ type IncidentAnalysis = {
 };
 
 type IncidentRemediation = {
+  _id?: string;
   status?: string;
   target_repo?: string;
   base_branch?: string;
@@ -71,7 +72,99 @@ export default function App() {
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
   const [isMerging, setIsMerging] = useState(false);
+
+  // --- DATA FETCHING & POLLING ---
+
+  const fetchIncidents = useCallback(async () => {
+    if (!isSignedIn) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+
+      const res = await fetch(`${API_BASE_URL}/incidents`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setIncidents(data);
+        
+        if (data.length > 0) {
+          setSelectedIncidentId((prevId) => {
+            const currentStillExists = data.some((inc: Incident) => inc._id === prevId);
+            return currentStillExists ? prevId : data[0]._id;
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Error polling incidents:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [getToken, isSignedIn]);
+
+  const fetchIncidentDetail = useCallback(async (incidentId: string) => {
+    if (!isSignedIn || !incidentId) {
+      setSelectedIncidentDetail(null);
+      return;
+    }
+    try {
+      setDetailLoading(true);
+      const token = await getToken();
+      if (!token) {
+        setSelectedIncidentDetail(null);
+        return;
+      }
+      const response = await fetch(`${API_BASE_URL}/incidents/${incidentId}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        const data = (await response.json()) as IncidentDetailResponse;
+        setSelectedIncidentDetail(data);
+      } else {
+        setSelectedIncidentDetail(null);
+      }
+    } catch (err) {
+      console.error('Error fetching incident details:', err);
+      setSelectedIncidentDetail(null);
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [getToken, isSignedIn]);
+
+  // Unified Polling Loop
+  useEffect(() => {
+    if (!isSignedIn) {
+      setIncidents([]);
+      setSelectedIncidentId(null);
+      setLoading(false);
+      return;
+    }
+
+    fetchIncidents();
+
+    const intervalId = setInterval(() => {
+      fetchIncidents();
+    }, 4000);
+
+    return () => clearInterval(intervalId);
+  }, [fetchIncidents, isSignedIn]);
+
+  // Fetch Incident Details when selection changes
+  useEffect(() => {
+    if (selectedIncidentId) {
+      fetchIncidentDetail(selectedIncidentId);
+    } else {
+      setSelectedIncidentDetail(null);
+    }
+  }, [selectedIncidentId, fetchIncidentDetail]);
+
   // --- ACTIONS ---
+
   const handleMergeHotfix = async (incidentId: string) => {
     setIsMerging(true);
     try {
@@ -88,6 +181,7 @@ export default function App() {
       if (response.ok) {
         alert(`Success! Hotfix merged into main branch.`);
         await fetchIncidents();
+        await fetchIncidentDetail(incidentId);
       } else {
         const errData = await response.json().catch(() => ({}));
         alert(`Failed to merge: ${errData.detail || response.statusText}`);
@@ -99,6 +193,7 @@ export default function App() {
       setIsMerging(false);
     }
   };
+
   const handleReanalyzeWithInstructions = async (incidentId: string) => {
     if (!reanalyzeInstructions.trim()) {
       alert("Please provide instructions first!");
@@ -117,9 +212,10 @@ export default function App() {
         body: JSON.stringify({ instructions: reanalyzeInstructions }),
       });
       if (response.ok) {
-        alert(`Re-analysis triggered! Check back in a few seconds.`);
-        setReanalyzeInstructions(''); // Clear input
-        await fetchIncidents(); // Instant UI refetch
+        alert(`Re-analysis triggered!`);
+        setReanalyzeInstructions(''); 
+        await fetchIncidents();
+        await fetchIncidentDetail(incidentId);
       } else {
         const errData = await response.json().catch(() => ({}));
         alert(`Failed to trigger re-analysis: ${errData.detail || response.statusText}`);
@@ -149,13 +245,13 @@ export default function App() {
         const data = await response.json();
         alert(`Hotfix Approved! GitHub PR Created: ${data.pr_url || 'Success'}`);   
         
-        // Optimistic local update
         setIncidents((prev) =>
           prev.map((inc) =>
             inc._id === incidentId ? { ...inc, status: 'resolved' } : inc
           )
         );
-        await fetchIncidents(); // Instant UI refetch
+        await fetchIncidents();
+        await fetchIncidentDetail(incidentId);
       } else {
         const errData = await response.json().catch(() => ({}));
         alert(`Failed to approve hotfix: ${errData.detail || response.statusText}`);
@@ -169,7 +265,6 @@ export default function App() {
   };
 
   const handleDismiss = async (incidentId: string, e?: React.MouseEvent) => {
-    // Prevent event bubbling if clicked inside incident card button
     if (e) e.stopPropagation();
     try {
       const token = await getToken();
@@ -184,7 +279,6 @@ export default function App() {
       if (response.ok) {
         setIncidents((prevIncidents) => {
           const nextIncidents = prevIncidents.filter((inc) => inc._id !== incidentId); 
-          // If we dismissed the currently active incident, automatically shift selection
           if (selectedIncidentId === incidentId) {
             setSelectedIncidentId(nextIncidents.length > 0 ? nextIncidents[0]._id : null);
           }
@@ -197,95 +291,6 @@ export default function App() {
       console.error('Error dismissing incident:', err);
     }
   };
-
-  // --- DATA FETCHING & POLLING ---
-
-  const fetchIncidents = useCallback(async () => {
-    if (!isSignedIn) return;
-    try {
-      const token = await getToken();
-      if (!token) return;
-
-      const res = await fetch(`${API_BASE_URL}/incidents`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setIncidents(data);
-        
-        // Auto-select the first incident if none is selected yet or if the selected one was removed
-        if (data.length > 0) {
-          setSelectedIncidentId((prevId) => {
-            const currentStillExists = data.some((inc: Incident) => inc._id === prevId);
-            return currentStillExists ? prevId : data[0]._id;
-          });
-        }
-      }
-    } catch (err) {
-      console.error('Error polling incidents:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [getToken, isSignedIn]);
-
-  // Unified Polling Loop
-  useEffect(() => {
-    if (!isSignedIn) {
-      setIncidents([]);
-      setSelectedIncidentId(null);
-      setLoading(false);
-      return;
-    }
-
-    // Fetch immediately on initial mount
-    fetchIncidents();
-
-    // Set up 4-second polling loop
-    const intervalId = setInterval(() => {
-      fetchIncidents();
-    }, 4000);
-
-    // Clean up interval when component unmounts
-    return () => clearInterval(intervalId);
-  }, [fetchIncidents, isSignedIn]);
-
-  // Fetch Incident Details when selection changes
-  useEffect(() => {
-    async function fetchIncidentDetail() {
-      if (!isSignedIn || !selectedIncidentId) {
-        setSelectedIncidentDetail(null);
-        return;
-      }
-      try {
-        setDetailLoading(true);
-        const token = await getToken();
-        if (!token) {
-          setSelectedIncidentDetail(null);
-          return;
-        }
-        const response = await fetch(`${API_BASE_URL}/incidents/${selectedIncidentId}`, {
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (response.ok) {
-          const data = (await response.json()) as IncidentDetailResponse;
-          setSelectedIncidentDetail(data);
-        } else {
-          setSelectedIncidentDetail(null);
-        }
-      } catch (err) {
-        console.error('Error fetching incident details:', err);
-        setSelectedIncidentDetail(null);
-      } finally {
-        setDetailLoading(false);
-      }
-    }
-    fetchIncidentDetail();
-  }, [selectedIncidentId, getToken, isSignedIn]);
 
   // --- RENDER ---
 
@@ -350,8 +355,7 @@ export default function App() {
                     <div className={`incident-card ${isActive ? 'active' : ''}`} onClick={() => setSelectedIncidentId(inc._id)}>
                       <div className="incident-card-top">
                         <span className={`status-chip ${tone}`}>{(inc.status || 'open').replace('_', ' ').toUpperCase()}</span>
-                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>          
-                        {/* Dismiss Button */}
+                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>         
                         <button
                           type="button"
                           className="dismiss-btn"
@@ -444,7 +448,6 @@ export default function App() {
                 <label style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#61dafb' }}>
                   Proposed Code Changes
                 </label>    
-                {/* Renders the diff with GitHub-like red/green highlights */}
                 <CodeDiffView patch={selectedRemediation?.code_patch} />
                 {selectedIncident?.status === 'fix_proposed' && (
                 <div className="reanalyze-container" style={{ marginTop: '1.5rem', borderTop: '1px solid #333', paddingTop: '1rem' }}>
@@ -477,7 +480,7 @@ export default function App() {
                       width: '100%',
                       marginTop: '0.75rem',
                       padding: '0.75rem 1.25rem',
-                      backgroundColor: '#4f46e5', // Indigo
+                      backgroundColor: '#4f46e5',
                       color: '#ffffff',
                       border: 'none',
                       borderRadius: '6px',
@@ -542,7 +545,7 @@ export default function App() {
                       style={{
                         width: '100%',
                         padding: '0.75rem 1.25rem',
-                        backgroundColor: '#1f6feb', // Blue for step 1
+                        backgroundColor: '#1f6feb',
                         color: '#ffffff',
                         border: 'none',
                         borderRadius: '6px',
