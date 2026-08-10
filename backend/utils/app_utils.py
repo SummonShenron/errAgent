@@ -57,7 +57,8 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         stack_trace=payload.get("stack_trace", "No stack trace provided."),
         git_diffs=payload.get("git_diffs", "No git diff context provided."),
         metadata=payload.get("metadata", {}),
-        engineering_instructions=payload.get("engineering_instructions", "")
+        engineering_instructions=payload.get("engineering_instructions", ""),
+        target_file_path=payload.get("target_file_path", "unknown-file.py")
     )
     try:
         # Request structured Pydantic response from Gemini Flash
@@ -86,7 +87,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         })
 
         # 2. Store Remediation PR Draft
-        target_repo = payload.get("repository") or "SummonShenron/SAAPP"
+        target_repo = payload.get("repository") or DEFAULT_TARGET_REPO
         db["remediations"].insert_one({
             "incident_id": incident_id,
             "status": "draft",

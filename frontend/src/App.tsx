@@ -41,6 +41,7 @@ type IncidentRemediation = {
   pr_number?: number;
   approved_by?: string;
   updated_at?: string;
+  target_file_path?: string;
 };
 
 type IncidentDetailResponse = {
@@ -400,7 +401,6 @@ export default function App() {
             <p className="muted">Pick an incident to see full context.</p>
           ) : (
             <>
-              {detailLoading && <p className="muted">Refreshing analysis and remediation data...</p>}
               <div className="detail-grid">
                 <div>
                   <label>Incident ID</label>
@@ -454,9 +454,24 @@ export default function App() {
                 <p>{selectedAnalysis?.suggested_fix || 'Waiting for LLM remediation guidance.'}</p>
               </div>
               <div className="detail-block">
-                <label style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#61dafb' }}>
-                  Proposed Code Changes
-                </label>    
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                  <label style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#61dafb', margin: 0 }}>
+                    Proposed Code Changes
+                  </label>
+                  {selectedRemediation?.target_file_path && (
+                    <span style={{ 
+                      fontSize: '0.85rem', 
+                      color: '#8b949e', 
+                      fontFamily: 'monospace', 
+                      backgroundColor: '#161b22', 
+                      padding: '0.2rem 0.5rem', 
+                      borderRadius: '4px', 
+                      border: '1px solid #30363d' 
+                    }}>
+                      {selectedRemediation.target_file_path}
+                    </span>
+                  )}
+                </div>    
                 <CodeDiffView patch={selectedRemediation?.code_patch} />
                 {selectedIncident?.status === 'fix_proposed' && (
                 <div className="reanalyze-container" style={{ marginTop: '1.5rem', borderTop: '1px solid #333', paddingTop: '1rem' }}>
