@@ -104,7 +104,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash", # Ensure valid model name
+            model="gemini-3.5-flash", # Ensure valid model name
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
