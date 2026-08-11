@@ -373,9 +373,10 @@ async def approve_and_execute_hotfix(
     head = remediation["head_branch"]
     base = remediation["base_branch"]
     
-    # Extract target file and code patch stored in remediation document
-    file_path = remediation.get("target_file_path", "main.py") 
-    file_content = remediation.get("code_patch", "")
+    # Always commit the full patched file content. Falling back to code_patch
+    # is only for legacy records that may not yet have full_file_content.
+    file_path = remediation.get("target_file_path", "main.py")
+    file_content = remediation.get("full_file_content") or remediation.get("code_patch", "")
 
     logger.info(f"Creating branch {head} and pushing commit for {repo}...")
     
