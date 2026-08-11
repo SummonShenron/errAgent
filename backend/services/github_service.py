@@ -222,6 +222,36 @@ class GitHubOpsService:
             return {"status_code": res.status_code, "data": res.json()}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    async def find_open_pull_request(self, repo: str, head: str) -> dict:
+        """Finds an open PR for the given branch head, if one exists."""
+        owner, _, branch = repo.partition("/")
+        if not owner or not branch:
+            return {"status_code": 400, "data": {"message": "Invalid repo format."}}
+
+        url = f"{self.api_base}/repos/{repo}/pulls"
+        params = {"state": "open", "head": f"{owner}:{head}"}
+
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, headers=self.headers, params=params)
+            data = res.json()
+            if res.status_code != 200:
+                return {"status_code": res.status_code, "data": data}
+
+            if not data:
+                return {"status_code": 404, "data": {"message": "No open PR found for head branch."}}
+
+            pr = data[0]
+            return {
+                "status_code": 200,
+                "data": {
+                    "number": pr.get("number"),
+                    "html_url": pr.get("html_url"),
+                    "head": pr.get("head", {}).get("ref"),
+                    "base": pr.get("base", {}).get("ref"),
+                },
+            }
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
     async def merge_pull_request(self, repo: str, pull_number: int, commit_message: str = "Auto-merged hotfix by errAgent") -> dict:
         """Merges an open pull request automatically."""
         url = f"{self.api_base}/repos/{repo}/pulls/{pull_number}/merge"

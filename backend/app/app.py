@@ -685,11 +685,35 @@ async def merge_hotfix_pr(
             },
             sort=[("updated_at", -1), ("created_at", -1)],
         )
-    if not remediation or not remediation.get("pr_number"):
-        raise HTTPException(status_code=404, detail="No active PR found to merge. The latest remediation may not have a PR number yet.")
+    if not remediation:
+        raise HTTPException(status_code=404, detail="No remediation found for this incident.")
+
+    pr_number = remediation.get("pr_number")
+    pr_url = remediation.get("pr_url")
+    if not pr_number:
+        head_branch = remediation.get("head_branch")
+        repo = remediation.get("target_repo")
+        if head_branch and repo:
+            pr_lookup = await github_service.find_open_pull_request(repo=repo, head=head_branch)
+            if pr_lookup.get("status_code") == 200:
+                pr_data = pr_lookup["data"]
+                pr_number = pr_data.get("number")
+                pr_url = pr_data.get("html_url")
+                db["remediations"].update_one(
+                    {"_id": remediation.get("_id")},
+                    {"$set": {
+                        "pr_number": pr_number,
+                        "pr_url": pr_url,
+                        "status": remediation.get("status") or "pr_created",
+                        "updated_at": datetime.now(timezone.utc),
+                    }},
+                )
+
+    if not pr_number:
+        raise HTTPException(status_code=404, detail="No active PR found to merge. The remediation does not have a PR number and no open PR could be found for its branch.")
 
     repo = remediation["target_repo"]
-    pr_number = remediation["pr_number"]
+    
 
     # Execute Merge via GitHub API
     merge_response = await github_service.merge_pull_request(repo=repo, pull_number=pr_number)
