@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 import logging
 import difflib
 import urllib.request
@@ -417,7 +418,12 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
                 "status": "draft",
                 "target_repo": target_repo,
                 "code_patch": canonical_patch,
+                "code_patch_sha256": hashlib.sha256(canonical_patch.encode("utf-8")).hexdigest(),
+                "code_patch_bytes": len(canonical_patch.encode("utf-8")),
                 "full_file_content": full_file_content,
+                "full_file_content_sha256": hashlib.sha256(full_file_content.encode("utf-8")).hexdigest(),
+                "full_file_content_bytes": len(full_file_content.encode("utf-8")),
+                "content_source": "sandbox_applied",
                 "base_branch": result.base_branch,
                 "head_branch": result.head_branch,
                 "pr_title": result.pr_title,

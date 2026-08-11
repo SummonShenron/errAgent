@@ -1,5 +1,6 @@
 import os
 import logging
+import base64
 import httpx
 from fastapi import HTTPException
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -47,6 +48,37 @@ class GitHubOpsService:
         """Creates a new branch and commits file changes using the GitHub Git Data API."""
         async with httpx.AsyncClient() as client:
             base_url = f"{self.api_base}/repos/{repo}"
+
+            # Safety: GitHub contents API expects full file content, never diff text.
+            stripped = (file_content or "").lstrip()
+            if stripped.startswith("diff --git ") or stripped.startswith("--- a/") or stripped.startswith("+++ b/"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Refusing to commit unified diff text as file content.",
+                )
+
+            # Safety: compare against base file size to catch accidental near-total overwrites.
+            current_file_size = None
+            contents_res = await client.get(
+                f"{base_url}/contents/{file_path}",
+                headers=self.headers,
+                params={"ref": base_branch},
+            )
+            if contents_res.status_code == 200:
+                payload = contents_res.json()
+                encoded_content = payload.get("content")
+                if isinstance(encoded_content, str):
+                    decoded = base64.b64decode(encoded_content.encode("utf-8"), validate=False)
+                    current_file_size = len(decoded)
+
+            if current_file_size and len(file_content.encode("utf-8")) < int(current_file_size * 0.4):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Refusing suspiciously small replacement content. "
+                        "Re-analyze incident to generate a safer patch."
+                    ),
+                )
             
             # 1. Get base branch reference SHA
             ref_res = await client.get(f"{base_url}/git/refs/heads/{base_branch}", headers=self.headers)

@@ -66,6 +66,17 @@ def _resolve_commit_file_content(remediation: Dict[str, Any]) -> str:
             ),
         )
 
+    actual_hash = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
+    expected_hash = remediation.get("full_file_content_sha256")
+    if isinstance(expected_hash, str) and expected_hash.strip() and expected_hash != actual_hash:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation content hash mismatch detected. Refusing to commit potentially stale "
+                "or corrupted file content. Re-analyze incident before approving hotfix."
+            ),
+        )
+
     return file_content
 
 
@@ -352,8 +363,8 @@ async def get_incident_detail(incident_id: str, current_user: dict = Depends(get
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found.")
 
-    analysis = db["analyses"].find_one({"incident_id": incident_id}) or {}
-    remediation = db["remediations"].find_one({"incident_id": incident_id}) or {}
+    analysis = db["analyses"].find_one({"incident_id": incident_id}, sort=[("updated_at", -1), ("created_at", -1)]) or {}
+    remediation = db["remediations"].find_one({"incident_id": incident_id}, sort=[("updated_at", -1), ("created_at", -1)]) or {}
 
     return {
         "incident": _serialize_mongo_doc(incident),
@@ -428,7 +439,7 @@ async def approve_and_execute_hotfix(
     actor_username = current_user.get("username", "admin")
 
     # 1. Fetch pending remediation doc
-    remediation = db["remediations"].find_one({"incident_id": incident_id})
+    remediation = db["remediations"].find_one({"incident_id": incident_id}, sort=[("updated_at", -1), ("created_at", -1)])
     if not remediation:
         raise HTTPException(status_code=404, detail="No remediation draft found for this incident.")
 
@@ -449,8 +460,33 @@ async def approve_and_execute_hotfix(
     # Always commit full file content and reject diff-like payloads.
     file_path = remediation.get("target_file_path", "main.py")
     file_content = _resolve_commit_file_content(remediation)
+    file_content_bytes = len(file_content.encode("utf-8"))
+    file_content_sha256 = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
 
-    logger.info(f"Creating branch {head} and pushing commit for {repo}...")
+    logger.info(
+        "Creating branch %s and pushing commit for %s (incident=%s, remediation_id=%s, bytes=%s, sha256=%s)",
+        head,
+        repo,
+        incident_id,
+        remediation.get("_id"),
+        file_content_bytes,
+        file_content_sha256,
+    )
+
+    db["audit_logs"].insert_one({
+        "incident_id": incident_id,
+        "actor": actor_username,
+        "action": "HOTFIX_COMMIT_PAYLOAD_SELECTED",
+        "details": {
+            "remediation_id": str(remediation.get("_id")),
+            "target_repo": repo,
+            "target_file_path": file_path,
+            "full_file_content_bytes": file_content_bytes,
+            "full_file_content_sha256": file_content_sha256,
+            "content_source": remediation.get("content_source"),
+        },
+        "timestamp": datetime.now(timezone.utc),
+    })
     
     # Step A: Create the branch and commit the code fix first
     await github_service.create_branch_and_commit(
@@ -510,7 +546,7 @@ async def approve_and_create_pr(
     current_user: dict = Depends(require_role("Incident_Managers"))
 ):
     db = get_db()
-    remediation = db["remediations"].find_one({"incident_id": incident_id})
+    remediation = db["remediations"].find_one({"incident_id": incident_id}, sort=[("updated_at", -1), ("created_at", -1)])
     if not remediation:
         raise HTTPException(status_code=404, detail="No remediation draft found.")
 
@@ -523,6 +559,18 @@ async def approve_and_create_pr(
     
     # Always commit full file content and reject diff-like payloads.
     file_content = _resolve_commit_file_content(remediation)
+    file_content_bytes = len(file_content.encode("utf-8"))
+    file_content_sha256 = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
+
+    logger.info(
+        "Creating stage-1 branch %s for %s (incident=%s, remediation_id=%s, bytes=%s, sha256=%s)",
+        head,
+        repo,
+        incident_id,
+        remediation.get("_id"),
+        file_content_bytes,
+        file_content_sha256,
+    )
 
     # 1. Push branch & commit full file content
     await github_service.create_branch_and_commit(
@@ -562,7 +610,7 @@ async def merge_hotfix_pr(
     current_user: dict = Depends(require_role("Incident_Managers"))
 ):
     db = get_db()
-    remediation = db["remediations"].find_one({"incident_id": incident_id})
+    remediation = db["remediations"].find_one({"incident_id": incident_id}, sort=[("updated_at", -1), ("created_at", -1)])
     if not remediation or not remediation.get("pr_number"):
         raise HTTPException(status_code=404, detail="No active PR found to merge.")
 
