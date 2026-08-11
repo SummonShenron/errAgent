@@ -1,8 +1,10 @@
 import os
 import hmac
+import json
+import hashlib
 import logging
 from typing import List, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +27,8 @@ SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
 # Backward-compatible legacy shared secret for existing app-to-app clients.
 INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET") or os.getenv("ERRAGENT_INGEST_SECRET")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
+SUPPRESS_DEBUG_INCIDENTS = os.getenv("SUPPRESS_DEBUG_INCIDENTS", "true").lower() in {"1", "true", "yes", "on"}
+INCIDENT_DEDUPE_WINDOW_SECONDS = int(os.getenv("INCIDENT_DEDUPE_WINDOW_SECONDS", "600"))
 
 class ReanalyzeRequest(BaseModel):
     instructions: str
@@ -65,6 +69,28 @@ def _resolve_commit_file_content(remediation: Dict[str, Any]) -> str:
     return file_content
 
 
+def _build_incident_fingerprint(payload: Dict[str, Any]) -> str:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    canonical = {
+        "service_name": str(payload.get("service_name") or "").strip().lower(),
+        "environment": str(payload.get("environment") or "").strip().lower(),
+        "repository": str(payload.get("repository") or "").strip().lower(),
+        "error_message": str(payload.get("error_message") or "").strip(),
+        "stack_trace": str(payload.get("stack_trace") or "").strip(),
+        "source": str(metadata.get("source") or "").strip(),
+        "exception_type": str(metadata.get("exception_type") or "").strip(),
+    }
+    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _is_synthetic_debug_incident(payload: Dict[str, Any]) -> bool:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    source = str(metadata.get("source") or "")
+    stack_trace = str(payload.get("stack_trace") or "")
+    return source == "/api/erragent-debug" or "/api/erragent-debug" in stack_trace
+
+
 def _store_incident_and_queue_analysis(
     db,
     background_tasks: BackgroundTasks,
@@ -74,6 +100,21 @@ def _store_incident_and_queue_analysis(
 ) -> str:
     now = datetime.now(timezone.utc)
     incident_id = incident_id or f"inc_{int(now.timestamp())}"
+    fingerprint = _build_incident_fingerprint(payload)
+
+    dedupe_cutoff = now - timedelta(seconds=max(30, INCIDENT_DEDUPE_WINDOW_SECONDS))
+    existing = db["incidents"].find_one(
+        {
+            "fingerprint": fingerprint,
+            "created_at": {"$gte": dedupe_cutoff},
+            "status": {"$in": ["open", "analyzing", "fix_proposed"]},
+        },
+        sort=[("created_at", -1)],
+    )
+    if existing:
+        existing_id = existing.get("_id")
+        logger.info("Skipping duplicate incident ingest. fingerprint=%s existing_id=%s", fingerprint, existing_id)
+        return str(existing_id)
 
     incident_doc = {
         "_id": incident_id,
@@ -82,6 +123,7 @@ def _store_incident_and_queue_analysis(
         "error_message": payload.get("error_message", "Unhandled Exception"),
         "stack_trace": payload.get("stack_trace", ""),
         "repository": payload.get("repository", ""),
+        "fingerprint": fingerprint,
         "status": "open",
         "metadata": payload.get("metadata", {}),
         "created_at": now,
@@ -585,6 +627,11 @@ async def handle_machine_ingest(
         ingest_context.get("app_id"),
         payload,
     )
+
+    if SUPPRESS_DEBUG_INCIDENTS and _is_synthetic_debug_incident(payload):
+        logger.info("Ignoring synthetic debug incident from /api/erragent-debug")
+        return {"status": "ignored_debug_event"}
+
     incident_id = _ingest_machine_payload(
         db,
         background_tasks,
