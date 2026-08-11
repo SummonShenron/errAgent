@@ -39,6 +39,32 @@ def _serialize_mongo_doc(value: Any) -> Any:
     return value
 
 
+def _resolve_commit_file_content(remediation: Dict[str, Any]) -> str:
+    """
+    Commit payload must be the full file content, never a unified diff string.
+    """
+    file_content = remediation.get("full_file_content")
+    if not isinstance(file_content, str) or not file_content.strip():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation is missing full_file_content. Re-analyze incident before approving hotfix."
+            ),
+        )
+
+    stripped = file_content.lstrip()
+    if stripped.startswith("diff --git ") or stripped.startswith("--- a/") or stripped.startswith("+++ b/"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation full_file_content looks like patch text, not file contents. "
+                "Re-analyze incident before approving hotfix."
+            ),
+        )
+
+    return file_content
+
+
 def _store_incident_and_queue_analysis(
     db,
     background_tasks: BackgroundTasks,
@@ -373,10 +399,9 @@ async def approve_and_execute_hotfix(
     head = remediation["head_branch"]
     base = remediation["base_branch"]
     
-    # Always commit the full patched file content. Falling back to code_patch
-    # is only for legacy records that may not yet have full_file_content.
+    # Always commit full file content and reject diff-like payloads.
     file_path = remediation.get("target_file_path", "main.py")
-    file_content = remediation.get("full_file_content") or remediation.get("code_patch", "")
+    file_content = _resolve_commit_file_content(remediation)
 
     logger.info(f"Creating branch {head} and pushing commit for {repo}...")
     
@@ -449,8 +474,8 @@ async def approve_and_create_pr(
     base = remediation["base_branch"]
     file_path = remediation.get("target_file_path", "main.py")
     
-    # Use full_file_content so GitHub updates the file properly without wiping it!
-    file_content = remediation.get("full_file_content") or remediation.get("code_patch", "")
+    # Always commit full file content and reject diff-like payloads.
+    file_content = _resolve_commit_file_content(remediation)
 
     # 1. Push branch & commit full file content
     await github_service.create_branch_and_commit(

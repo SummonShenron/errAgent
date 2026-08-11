@@ -17,6 +17,37 @@ import tempfile
 logger = logging.getLogger("errAgent Logger")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 
+
+def _upsert_remediation_failure(
+    db,
+    incident_id: str,
+    reason: str,
+    target_repo: str | None = None,
+    target_file: str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    update_doc = {
+        "status": "analysis_failed",
+        "failure_reason": str(reason),
+        "updated_at": now,
+    }
+    if target_repo:
+        update_doc["target_repo"] = target_repo
+    if target_file:
+        update_doc["target_file_path"] = target_file
+
+    db["remediations"].update_one(
+        {"incident_id": incident_id},
+        {
+            "$set": update_doc,
+            "$setOnInsert": {
+                "incident_id": incident_id,
+                "created_at": now,
+            },
+        },
+        upsert=True,
+    )
+
 class AIAnalysisSchema(BaseModel):
     root_cause_summary: str = Field(description="Concise 2-3 sentence root cause breakdown.")
     severity: str = Field(description="Severity rating: LOW, MEDIUM, HIGH, or CRITICAL.")
@@ -174,6 +205,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         logger.error("GOOGLE_API_KEY is not configured.")
+        _upsert_remediation_failure(db, incident_id, "GOOGLE_API_KEY is not configured.")
         db["incidents"].update_one(
             {"_id": incident_id},
             {"$set": {"status": "analysis_failed", "updated_at": datetime.now(timezone.utc)}}
@@ -217,10 +249,21 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             break
 
     if not file_fetched:
+        failure_reason = (
+            f"Could not fetch any target file from {target_repo}. "
+            f"Candidates={target_file_candidates}"
+        )
         logger.error(
             "--> [errAgent AI] CRITICAL: Could not fetch any target file from %s. Candidates=%s",
             target_repo,
             target_file_candidates,
+        )
+        _upsert_remediation_failure(
+            db,
+            incident_id,
+            failure_reason,
+            target_repo=target_repo,
+            target_file=target_file,
         )
         db["incidents"].update_one(
             {"_id": incident_id},
@@ -393,6 +436,13 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 
     except Exception as exc:
         logger.error("--> [errAgent AI] Analysis pipeline failed for %s: %s", incident_id, str(exc))
+        _upsert_remediation_failure(
+            db,
+            incident_id,
+            str(exc),
+            target_repo=target_repo,
+            target_file=target_file,
+        )
         db["incidents"].update_one(
             {"_id": incident_id},
             {"$set": {"status": "analysis_failed", "updated_at": datetime.now(timezone.utc)}}

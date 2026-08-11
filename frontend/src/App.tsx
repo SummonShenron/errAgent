@@ -31,6 +31,7 @@ type IncidentAnalysis = {
 type IncidentRemediation = {
   _id?: string;
   status?: string;
+  failure_reason?: string;
   target_repo?: string;
   base_branch?: string;
   head_branch?: string;
@@ -522,6 +523,9 @@ export default function App() {
                 <label style={{ marginTop: '1rem' }}>Proposed PR Details</label>
                 <p><strong>Title:</strong> {selectedRemediation?.pr_title || 'No PR draft yet.'}</p>
                 <p><strong>Status:</strong> {(selectedRemediation?.status || 'not_created').replace('_', ' ')}</p>
+                {selectedRemediation?.failure_reason ? (
+                  <p><strong>Failure Reason:</strong> {selectedRemediation.failure_reason}</p>
+                ) : null}
                 <p><strong>Branches:</strong> {(selectedRemediation?.head_branch || 'n/a')} {'->'} {(selectedRemediation?.base_branch || 'n/a')}</p>
                 <p><strong>Repository:</strong> {selectedRemediation?.target_repo || selectedIncidentFromDetail?.repository || 'n/a'}</p>
                 
