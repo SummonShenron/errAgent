@@ -490,6 +490,7 @@ CRITICAL RETRY RULES:
 
         for attempt_index in range(2):
             prompt_to_use = prompt if attempt_index == 0 else f"{prompt}\n{retry_suffix}"
+            logger.info("--> [errAgent AI] Starting generation attempt=%s for incident=%s", attempt_index + 1, incident_id)
             response = client.models.generate_content(
                 model="gemini-3.5-flash",
                 contents=prompt_to_use,
@@ -512,8 +513,10 @@ CRITICAL RETRY RULES:
                 logger.info("--> [errAgent AI] Using deterministic snippet edit synthesis (attempt=%s).", attempt_index + 1)
             except Exception as snippet_exc:
                 logger.warning(
-                    "--> [errAgent AI] Snippet synthesis unavailable (attempt=%s): %s",
+                    "--> [errAgent AI] Snippet synthesis unavailable (attempt=%s, old_len=%s, new_len=%s): %s",
                     attempt_index + 1,
+                    len(result.old_snippet or ""),
+                    len(result.new_snippet or ""),
                     str(snippet_exc),
                 )
                 clean_patch = ""
