@@ -105,6 +105,61 @@ def _extract_target_file_candidates(stack_trace: str, payload: dict[str, Any]) -
         return ["app.py"]
     return candidates
 
+
+def _validate_patch_safety(clean_patch: str, target_file: str, existing_code: str) -> None:
+    """
+    Reject malformed or destructive patches before `git apply`.
+    Guardrails:
+    - Patch must be a diff (no prose/code prelude before diff headers).
+    - Patch must modify exactly one file and that file must be target_file.
+    - Patch must not look like a near-total file deletion.
+    """
+    if not clean_patch.strip():
+        raise ValueError("Patch rejected: empty patch content.")
+
+    lines = clean_patch.splitlines()
+    first_non_empty = next((line.strip() for line in lines if line.strip()), "")
+    if not (first_non_empty.startswith("--- a/") or first_non_empty.startswith("diff --git ")):
+        raise ValueError("Patch rejected: patch must start with a unified diff header.")
+
+    if "--- a/" not in clean_patch or "+++ b/" not in clean_patch:
+        raise ValueError("Patch rejected: missing required unified diff file headers.")
+
+    normalized_target = target_file.replace("\\", "/").lstrip("/")
+    old_paths = re.findall(r"^--- a/(.+)$", clean_patch, flags=re.MULTILINE)
+    new_paths = re.findall(r"^\+\+\+ b/(.+)$", clean_patch, flags=re.MULTILINE)
+
+    if not old_paths or not new_paths:
+        raise ValueError("Patch rejected: could not parse file headers.")
+
+    touched_old = {path.strip() for path in old_paths}
+    touched_new = {path.strip() for path in new_paths}
+    touched = touched_old | touched_new
+
+    if len(touched) != 1:
+        raise ValueError(f"Patch rejected: patch must touch exactly one file. Found={sorted(touched)}")
+
+    only_touched = next(iter(touched))
+    if only_touched != normalized_target:
+        raise ValueError(
+            f"Patch rejected: patch targets '{only_touched}' but expected '{normalized_target}'."
+        )
+
+    # Reject suspicious near-total deletion patterns.
+    deleted_lines = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
+    added_lines = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
+    original_line_count = max(1, len(existing_code.splitlines()))
+
+    if deleted_lines > int(original_line_count * 0.8):
+        raise ValueError(
+            "Patch rejected: deletion volume is too high relative to target file size."
+        )
+
+    if deleted_lines > int(original_line_count * 0.6) and added_lines < int(deleted_lines * 0.2):
+        raise ValueError(
+            "Patch rejected: patch appears to remove most of the file without equivalent replacement."
+        )
+
 def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     db = get_db()
     if db is None:
@@ -174,13 +229,22 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         return
 
     # 2. Build base prompt with format context
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    engineering_instructions = (
+        payload.get("engineering_instructions")
+        or metadata.get("engineering_instructions")
+        or ""
+    )
+
     base_prompt = INCIDENT_ANALYSIS_PROMPT.format(
         service_name=payload.get("service_name", "unknown-service"),
         environment=payload.get("environment", "production"),
         stack_trace=stack_trace,
         git_diffs=payload.get("git_diffs", "No git diff context provided."),
-        metadata=payload.get("metadata", {}),
-        engineering_instructions=payload.get("engineering_instructions", ""),
+        metadata=metadata,
+        engineering_instructions=engineering_instructions,
         target_file_path=target_file
     )
 
@@ -208,6 +272,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
         result: AIAnalysisSchema = response.parsed
         now = datetime.now(timezone.utc)
         full_file_content = existing_code
+        canonical_patch = clean_patch = ""
         # ---------------------------------------------------------
         # 3. Apply patch inside an Isolated Temporary Sandbox
         clean_patch = result.code_patch.strip()
@@ -223,6 +288,8 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
         if "--- /dev/null" in clean_patch:
             logger.error("--> [errAgent AI] FATAL: LLM attempted to use '--- /dev/null'. Aborting patch.")
             raise ValueError("Patch rejected: LLM attempted to create a new file instead of modifying the existing one.")
+
+        _validate_patch_safety(clean_patch=clean_patch, target_file=target_file, existing_code=existing_code)
 
         # Create a temporary directory that destroys itself when the block ends
         with tempfile.TemporaryDirectory() as sandbox_dir:
@@ -270,6 +337,28 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
                 with open(sandbox_file_path, "r", encoding="utf-8") as f:
                     full_file_content = f.read()
 
+                # Generate canonical diff from git so DB/UI never rely on malformed LLM diff formatting.
+                canonical_diff_result = subprocess.run(
+                    ["git", "diff", "--", target_file],
+                    cwd=sandbox_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                if canonical_diff_result.returncode != 0:
+                    raise ValueError(
+                        f"Failed to generate canonical diff: {canonical_diff_result.stderr.strip()}"
+                    )
+                canonical_patch = canonical_diff_result.stdout.strip() + "\n"
+                if not canonical_patch.strip():
+                    raise ValueError("Patch applied but produced no diff; refusing to save empty remediation patch.")
+
+                # Post-apply anti-nuke sanity check.
+                original_chars = max(1, len(existing_code))
+                if len(full_file_content) < int(original_chars * 0.4):
+                    raise ValueError(
+                        "Patch rejected: patched file is unexpectedly small relative to original file."
+                    )
+
             # 4. Save to Database
             db["analyses"].insert_one({
                 "incident_id": incident_id,
@@ -284,7 +373,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
                 "incident_id": incident_id,
                 "status": "draft",
                 "target_repo": target_repo,
-                "code_patch": result.code_patch,
+                "code_patch": canonical_patch,
                 "full_file_content": full_file_content,
                 "base_branch": result.base_branch,
                 "head_branch": result.head_branch,

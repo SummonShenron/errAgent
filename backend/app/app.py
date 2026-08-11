@@ -567,7 +567,6 @@ async def handle_machine_ingest(
         app_id=ingest_context.get("app_id"),
         app_default_repo=ingest_context.get("default_repo"),
     )
-    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
     return {"status": "accepted", "incident_id": incident_id}
 
 # --- Vercel Webhook ---
