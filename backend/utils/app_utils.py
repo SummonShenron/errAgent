@@ -247,6 +247,29 @@ def _normalize_generated_patch(raw_patch: str) -> str:
         clean_patch = re.sub(r"^```[a-zA-Z]*\n?", "", clean_patch)
     if clean_patch.endswith("```"):
         clean_patch = re.sub(r"\n?```$", "", clean_patch)
+
+    # Repair common malformed inline unified-diff markers where newlines were collapsed.
+    clean_patch = re.sub(
+        r"(diff --git a/[^\s]+ b/[^\s]+)(index\s+[0-9a-fA-F])",
+        r"\1\n\2",
+        clean_patch,
+    )
+    clean_patch = re.sub(
+        r"(index\s+[0-9a-fA-F]+\.\.[0-9a-fA-F]+\s+\d{6})(---\s+a/)",
+        r"\1\n\2",
+        clean_patch,
+    )
+    clean_patch = re.sub(
+        r"(---\s+a/[^\n\r\+]+)(\+\+\+\s+b/)",
+        r"\1\n\2",
+        clean_patch,
+    )
+    clean_patch = re.sub(
+        r"(\+\+\+\s+b/[^\n\r@]+)(@@\s)",
+        r"\1\n\2",
+        clean_patch,
+    )
+
     return clean_patch.strip() + "\n"
 
 
