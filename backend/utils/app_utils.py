@@ -198,10 +198,83 @@ def _validate_patch_safety(clean_patch: str, target_file: str, existing_code: st
             "Patch rejected: deletion volume is too high relative to target file size."
         )
 
+    # Reject near-total rewrites that start from the top of the file.
+    first_hunk = re.search(r"^@@\s*-([0-9]+)(?:,[0-9]+)?\s+\+([0-9]+)(?:,[0-9]+)?\s+@@", clean_patch, flags=re.MULTILINE)
+    if first_hunk:
+        old_start = int(first_hunk.group(1))
+        new_start = int(first_hunk.group(2))
+        if old_start <= 3 and new_start <= 3 and deleted_lines > int(original_line_count * 0.5):
+            raise ValueError(
+                "Patch rejected: looks like a full-file rewrite diff. Provide minimal localized hunks only."
+            )
+
     if deleted_lines > int(original_line_count * 0.6) and added_lines < int(deleted_lines * 0.2):
         raise ValueError(
             "Patch rejected: patch appears to remove most of the file without equivalent replacement."
         )
+
+
+def _normalize_generated_patch(raw_patch: str) -> str:
+    clean_patch = (raw_patch or "").strip()
+    if clean_patch.startswith("```"):
+        clean_patch = re.sub(r"^```[a-zA-Z]*\n?", "", clean_patch)
+    if clean_patch.endswith("```"):
+        clean_patch = re.sub(r"\n?```$", "", clean_patch)
+    return clean_patch.strip() + "\n"
+
+
+def _apply_patch_in_sandbox(target_file: str, existing_code: str, clean_patch: str) -> tuple[str, str]:
+    with tempfile.TemporaryDirectory() as sandbox_dir:
+        sandbox_file_path = os.path.join(sandbox_dir, target_file)
+        os.makedirs(os.path.dirname(sandbox_file_path) or sandbox_dir, exist_ok=True)
+
+        with open(sandbox_file_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write(existing_code)
+
+        subprocess.run(["git", "init"], cwd=sandbox_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "bot@erragent.com"], cwd=sandbox_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "errAgent"], cwd=sandbox_dir, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=sandbox_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=sandbox_dir, capture_output=True)
+
+        patch_path = os.path.join(sandbox_dir, "fix.patch")
+        with open(patch_path, "w", encoding="utf-8") as patch_handle:
+            patch_handle.write(clean_patch)
+
+        apply_result = subprocess.run(
+            [
+                "git", "apply",
+                "-p1",
+                "--recount",
+                "--ignore-space-change",
+                "--ignore-whitespace",
+                "--unidiff-zero",
+                "fix.patch",
+            ],
+            cwd=sandbox_dir,
+            capture_output=True,
+            text=True,
+        )
+        if apply_result.returncode != 0:
+            raise ValueError(f"Patch apply failed in sandbox: {apply_result.stderr.strip()}")
+
+        with open(sandbox_file_path, "r", encoding="utf-8") as file_handle:
+            full_file_content = file_handle.read()
+
+        canonical_diff_result = subprocess.run(
+            ["git", "diff", "--", target_file],
+            cwd=sandbox_dir,
+            capture_output=True,
+            text=True,
+        )
+        if canonical_diff_result.returncode != 0:
+            raise ValueError(f"Failed to generate canonical diff: {canonical_diff_result.stderr.strip()}")
+
+        canonical_patch = canonical_diff_result.stdout.strip() + "\n"
+        if not canonical_patch.strip():
+            raise ValueError("Patch applied but produced no diff; refusing to save empty remediation patch.")
+
+        return full_file_content, canonical_patch
 
 def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     db = get_db()
@@ -316,147 +389,105 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
     logger.info(f"--> [errAgent AI] Prompt sent to Gemini (first 500 chars):\n{prompt[:500]}...")
 
     try:
-        response = client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=AIAnalysisSchema,
-                temperature=0.1,
-            ),
-        )
-
-        result: AIAnalysisSchema = response.parsed
+        result: AIAnalysisSchema | None = None
         now = datetime.now(timezone.utc)
         full_file_content = existing_code
         canonical_patch = clean_patch = ""
-        resolved_head_branch = _build_unique_head_branch(result.head_branch, incident_id)
-        # ---------------------------------------------------------
-        # 3. Apply patch inside an Isolated Temporary Sandbox
-        clean_patch = result.code_patch.strip()
-        if clean_patch.startswith("```"):
-            clean_patch = re.sub(r"^```[a-zA-Z]*\n?", "", clean_patch)
-        if clean_patch.endswith("```"):
-            clean_patch = re.sub(r"\n?```$", "", clean_patch)
-        clean_patch = clean_patch.strip() + "\n"
+        resolved_head_branch = ""
+        last_error: Exception | None = None
+        retry_suffix = """
 
-        logger.info(f"--> [errAgent AI] Generated Patch:\n{clean_patch}")
+CRITICAL RETRY RULES:
+- Output a minimal patch with only localized hunks near the failing function.
+- Do not rewrite from top-of-file. Do not emit broad file-wide changes.
+- Keep patch to one target file only.
+"""
 
-        # Guardrail: reject file-creation patches when we expect in-place edits.
-        if "--- /dev/null" in clean_patch:
-            logger.error("--> [errAgent AI] FATAL: LLM attempted to use '--- /dev/null'. Aborting patch.")
-            raise ValueError("Patch rejected: LLM attempted to create a new file instead of modifying the existing one.")
-
-        _validate_patch_safety(clean_patch=clean_patch, target_file=target_file, existing_code=existing_code)
-
-        # Create a temporary directory that destroys itself when the block ends
-        with tempfile.TemporaryDirectory() as sandbox_dir:
-            # Recreate the file structure safely inside the sandbox
-            sandbox_file_path = os.path.join(sandbox_dir, target_file)
-            os.makedirs(os.path.dirname(sandbox_file_path) or sandbox_dir, exist_ok=True)
-
-            with open(sandbox_file_path, "w", encoding="utf-8") as f:
-                f.write(existing_code)
-
-            # Initialize a fake Git repo so `git apply` behaves perfectly
-            subprocess.run(["git", "init"], cwd=sandbox_dir, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "bot@erragent.com"], cwd=sandbox_dir, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "errAgent"], cwd=sandbox_dir, capture_output=True)
-            subprocess.run(["git", "add", "."], cwd=sandbox_dir, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=sandbox_dir, capture_output=True)
-
-            # Save the LLM's patch to a file
-            patch_path = os.path.join(sandbox_dir, "fix.patch")
-            with open(patch_path, "w", encoding="utf-8") as tf:
-                tf.write(clean_patch)
-
-            # Run git apply isolated in the sandbox
-            apply_result = subprocess.run(
-                [
-                    "git", "apply",
-                    "-p1",
-                    "--recount",
-                    "--ignore-space-change",
-                    "--ignore-whitespace",
-                    "--unidiff-zero",
-                    "fix.patch"
-                ],
-                cwd=sandbox_dir,
-                capture_output=True,
-                text=True
+        for attempt_index in range(2):
+            prompt_to_use = prompt if attempt_index == 0 else f"{prompt}\n{retry_suffix}"
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt_to_use,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=AIAnalysisSchema,
+                    temperature=0.1,
+                ),
             )
 
-            if apply_result.returncode != 0:
-                logger.error(f"--> [errAgent AI] Sandboxed git apply failed: {apply_result.stderr}")
-                raise ValueError(f"Patch apply failed in sandbox: {apply_result.stderr.strip()}")
-            else:
-                logger.info("--> [errAgent AI] Successfully applied patch in isolated sandbox.")
-                # Read the patched code back into memory
-                with open(sandbox_file_path, "r", encoding="utf-8") as f:
-                    full_file_content = f.read()
+            result = response.parsed
+            resolved_head_branch = _build_unique_head_branch(result.head_branch, incident_id)
+            clean_patch = _normalize_generated_patch(result.code_patch)
+            logger.info(f"--> [errAgent AI] Generated Patch (attempt={attempt_index + 1}):\n{clean_patch}")
 
-                # Generate canonical diff from git so DB/UI never rely on malformed LLM diff formatting.
-                canonical_diff_result = subprocess.run(
-                    ["git", "diff", "--", target_file],
-                    cwd=sandbox_dir,
-                    capture_output=True,
-                    text=True,
+            try:
+                if "--- /dev/null" in clean_patch:
+                    raise ValueError("Patch rejected: LLM attempted to create a new file instead of modifying the existing one.")
+
+                _validate_patch_safety(clean_patch=clean_patch, target_file=target_file, existing_code=existing_code)
+                full_file_content, canonical_patch = _apply_patch_in_sandbox(
+                    target_file=target_file,
+                    existing_code=existing_code,
+                    clean_patch=clean_patch,
                 )
-                if canonical_diff_result.returncode != 0:
-                    raise ValueError(
-                        f"Failed to generate canonical diff: {canonical_diff_result.stderr.strip()}"
-                    )
-                canonical_patch = canonical_diff_result.stdout.strip() + "\n"
-                if not canonical_patch.strip():
-                    raise ValueError("Patch applied but produced no diff; refusing to save empty remediation patch.")
 
-                # Post-apply anti-nuke sanity check.
                 original_chars = max(1, len(existing_code))
                 if len(full_file_content) < int(original_chars * 0.4):
-                    raise ValueError(
-                        "Patch rejected: patched file is unexpectedly small relative to original file."
-                    )
+                    raise ValueError("Patch rejected: patched file is unexpectedly small relative to original file.")
 
-            # 4. Save to Database
-            db["analyses"].insert_one({
-                "incident_id": incident_id,
-                "root_cause_summary": result.root_cause_summary,
-                "severity": result.severity,
-                "suggested_fix": result.suggested_fix,
-                "confidence_score": 0.95,
-                "created_at": now,
-            })
+                last_error = None
+                break
+            except Exception as patch_exc:
+                last_error = patch_exc
+                logger.error(
+                    "--> [errAgent AI] Attempt %s patch validation/apply failed: %s",
+                    attempt_index + 1,
+                    str(patch_exc),
+                )
 
-            db["remediations"].insert_one({
-                "incident_id": incident_id,
-                "status": "draft",
-                "target_repo": target_repo,
-                "base_file_branch": fetched_branch,
-                "base_file_sha256": hashlib.sha256(existing_code.encode("utf-8")).hexdigest(),
-                "base_file_bytes": len(existing_code.encode("utf-8")),
-                "code_patch": canonical_patch,
-                "code_patch_sha256": hashlib.sha256(canonical_patch.encode("utf-8")).hexdigest(),
-                "code_patch_bytes": len(canonical_patch.encode("utf-8")),
-                "full_file_content": full_file_content,
-                "full_file_content_sha256": hashlib.sha256(full_file_content.encode("utf-8")).hexdigest(),
-                "full_file_content_bytes": len(full_file_content.encode("utf-8")),
-                "content_source": "sandbox_applied",
-                "base_branch": result.base_branch,
-                "head_branch": resolved_head_branch,
-                "head_branch_original": result.head_branch,
-                "pr_title": result.pr_title,
-                "pr_body": result.pr_body,
-                "target_file_path": target_file,
-                "created_at": now,
-                "updated_at": now,
-            })
+        if last_error is not None or result is None:
+            raise ValueError(f"Patch generation failed after retry: {str(last_error) if last_error else 'unknown error'}")
 
-            db["incidents"].update_one(
-                {"_id": incident_id},
-                {"$set": {"status": "fix_proposed", "updated_at": now}}
-            )
+        # 4. Save to Database
+        db["analyses"].insert_one({
+            "incident_id": incident_id,
+            "root_cause_summary": result.root_cause_summary,
+            "severity": result.severity,
+            "suggested_fix": result.suggested_fix,
+            "confidence_score": 0.95,
+            "created_at": now,
+        })
 
-            logger.info("--> [errAgent AI] Successfully applied patch and generated fix for incident: %s", incident_id)
+        db["remediations"].insert_one({
+            "incident_id": incident_id,
+            "status": "draft",
+            "target_repo": target_repo,
+            "base_file_branch": fetched_branch,
+            "base_file_sha256": hashlib.sha256(existing_code.encode("utf-8")).hexdigest(),
+            "base_file_bytes": len(existing_code.encode("utf-8")),
+            "code_patch": canonical_patch,
+            "code_patch_sha256": hashlib.sha256(canonical_patch.encode("utf-8")).hexdigest(),
+            "code_patch_bytes": len(canonical_patch.encode("utf-8")),
+            "full_file_content": full_file_content,
+            "full_file_content_sha256": hashlib.sha256(full_file_content.encode("utf-8")).hexdigest(),
+            "full_file_content_bytes": len(full_file_content.encode("utf-8")),
+            "content_source": "sandbox_applied",
+            "base_branch": result.base_branch,
+            "head_branch": resolved_head_branch,
+            "head_branch_original": result.head_branch,
+            "pr_title": result.pr_title,
+            "pr_body": result.pr_body,
+            "target_file_path": target_file,
+            "created_at": now,
+            "updated_at": now,
+        })
+
+        db["incidents"].update_one(
+            {"_id": incident_id},
+            {"$set": {"status": "fix_proposed", "updated_at": now}}
+        )
+
+        logger.info("--> [errAgent AI] Successfully applied patch and generated fix for incident: %s", incident_id)
 
     except Exception as exc:
         logger.error("--> [errAgent AI] Analysis pipeline failed for %s: %s", incident_id, str(exc))
