@@ -27,7 +27,7 @@ SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
 # Backward-compatible legacy shared secret for existing app-to-app clients.
 INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET") or os.getenv("ERRAGENT_INGEST_SECRET")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
-SUPPRESS_DEBUG_INCIDENTS = os.getenv("SUPPRESS_DEBUG_INCIDENTS", "true").lower() in {"1", "true", "yes", "on"}
+SUPPRESS_DEBUG_INCIDENTS = os.getenv("SUPPRESS_DEBUG_INCIDENTS", "false").lower() in {"1", "true", "yes", "on"}
 INCIDENT_DEDUPE_WINDOW_SECONDS = int(os.getenv("INCIDENT_DEDUPE_WINDOW_SECONDS", "600"))
 
 class ReanalyzeRequest(BaseModel):
@@ -89,6 +89,11 @@ def _is_synthetic_debug_incident(payload: Dict[str, Any]) -> bool:
     source = str(metadata.get("source") or "")
     stack_trace = str(payload.get("stack_trace") or "")
     return source == "/api/erragent-debug" or "/api/erragent-debug" in stack_trace
+
+
+def _debug_suppression_bypassed(payload: Dict[str, Any]) -> bool:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return bool(payload.get("force_ingest_debug") or metadata.get("force_ingest_debug"))
 
 
 def _store_incident_and_queue_analysis(
@@ -628,7 +633,7 @@ async def handle_machine_ingest(
         payload,
     )
 
-    if SUPPRESS_DEBUG_INCIDENTS and _is_synthetic_debug_incident(payload):
+    if SUPPRESS_DEBUG_INCIDENTS and _is_synthetic_debug_incident(payload) and not _debug_suppression_bypassed(payload):
         logger.info("Ignoring synthetic debug incident from /api/erragent-debug")
         return {"status": "ignored_debug_event"}
 
