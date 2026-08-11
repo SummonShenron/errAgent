@@ -219,6 +219,11 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 
         logger.info(f"--> [errAgent AI] Generated Patch:\n{clean_patch}")
 
+        # Guardrail: reject file-creation patches when we expect in-place edits.
+        if "--- /dev/null" in clean_patch:
+            logger.error("--> [errAgent AI] FATAL: LLM attempted to use '--- /dev/null'. Aborting patch.")
+            raise ValueError("Patch rejected: LLM attempted to create a new file instead of modifying the existing one.")
+
         # Create a temporary directory that destroys itself when the block ends
         with tempfile.TemporaryDirectory() as sandbox_dir:
             # Recreate the file structure safely inside the sandbox
@@ -230,6 +235,8 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 
             # Initialize a fake Git repo so `git apply` behaves perfectly
             subprocess.run(["git", "init"], cwd=sandbox_dir, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "bot@erragent.com"], cwd=sandbox_dir, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "errAgent"], cwd=sandbox_dir, capture_output=True)
             subprocess.run(["git", "add", "."], cwd=sandbox_dir, capture_output=True)
             subprocess.run(["git", "commit", "-m", "init"], cwd=sandbox_dir, capture_output=True)
 
@@ -256,8 +263,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 
             if apply_result.returncode != 0:
                 logger.error(f"--> [errAgent AI] Sandboxed git apply failed: {apply_result.stderr}")
-                # Fallback to the unpatched code if Git rejects it
-                full_file_content = existing_code
+                raise ValueError(f"Patch apply failed in sandbox: {apply_result.stderr.strip()}")
             else:
                 logger.info("--> [errAgent AI] Successfully applied patch in isolated sandbox.")
                 # Read the patched code back into memory
