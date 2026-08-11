@@ -56,6 +56,16 @@ def _resolve_commit_file_content(remediation: Dict[str, Any]) -> str:
             ),
         )
 
+    content_source = remediation.get("content_source")
+    if content_source != "sandbox_applied":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation content source is not trusted for commit. "
+                "Re-analyze incident before approving hotfix."
+            ),
+        )
+
     stripped = file_content.lstrip()
     if stripped.startswith("diff --git ") or stripped.startswith("--- a/") or stripped.startswith("+++ b/"):
         raise HTTPException(
@@ -68,6 +78,14 @@ def _resolve_commit_file_content(remediation: Dict[str, Any]) -> str:
 
     actual_hash = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
     expected_hash = remediation.get("full_file_content_sha256")
+    if not isinstance(expected_hash, str) or not expected_hash.strip():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation is missing full_file_content_sha256. "
+                "Re-analyze incident before approving hotfix."
+            ),
+        )
     if isinstance(expected_hash, str) and expected_hash.strip() and expected_hash != actual_hash:
         raise HTTPException(
             status_code=409,
@@ -489,12 +507,14 @@ async def approve_and_execute_hotfix(
     })
     
     # Step A: Create the branch and commit the code fix first
-    await github_service.create_branch_and_commit(
+    commit_result = await github_service.create_branch_and_commit(
         repo=repo,
         base_branch=base,
         new_branch=head,
         file_path=file_path,
         file_content=file_content,
+        expected_base_file_sha256=remediation.get("base_file_sha256"),
+        expected_full_file_sha256=remediation.get("full_file_content_sha256"),
         commit_message=f"Fix incident: {title}"
     )
 
@@ -516,7 +536,14 @@ async def approve_and_execute_hotfix(
     
     db["remediations"].update_one(
         {"incident_id": incident_id},
-        {"$set": {"status": "executed", "approved_by": actor_username, "pr_url": pr_url, "updated_at": now}}
+        {"$set": {
+            "status": "executed",
+            "approved_by": actor_username,
+            "pr_url": pr_url,
+            "commit_sha": commit_result.get("new_commit_sha"),
+            "branch_updated": commit_result.get("branch_updated"),
+            "updated_at": now,
+        }}
     )
     
     db["incidents"].update_one(
@@ -529,7 +556,11 @@ async def approve_and_execute_hotfix(
         "incident_id": incident_id,
         "actor": actor_username,
         "action": "HOTFIX_APPROVED_AND_EXECUTED",
-        "details": {"pr_url": pr_url},
+        "details": {
+            "pr_url": pr_url,
+            "commit_sha": commit_result.get("new_commit_sha"),
+            "branch_name": commit_result.get("branch_name"),
+        },
         "timestamp": now
     })
 
@@ -573,9 +604,13 @@ async def approve_and_create_pr(
     )
 
     # 1. Push branch & commit full file content
-    await github_service.create_branch_and_commit(
+    commit_result = await github_service.create_branch_and_commit(
         repo=repo, base_branch=base, new_branch=head, 
-        file_path=file_path, file_content=file_content, commit_message=f"Fix incident: {title}"
+        file_path=file_path,
+        file_content=file_content,
+        expected_base_file_sha256=remediation.get("base_file_sha256"),
+        expected_full_file_sha256=remediation.get("full_file_content_sha256"),
+        commit_message=f"Fix incident: {title}"
     )
 
     # 2. Open PR
@@ -595,6 +630,8 @@ async def approve_and_create_pr(
             "status": "pr_created", 
             "pr_url": pr_url, 
             "pr_number": pr_number, 
+            "commit_sha": commit_result.get("new_commit_sha"),
+            "branch_updated": commit_result.get("branch_updated"),
             "approved_by": current_user.get("username"),
             "updated_at": now
         }}

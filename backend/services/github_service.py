@@ -1,6 +1,8 @@
 import os
 import logging
 import base64
+import hashlib
+import re
 import httpx
 from fastapi import HTTPException
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -43,7 +45,9 @@ class GitHubOpsService:
         new_branch: str, 
         file_path: str, 
         file_content: str, 
-        commit_message: str
+        commit_message: str,
+        expected_base_file_sha256: str | None = None,
+        expected_full_file_sha256: str | None = None,
     ) -> dict:
         """Creates a new branch and commits file changes using the GitHub Git Data API."""
         async with httpx.AsyncClient() as client:
@@ -57,8 +61,31 @@ class GitHubOpsService:
                     detail="Refusing to commit unified diff text as file content.",
                 )
 
+            # Extra safety: reject hunk-like payloads and common diff markers anywhere in content.
+            if re.search(r"^@@\s", file_content, flags=re.MULTILINE):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Refusing to commit hunk payload (starts with @@) as file content.",
+                )
+            if re.search(r"^(index\s[0-9a-f]|---\s|\+\+\+\s)", file_content, flags=re.MULTILINE):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Refusing to commit content that contains unified diff marker lines.",
+                )
+
+            if isinstance(expected_full_file_sha256, str) and expected_full_file_sha256.strip():
+                actual_payload_sha256 = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
+                if actual_payload_sha256 != expected_full_file_sha256:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Commit payload hash mismatch. Refusing to commit stale or altered content."
+                        ),
+                    )
+
             # Safety: compare against base file size to catch accidental near-total overwrites.
             current_file_size = None
+            current_file_hash = None
             contents_res = await client.get(
                 f"{base_url}/contents/{file_path}",
                 headers=self.headers,
@@ -70,8 +97,19 @@ class GitHubOpsService:
                 if isinstance(encoded_content, str):
                     decoded = base64.b64decode(encoded_content.encode("utf-8"), validate=False)
                     current_file_size = len(decoded)
+                    current_file_hash = hashlib.sha256(decoded).hexdigest()
 
-            if current_file_size and len(file_content.encode("utf-8")) < int(current_file_size * 0.4):
+            if isinstance(expected_base_file_sha256, str) and expected_base_file_sha256.strip():
+                if current_file_hash and current_file_hash != expected_base_file_sha256:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Base branch file changed since analysis. Re-analyze incident before approving hotfix."
+                        ),
+                    )
+
+            # Fail closed: full replacement payload should be close to base file size.
+            if current_file_size and len(file_content.encode("utf-8")) < int(current_file_size * 0.9):
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -137,7 +175,13 @@ class GitHubOpsService:
             )
 
             if branch_res.status_code == 201:
-                return {"status_code": branch_res.status_code, "branch_updated": True}
+                return {
+                    "status_code": branch_res.status_code,
+                    "branch_updated": True,
+                    "new_commit_sha": new_commit_sha,
+                    "branch_name": new_branch,
+                    "base_file_hash_verified": bool(current_file_hash),
+                }
 
             # If the branch already exists, repoint it to the newly created commit.
             if branch_res.status_code == 422:
@@ -157,7 +201,13 @@ class GitHubOpsService:
                             f"{update_ref_res.text}"
                         ),
                     )
-                return {"status_code": branch_res.status_code, "branch_updated": True}
+                return {
+                    "status_code": branch_res.status_code,
+                    "branch_updated": True,
+                    "new_commit_sha": new_commit_sha,
+                    "branch_name": new_branch,
+                    "base_file_hash_verified": bool(current_file_hash),
+                }
 
             raise HTTPException(status_code=400, detail=f"Failed to create branch: {branch_res.text}")
 

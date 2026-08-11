@@ -49,6 +49,17 @@ def _upsert_remediation_failure(
         upsert=True,
     )
 
+
+def _build_unique_head_branch(base_branch_name: str, incident_id: str) -> str:
+    """Ensure each remediation uses a unique branch to avoid stale-branch collisions."""
+    candidate = (base_branch_name or "fix/auto-remediation").strip().lower()
+    candidate = re.sub(r"[^a-z0-9/_-]", "-", candidate)
+    candidate = re.sub(r"-+", "-", candidate).strip("-/")
+    if not candidate:
+        candidate = "fix/auto-remediation"
+    suffix = re.sub(r"[^a-zA-Z0-9_-]", "", incident_id)[-12:] or "incident"
+    return f"{candidate}-{suffix}"
+
 class AIAnalysisSchema(BaseModel):
     root_cause_summary: str = Field(description="Concise 2-3 sentence root cause breakdown.")
     severity: str = Field(description="Severity rating: LOW, MEDIUM, HIGH, or CRITICAL.")
@@ -224,6 +235,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     target_file = target_file_candidates[0]
     
     existing_code = ""
+    fetched_branch = ""
     branches_to_try = ["main", "master"]
     file_fetched = False
 
@@ -236,6 +248,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
                     existing_code = response.read().decode("utf-8")
                 file_fetched = True
                 target_file = candidate_path
+                fetched_branch = branch
                 logger.info(
                     "--> [errAgent AI] Fetched %s chars from GitHub: %s",
                     len(existing_code),
@@ -317,6 +330,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
         now = datetime.now(timezone.utc)
         full_file_content = existing_code
         canonical_patch = clean_patch = ""
+        resolved_head_branch = _build_unique_head_branch(result.head_branch, incident_id)
         # ---------------------------------------------------------
         # 3. Apply patch inside an Isolated Temporary Sandbox
         clean_patch = result.code_patch.strip()
@@ -417,6 +431,9 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
                 "incident_id": incident_id,
                 "status": "draft",
                 "target_repo": target_repo,
+                "base_file_branch": fetched_branch,
+                "base_file_sha256": hashlib.sha256(existing_code.encode("utf-8")).hexdigest(),
+                "base_file_bytes": len(existing_code.encode("utf-8")),
                 "code_patch": canonical_patch,
                 "code_patch_sha256": hashlib.sha256(canonical_patch.encode("utf-8")).hexdigest(),
                 "code_patch_bytes": len(canonical_patch.encode("utf-8")),
@@ -425,7 +442,8 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
                 "full_file_content_bytes": len(full_file_content.encode("utf-8")),
                 "content_source": "sandbox_applied",
                 "base_branch": result.base_branch,
-                "head_branch": result.head_branch,
+                "head_branch": resolved_head_branch,
+                "head_branch_original": result.head_branch,
                 "pr_title": result.pr_title,
                 "pr_body": result.pr_body,
                 "target_file_path": target_file,
