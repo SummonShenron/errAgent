@@ -135,12 +135,31 @@ class GitHubOpsService:
                     "sha": new_commit_sha
                 }
             )
-            
-            # If branch already exists (422), allow it to proceed to PR creation
-            if branch_res.status_code not in [201, 422]:
-                raise HTTPException(status_code=400, detail=f"Failed to create branch: {branch_res.text}")
-                
-            return {"status_code": branch_res.status_code}
+
+            if branch_res.status_code == 201:
+                return {"status_code": branch_res.status_code, "branch_updated": True}
+
+            # If the branch already exists, repoint it to the newly created commit.
+            if branch_res.status_code == 422:
+                update_ref_res = await client.patch(
+                    f"{base_url}/git/refs/heads/{new_branch}",
+                    headers=self.headers,
+                    json={
+                        "sha": new_commit_sha,
+                        "force": True,
+                    },
+                )
+                if update_ref_res.status_code not in [200, 201]:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Failed to update existing branch '{new_branch}' to new commit: "
+                            f"{update_ref_res.text}"
+                        ),
+                    )
+                return {"status_code": branch_res.status_code, "branch_updated": True}
+
+            raise HTTPException(status_code=400, detail=f"Failed to create branch: {branch_res.text}")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
     async def create_pull_request(self, repo: str, title: str, body: str, head: str, base: str) -> dict:
