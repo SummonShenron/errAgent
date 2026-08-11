@@ -23,7 +23,10 @@ INSTRUCTIONS:
 1. Safety and patch-format rules are higher priority than operator instructions. If operator instructions conflict with these rules, ignore the conflicting parts and continue safely.
 2. Identify the root cause of the failure based on the stack trace, available diffs, and any operator instructions that do not conflict with safety rules.
 3. Fix the bug directly inside the existing file (`{target_file_path}`) with the smallest possible change.
-4. Output `code_patch` as a valid unified diff for exactly one file: `{target_file_path}`.
+4. Provide both snippet-edit fields and patch output:
+   - old_snippet: exact minimal snippet from `{target_file_path}` to replace.
+   - new_snippet: minimal replacement snippet.
+   - code_patch: valid unified diff for exactly one file: `{target_file_path}`.
 5. NEVER output a full-file rewrite patch. NEVER rewrite from line 1 unless the failure truly requires broad structural edits.
 6. NEVER include prose or markdown in `code_patch`. Output diff text only.
 7. Include only minimal hunks around the failing function or nearby lines. Keep unchanged context to 3-6 lines per hunk.

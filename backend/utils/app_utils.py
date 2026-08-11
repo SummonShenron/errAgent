@@ -17,6 +17,9 @@ import tempfile
 
 logger = logging.getLogger("errAgent Logger")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
+MAX_PATCH_CHANGE_RATIO = float(os.getenv("MAX_PATCH_CHANGE_RATIO", "0.2"))
+MAX_PATCH_CHANGED_LINES = int(os.getenv("MAX_PATCH_CHANGED_LINES", "120"))
+MAX_PATCH_HUNKS = int(os.getenv("MAX_PATCH_HUNKS", "6"))
 
 
 def _upsert_remediation_failure(
@@ -66,6 +69,14 @@ class AIAnalysisSchema(BaseModel):
     suggested_fix: str = Field(description="Detailed explanation of the code fix.")
     code_patch: str = Field(
         description="A valid unified git diff showing the exact before/after changes. MUST start with '--- a/' and '+++ b/'. NEVER use '--- /dev/null'. Include 3 lines of unchanged context."
+    )
+    old_snippet: str = Field(
+        default="",
+        description="Exact snippet from the target file to replace. Keep minimal and unique in file.",
+    )
+    new_snippet: str = Field(
+        default="",
+        description="Replacement snippet for old_snippet. Keep minimal and focused on bug fix.",
     )
     head_branch: str = Field(description="Git branch name for the fix.")
     base_branch: str = Field(default="main", description="Target base branch.")
@@ -191,7 +202,23 @@ def _validate_patch_safety(clean_patch: str, target_file: str, existing_code: st
     # Reject suspicious near-total deletion patterns.
     deleted_lines = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
     added_lines = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
+    hunk_count = sum(1 for line in lines if line.startswith("@@ "))
     original_line_count = max(1, len(existing_code.splitlines()))
+    changed_scope = max(added_lines, deleted_lines)
+
+    ratio_threshold = max(20, int(original_line_count * max(0.05, min(MAX_PATCH_CHANGE_RATIO, 0.9))))
+    changed_scope_threshold = min(MAX_PATCH_CHANGED_LINES, ratio_threshold)
+
+    if changed_scope > changed_scope_threshold:
+        raise ValueError(
+            "Patch rejected: change scope is too large "
+            f"({changed_scope} lines; limit={changed_scope_threshold})."
+        )
+
+    if hunk_count > MAX_PATCH_HUNKS:
+        raise ValueError(
+            f"Patch rejected: too many hunks ({hunk_count}; limit={MAX_PATCH_HUNKS})."
+        )
 
     if deleted_lines > int(original_line_count * 0.8):
         raise ValueError(
@@ -203,7 +230,7 @@ def _validate_patch_safety(clean_patch: str, target_file: str, existing_code: st
     if first_hunk:
         old_start = int(first_hunk.group(1))
         new_start = int(first_hunk.group(2))
-        if old_start <= 3 and new_start <= 3 and deleted_lines > int(original_line_count * 0.5):
+        if old_start <= 5 and new_start <= 5 and changed_scope > 40:
             raise ValueError(
                 "Patch rejected: looks like a full-file rewrite diff. Provide minimal localized hunks only."
             )
@@ -221,6 +248,41 @@ def _normalize_generated_patch(raw_patch: str) -> str:
     if clean_patch.endswith("```"):
         clean_patch = re.sub(r"\n?```$", "", clean_patch)
     return clean_patch.strip() + "\n"
+
+
+def _build_patch_from_snippet_edit(
+    target_file: str,
+    existing_code: str,
+    old_snippet: str,
+    new_snippet: str,
+) -> str:
+    if not isinstance(old_snippet, str) or not old_snippet:
+        raise ValueError("Snippet edit unavailable: old_snippet is missing.")
+    if not isinstance(new_snippet, str):
+        raise ValueError("Snippet edit unavailable: new_snippet is invalid.")
+
+    hit_count = existing_code.count(old_snippet)
+    if hit_count != 1:
+        raise ValueError(
+            f"Snippet edit unavailable: old_snippet must appear exactly once (found={hit_count})."
+        )
+
+    updated_code = existing_code.replace(old_snippet, new_snippet, 1)
+    if updated_code == existing_code:
+        raise ValueError("Snippet edit produced no changes.")
+
+    diff_lines = difflib.unified_diff(
+        existing_code.splitlines(),
+        updated_code.splitlines(),
+        fromfile=f"a/{target_file}",
+        tofile=f"b/{target_file}",
+        n=3,
+        lineterm="",
+    )
+    patch = "\n".join(diff_lines).strip() + "\n"
+    if not patch.strip():
+        raise ValueError("Snippet edit could not produce a unified diff.")
+    return patch
 
 
 def _apply_patch_in_sandbox(target_file: str, existing_code: str, clean_patch: str) -> tuple[str, str]:
@@ -417,7 +479,21 @@ CRITICAL RETRY RULES:
 
             result = response.parsed
             resolved_head_branch = _build_unique_head_branch(result.head_branch, incident_id)
-            clean_patch = _normalize_generated_patch(result.code_patch)
+            try:
+                clean_patch = _build_patch_from_snippet_edit(
+                    target_file=target_file,
+                    existing_code=existing_code,
+                    old_snippet=result.old_snippet,
+                    new_snippet=result.new_snippet,
+                )
+                logger.info("--> [errAgent AI] Using deterministic snippet edit synthesis (attempt=%s).", attempt_index + 1)
+            except Exception as snippet_exc:
+                logger.warning(
+                    "--> [errAgent AI] Snippet synthesis unavailable (attempt=%s): %s",
+                    attempt_index + 1,
+                    str(snippet_exc),
+                )
+                clean_patch = _normalize_generated_patch(result.code_patch)
             logger.info(f"--> [errAgent AI] Generated Patch (attempt={attempt_index + 1}):\n{clean_patch}")
 
             try:
