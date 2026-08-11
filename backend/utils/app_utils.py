@@ -71,11 +71,9 @@ class AIAnalysisSchema(BaseModel):
         description="A valid unified git diff showing the exact before/after changes. MUST start with '--- a/' and '+++ b/'. NEVER use '--- /dev/null'. Include 3 lines of unchanged context."
     )
     old_snippet: str = Field(
-        default="",
-        description="Exact snippet from the target file to replace. Keep minimal and unique in file.",
+        description="Exact snippet from the target file to replace. Must be copied verbatim from the file and unique.",
     )
     new_snippet: str = Field(
-        default="",
         description="Replacement snippet for old_snippet. Keep minimal and focused on bug fix.",
     )
     head_branch: str = Field(description="Git branch name for the fix.")
@@ -486,6 +484,8 @@ CRITICAL RETRY RULES:
 - Output a minimal patch with only localized hunks near the failing function.
 - Do not rewrite from top-of-file. Do not emit broad file-wide changes.
 - Keep patch to one target file only.
+    - old_snippet and new_snippet are required.
+    - old_snippet must be copied exactly from CURRENT CONTENT OF TARGET FILE.
 """
 
         for attempt_index in range(2):
@@ -516,10 +516,12 @@ CRITICAL RETRY RULES:
                     attempt_index + 1,
                     str(snippet_exc),
                 )
-                clean_patch = _normalize_generated_patch(result.code_patch)
+                clean_patch = ""
             logger.info(f"--> [errAgent AI] Generated Patch (attempt={attempt_index + 1}):\n{clean_patch}")
 
             try:
+                if not clean_patch.strip():
+                    raise ValueError("Patch rejected: deterministic snippet synthesis unavailable.")
                 if "--- /dev/null" in clean_patch:
                     raise ValueError("Patch rejected: LLM attempted to create a new file instead of modifying the existing one.")
 
