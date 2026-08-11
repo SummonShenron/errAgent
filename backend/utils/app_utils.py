@@ -62,15 +62,27 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     client = genai.Client(api_key=api_key)
     stack_trace = payload.get("stack_trace", "No stack trace provided.")
     target_file = _extract_target_file_path(stack_trace)
-
+    logger.info(f"--> [errAgent AI] Extracted target_file: '{target_file}' | Current Working Directory: {os.getcwd()}")
     # 1. READ EXISTING FILE CONTENT SO GEMINI HAS CONTEXT
+    possible_paths = [
+        target_file, 
+        os.path.join("..", target_file), 
+        os.path.abspath(target_file)
+    ]
+    
     existing_code = "# File does not exist yet or is empty"
-    if os.path.exists(target_file):
-        try:
-            with open(target_file, "r", encoding="utf-8") as f:
-                existing_code = f.read()
-        except Exception as e:
-            logger.warning(f"Could not read {target_file}: {e}")
+    actual_target_file = target_file
+
+    for path in possible_paths:
+        if os.path.exists(path):
+            actual_target_file = path
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    existing_code = f.read()
+                logger.info(f"--> [errAgent AI] Successfully loaded existing file from: {path}")
+                break
+            except Exception as e:
+                logger.warning(f"Could not read {path}: {e}")
 
     base_prompt = INCIDENT_ANALYSIS_PROMPT.format(
         service_name=payload.get("service_name", "unknown-service"),
@@ -79,8 +91,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         git_diffs=payload.get("git_diffs", "No git diff context provided."),
         metadata=payload.get("metadata", {}),
         engineering_instructions=payload.get("engineering_instructions", ""),
-        target_file_path=target_file
-        # Removed existing_file_content here since it's appended below
+        target_file_path=actual_target_file
     )
 
     prompt = f"""{base_prompt}
@@ -93,7 +104,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.5-flash",
+            model="gemini-2.5-flash", # Ensure valid model name
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -105,7 +116,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
         result: AIAnalysisSchema = response.parsed
         now = datetime.now(timezone.utc)
 
-        # Safely apply Gemini's git diff using local 'git apply' via subprocess
+        # 2. Safely apply Gemini's git diff using the verified file path
         full_file_content = ""
         try:
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.patch', encoding='utf-8') as tf:
@@ -122,19 +133,19 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 
             if apply_result.returncode != 0:
                 logger.error(f"git apply failed: {apply_result.stderr}")
-                subprocess.run(["git", "checkout", target_file], capture_output=True)
+                subprocess.run(["git", "checkout", actual_target_file], capture_output=True)
 
-            if os.path.exists(target_file):
-                with open(target_file, "r", encoding="utf-8") as f:
+            if os.path.exists(actual_target_file):
+                with open(actual_target_file, "r", encoding="utf-8") as f:
                     full_file_content = f.read()
 
         except Exception as patch_err:
             logger.error(f"Error applying patch: {patch_err}")
-            if os.path.exists(target_file):
-                with open(target_file, "r", encoding="utf-8") as f:
+            if os.path.exists(actual_target_file):
+                with open(actual_target_file, "r", encoding="utf-8") as f:
                     full_file_content = f.read()
-                    
-        # 2. Store AI Analysis Record
+
+        # 3. Store AI Analysis Record
         db["analyses"].insert_one({
             "incident_id": incident_id,
             "root_cause_summary": result.root_cause_summary,
@@ -144,19 +155,19 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
             "created_at": now,
         })
 
-        # 3. Store Remediation PR Draft
+        # 4. Store Remediation PR Draft
         target_repo = payload.get("repository") or DEFAULT_TARGET_REPO
         db["remediations"].insert_one({
             "incident_id": incident_id,
             "status": "draft",
             "target_repo": target_repo,
-            "code_patch": result.code_patch,           # Used for UI CodeDiffView
-            "full_file_content": full_file_content,    # Cleanly merged full file for GitHub
+            "code_patch": result.code_patch,
+            "full_file_content": full_file_content,
             "base_branch": result.base_branch,
             "head_branch": result.head_branch,
             "pr_title": result.pr_title,
             "pr_body": result.pr_body,
-            "target_file_path": target_file,
+            "target_file_path": actual_target_file,
             "created_at": now,
             "updated_at": now,
         })
