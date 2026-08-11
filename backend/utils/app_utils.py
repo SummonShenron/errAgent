@@ -36,7 +36,10 @@ def _extract_target_file_path(stack_trace: str) -> str:
             if match:
                 filepath = match.group(1)
                 if "site-packages" not in filepath and "venv" not in filepath and "lib/python" not in filepath:
-                    return filepath.split("/")[-1]
+                    # Strip common server prefixes but KEEP the subdirectories
+                    # e.g., /opt/render/project/src/backend/api/app.py -> backend/api/app.py
+                    cleaned_path = re.sub(r'^(/opt/render/project/src/|/app/|/var/www/)', '', filepath)
+                    return cleaned_path
     return "app.py"
 
 def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
@@ -75,6 +78,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
 
     existing_code = "# File does not exist yet or is empty"
     actual_target_file = target_file
+    git_root = os.getcwd() # Default fallback
 
     for path in possible_paths:
         if os.path.exists(path):
@@ -83,6 +87,17 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
                 with open(path, "r", encoding="utf-8") as f:
                     existing_code = f.read()
                 logger.info(f"--> [errAgent AI] Loaded {len(existing_code)} chars from: {path}")
+                
+                # NEW: Find the root of the git repository for THIS specific app
+                try:
+                    git_root = subprocess.check_output(
+                        ["git", "rev-parse", "--show-toplevel"], 
+                        cwd=os.path.dirname(actual_target_file), text=True
+                    ).strip()
+                except Exception:
+                    git_root = os.path.dirname(actual_target_file)
+                
+                logger.info(f"--> [errAgent AI] Identified Git Root for app: {git_root}")
                 break
             except Exception as e:
                 logger.warning(f"Could not read {path}: {e}")
@@ -131,22 +146,36 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
                 clean_patch = re.sub(r"\n?```$", "", clean_patch)
             clean_patch = clean_patch.strip() + "\n"
 
+            logger.info(f"--> [errAgent AI] Generated Patch:\n{clean_patch}")
+
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.patch', encoding='utf-8') as tf:
                 tf.write(clean_patch)
                 tf_name = tf.name
 
+            # Run git apply from the GIT ROOT of the target app.
+            # -p1 handles the "a/" and "b/" prefixes standard in multi-file git diffs.
             apply_result = subprocess.run(
-                ["git", "apply", tf_name],
+                [
+                    "git", "apply", 
+                    "-p1",                   # Maps standard unified diff paths across multiple files
+                    "--recount",             
+                    "--ignore-space-change", 
+                    "--ignore-whitespace",   
+                    "--unidiff-zero",        
+                    tf_name
+                ],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                cwd=git_root  # <--- CRITICAL: Runs in the root of the repo being patched
             )
             os.unlink(tf_name)
 
             if apply_result.returncode != 0:
                 logger.error(f"git apply failed: {apply_result.stderr}")
-                # Revert any broken partial changes
-                subprocess.run(["git", "checkout", actual_target_file], capture_output=True)
+                subprocess.run(["git", "checkout", actual_target_file], capture_output=True, cwd=git_root)
+            else:
+                logger.info(f"--> [errAgent AI] Successfully applied patch from git root: {git_root}")
 
             if os.path.exists(actual_target_file):
                 with open(actual_target_file, "r", encoding="utf-8") as f:
