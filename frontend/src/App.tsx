@@ -73,6 +73,8 @@ export default function App() {
   const selectedIncidentFromDetail = selectedIncidentDetail?.incident || selectedIncident;
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
+  const isIncidentAnalyzing = selectedIncidentFromDetail?.status === 'analyzing';
+  const isPrMerged = selectedRemediation?.status === 'merged';
   const [isMerging, setIsMerging] = useState(false);
 
   // --- DATA FETCHING & POLLING ---
@@ -411,11 +413,11 @@ export default function App() {
             {selectedIncident && (
               <button
                 type="button"
-                className="secondary-action"
-                style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', cursor: 'pointer' }}
+                className="dismiss-incident-btn"
                 onClick={() => handleDismiss(selectedIncident._id)}
               >
-                Dismiss Incident
+                <span aria-hidden="true">✕</span>
+                <span>Dismiss Incident</span>
               </button>
             )}
           </div>
@@ -457,6 +459,22 @@ export default function App() {
                 <label>Stack Trace</label>
                 <pre>{selectedIncidentFromDetail?.stack_trace || 'No stack trace captured.'}</pre>
               </div>
+              {isIncidentAnalyzing && (
+                <div className="analysis-thinking-banner" role="status" aria-live="polite">
+                  <div className="analysis-thinking-orb" aria-hidden="true" />
+                  <div>
+                    <p className="analysis-thinking-title">AI is analyzing this error</p>
+                    <p className="analysis-thinking-subtitle">
+                      Inspecting stack trace and generating root cause
+                      <span className="analysis-thinking-dots" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                    </p>
+                  </div>
+                </div>
+              )}
               <div className="detail-block">
                 <label>AI Root Cause Analysis</label>
                 <p>{selectedAnalysis?.root_cause_summary || selectedAnalysis?.root_cause || selectedAnalysis?.summary || 'No analysis generated yet.'}</p>
@@ -585,33 +603,29 @@ export default function App() {
               </div>
               {selectedRemediation?.pr_url ? (
                 <div className="pr-actions-container" style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #333' }}>
-                  <p style={{ marginBottom: '0.75rem', color: '#10b981', fontWeight: 'bold' }}>
-                    ✓ Pull Request Open on GitHub
+                  <p className={`pr-status-note ${isPrMerged ? 'merged' : ''}`}>
+                    {isPrMerged ? '✓ Pull Request Merged into Main' : '✓ Pull Request Open on GitHub'}
                   </p>
-                  <div style={{ display: 'flex', gap: '10px' }}>
+                  <div className="pr-actions-row">
                     <a 
                       href={selectedRemediation.pr_url} 
                       target="_blank" 
                       rel="noreferrer"
                       className="secondary-action"
-                      style={{ 
-                        flex: 1, textAlign: 'center', padding: '0.75rem', background: '#21262d', 
-                        color: '#c9d1d9', borderRadius: '6px', textDecoration: 'none', fontWeight: 'bold' 
-                      }}
+                      style={{ textAlign: 'center', padding: '0.75rem', background: '#21262d', color: '#c9d1d9', borderRadius: '6px', textDecoration: 'none', fontWeight: 'bold' }}
                     >
                       Review / Checkout on GitHub ↗
                     </a>
-                    <button
-                      type="button"
-                      disabled={isMerging}
-                      onClick={() => handleMergeHotfix(selectedIncident._id)}
-                      style={{
-                        flex: 1, padding: '0.75rem', backgroundColor: '#238636', color: '#ffffff',
-                        border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: isMerging ? 'not-allowed' : 'pointer'
-                      }}
-                    >
-                      {isMerging ? 'Merging...' : 'Auto-Merge into Main'}
-                    </button>
+                    {!isPrMerged ? (
+                      <button
+                        type="button"
+                        disabled={isMerging}
+                        onClick={() => handleMergeHotfix(selectedIncident._id)}
+                        className="auto-merge-btn"
+                      >
+                        {isMerging ? 'Merging...' : 'Auto-Merge into Main'}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               ) : (
