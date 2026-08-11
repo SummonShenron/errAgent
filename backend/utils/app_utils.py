@@ -8,6 +8,8 @@ from backend.utils.db_utils import get_db
 from backend.prompts.constraints import INCIDENT_ANALYSIS_PROMPT
 from google import genai
 from google.genai import types
+import subprocess
+import tempfile
 
 logger = logging.getLogger("errAgent Logger")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
@@ -16,7 +18,9 @@ class AIAnalysisSchema(BaseModel):
     root_cause_summary: str = Field(description="Concise 2-3 sentence root cause breakdown.")
     severity: str = Field(description="Severity rating: LOW, MEDIUM, HIGH, or CRITICAL.")
     suggested_fix: str = Field(description="Detailed explanation of the code fix.")
-    full_file_content: str = Field(description="The ENTIRE updated content of the target file with the fix applied, preserving all existing code.")
+    code_patch: str = Field(
+        description="A valid unified git diff showing the exact before/after change for the target file."
+    )
     head_branch: str = Field(description="Git branch name for the fix.")
     base_branch: str = Field(default="main", description="Target base branch.")
     pr_title: str = Field(description="Concise GitHub PR title.")
@@ -59,7 +63,16 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     stack_trace = payload.get("stack_trace", "No stack trace provided.")
     target_file = _extract_target_file_path(stack_trace)
 
-    prompt = INCIDENT_ANALYSIS_PROMPT.format(
+    # 1. READ EXISTING FILE CONTENT SO GEMINI HAS CONTEXT
+    existing_code = "# File does not exist yet or is empty"
+    if os.path.exists(target_file):
+        try:
+            with open(target_file, "r", encoding="utf-8") as f:
+                existing_code = f.read()
+        except Exception as e:
+            logger.warning(f"Could not read {target_file}: {e}")
+
+    base_prompt = INCIDENT_ANALYSIS_PROMPT.format(
         service_name=payload.get("service_name", "unknown-service"),
         environment=payload.get("environment", "production"),
         stack_trace=stack_trace,
@@ -67,7 +80,16 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         metadata=payload.get("metadata", {}),
         engineering_instructions=payload.get("engineering_instructions", ""),
         target_file_path=target_file
+        # Removed existing_file_content here since it's appended below
     )
+
+    prompt = f"""{base_prompt}
+--------------------------------------------------
+CURRENT CONTENT OF TARGET FILE ({target_file}):
+```python
+{existing_code}
+```
+    """
 
     try:
         response = client.models.generate_content(
@@ -83,27 +105,35 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         result: AIAnalysisSchema = response.parsed
         now = datetime.now(timezone.utc)
 
-        # 1. Read original file from disk to generate a clean diff for the UI
-        original_file_content = ""
+        # Safely apply Gemini's git diff using local 'git apply' via subprocess
+        full_file_content = ""
         try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.patch', encoding='utf-8') as tf:
+                tf.write(result.code_patch)
+                tf_name = tf.name
+
+            apply_result = subprocess.run(
+                ["git", "apply", tf_name],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            os.unlink(tf_name)
+
+            if apply_result.returncode != 0:
+                logger.error(f"git apply failed: {apply_result.stderr}")
+                subprocess.run(["git", "checkout", target_file], capture_output=True)
+
             if os.path.exists(target_file):
                 with open(target_file, "r", encoding="utf-8") as f:
-                    original_file_content = f.read()
-        except Exception as e:
-            logger.warning(f"Could not read local file {target_file} for diffing: {e}")
+                    full_file_content = f.read()
 
-        original_lines = original_file_content.splitlines(keepends=True)
-        new_lines = result.full_file_content.splitlines(keepends=True)
-
-        diff_generator = difflib.unified_diff(
-            original_lines,
-            new_lines,
-            fromfile=f"a/{target_file}",
-            tofile=f"b/{target_file}",
-            lineterm=""
-        )
-        generated_code_patch = "\n".join(diff_generator)
-
+        except Exception as patch_err:
+            logger.error(f"Error applying patch: {patch_err}")
+            if os.path.exists(target_file):
+                with open(target_file, "r", encoding="utf-8") as f:
+                    full_file_content = f.read()
+                    
         # 2. Store AI Analysis Record
         db["analyses"].insert_one({
             "incident_id": incident_id,
@@ -114,14 +144,14 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             "created_at": now,
         })
 
-        # 3. Store Remediation PR Draft (storing both diff for UI and full file for GitHub)
+        # 3. Store Remediation PR Draft
         target_repo = payload.get("repository") or DEFAULT_TARGET_REPO
         db["remediations"].insert_one({
             "incident_id": incident_id,
             "status": "draft",
             "target_repo": target_repo,
-            "code_patch": generated_code_patch,        # <--- Used by UI CodeDiffView
-            "full_file_content": result.full_file_content, # <--- Used when committing to GitHub
+            "code_patch": result.code_patch,           # Used for UI CodeDiffView
+            "full_file_content": full_file_content,    # Cleanly merged full file for GitHub
             "base_branch": result.base_branch,
             "head_branch": result.head_branch,
             "pr_title": result.pr_title,
@@ -137,7 +167,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             {"$set": {"status": "fix_proposed", "updated_at": now}}
         )
 
-        logger.info("--> [errAgent AI] Successfully generated fix proposal for incident: %s", incident_id)
+        logger.info("--> [errAgent AI] Successfully applied patch and generated fix for incident: %s", incident_id)
 
     except Exception as exc:
         logger.error("--> [errAgent AI] Analysis pipeline failed for %s: %s", incident_id, str(exc))
