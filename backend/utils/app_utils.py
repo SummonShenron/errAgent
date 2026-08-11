@@ -62,14 +62,17 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     client = genai.Client(api_key=api_key)
     stack_trace = payload.get("stack_trace", "No stack trace provided.")
     target_file = _extract_target_file_path(stack_trace)
-    logger.info(f"--> [errAgent AI] Extracted target_file: '{target_file}' | Current Working Directory: {os.getcwd()}")
-    # 1. READ EXISTING FILE CONTENT SO GEMINI HAS CONTEXT
+
+    # 1. Locate the file on Render (/opt/render/project/src/app.py) or locally
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(current_dir))
+
     possible_paths = [
-        target_file, 
-        os.path.join("..", target_file), 
-        os.path.abspath(target_file)
+        os.path.join(project_root, target_file),
+        os.path.join(os.getcwd(), target_file),
+        target_file
     ]
-    
+
     existing_code = "# File does not exist yet or is empty"
     actual_target_file = target_file
 
@@ -79,11 +82,12 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     existing_code = f.read()
-                logger.info(f"--> [errAgent AI] Successfully loaded existing file from: {path}")
+                logger.info(f"--> [errAgent AI] Loaded {len(existing_code)} chars from: {path}")
                 break
             except Exception as e:
                 logger.warning(f"Could not read {path}: {e}")
 
+    # 2. Build base prompt with format context
     base_prompt = INCIDENT_ANALYSIS_PROMPT.format(
         service_name=payload.get("service_name", "unknown-service"),
         environment=payload.get("environment", "production"),
@@ -94,6 +98,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         target_file_path=actual_target_file
     )
 
+    # Append file contents safely via f-string
     prompt = f"""{base_prompt}
 --------------------------------------------------
 CURRENT CONTENT OF TARGET FILE ({target_file}):
@@ -101,10 +106,10 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 {existing_code}
 ```
     """
-
+    logger.info(f"--> [errAgent AI] Prompt sent to Gemini (first 500 chars):\n{prompt[:500]}...")
     try:
         response = client.models.generate_content(
-            model="gemini-3.5-flash", # Ensure valid model name
+            model="gemini-3.5-flash",  # Using gemini-3.5-flash
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -116,11 +121,18 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
         result: AIAnalysisSchema = response.parsed
         now = datetime.now(timezone.utc)
 
-        # 2. Safely apply Gemini's git diff using the verified file path
+        # 3. Sanitize markdown fences from patch before applying
         full_file_content = ""
         try:
+            clean_patch = result.code_patch.strip()
+            if clean_patch.startswith("```"):
+                clean_patch = re.sub(r"^```[a-zA-Z]*\n?", "", clean_patch)
+            if clean_patch.endswith("```"):
+                clean_patch = re.sub(r"\n?```$", "", clean_patch)
+            clean_patch = clean_patch.strip() + "\n"
+
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.patch', encoding='utf-8') as tf:
-                tf.write(result.code_patch)
+                tf.write(clean_patch)
                 tf_name = tf.name
 
             apply_result = subprocess.run(
@@ -133,6 +145,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 
             if apply_result.returncode != 0:
                 logger.error(f"git apply failed: {apply_result.stderr}")
+                # Revert any broken partial changes
                 subprocess.run(["git", "checkout", actual_target_file], capture_output=True)
 
             if os.path.exists(actual_target_file):
@@ -145,7 +158,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
                 with open(actual_target_file, "r", encoding="utf-8") as f:
                     full_file_content = f.read()
 
-        # 3. Store AI Analysis Record
+        # 4. Save to Database
         db["analyses"].insert_one({
             "incident_id": incident_id,
             "root_cause_summary": result.root_cause_summary,
@@ -155,7 +168,6 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
             "created_at": now,
         })
 
-        # 4. Store Remediation PR Draft
         target_repo = payload.get("repository") or DEFAULT_TARGET_REPO
         db["remediations"].insert_one({
             "incident_id": incident_id,
@@ -172,7 +184,6 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
             "updated_at": now,
         })
 
-        # 4. Advance Incident State to 'fix_proposed'
         db["incidents"].update_one(
             {"_id": incident_id},
             {"$set": {"status": "fix_proposed", "updated_at": now}}
