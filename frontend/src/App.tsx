@@ -205,11 +205,7 @@ export default function App() {
     }
   };
 
-  const handleReanalyzeWithInstructions = async (incidentId: string) => {
-    if (!reanalyzeInstructions.trim()) {
-      alert("Please provide instructions first!");
-      return;
-    }
+  const handleReanalyzeWithInstructions = async (incidentId: string, instructions: string = '') => {
     setIsReanalyzing(true);
     try {
       const token = await getToken();
@@ -220,7 +216,7 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ instructions: reanalyzeInstructions }),
+        body: JSON.stringify({ instructions }),
       });
       if (response.ok) {
         alert(`Re-analysis triggered!`);
@@ -237,6 +233,10 @@ export default function App() {
     } finally {
       setIsReanalyzing(false);
     }
+  };
+
+  const handleRetryAnalysis = async (incidentId: string) => {
+    await handleReanalyzeWithInstructions(incidentId, '');
   };
 
   const handleApproveHotfix = async (incidentId: string) => {
@@ -367,16 +367,37 @@ export default function App() {
                       <div className="incident-card-top">
                         <span className={`status-chip ${tone}`}>{(inc.status || 'open').replace('_', ' ').toUpperCase()}</span>
                         <span className="service-name">{inc.service_name || 'unknown-service'}</span>         
-                        <button
-                          type="button"
-                          className="dismiss-btn"
-                          title="Dismiss Incident"
-                          onClick={(e) => handleDismiss(inc._id, e)}
-                        >
-                          ✕
-                        </button>
+                        <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                          {inc.status === 'analysis_failed' && (
+                            <button
+                              type="button"
+                              className="secondary-action"
+                              title="Retry Analysis"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRetryAnalysis(inc._id);
+                              }}
+                              style={{ padding: '0.25rem 0.55rem', fontSize: '0.8rem' }}
+                            >
+                              Retry
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="dismiss-btn"
+                            title="Dismiss Incident"
+                            onClick={(e) => handleDismiss(inc._id, e)}
+                          >
+                            ✕
+                          </button>
+                        </div>
                       </div>
                       <p className="incident-error">{inc.error_message || 'Unhandled exception'}</p>
+                      {inc.status === 'analysis_failed' && (
+                        <p className="muted" style={{ marginTop: '0.5rem' }}>
+                          Analysis failed. Retry when ready.
+                        </p>
+                      )}
                     </div>
                   </li>
                 );
@@ -500,7 +521,7 @@ export default function App() {
                     type="button"
                     className="reanalyze-btn"
                     disabled={isReanalyzing}
-                    onClick={() => handleReanalyzeWithInstructions(selectedIncident._id)}
+                    onClick={() => handleReanalyzeWithInstructions(selectedIncident._id, reanalyzeInstructions)}
                     style={{
                       width: '100%',
                       marginTop: '0.75rem',
@@ -520,6 +541,37 @@ export default function App() {
                   </button>
                 </div>
               )}
+                {selectedIncident?.status === 'analysis_failed' && (
+                  <div className="reanalyze-container" style={{ marginTop: '1.5rem', borderTop: '1px solid #333', paddingTop: '1rem' }}>
+                    <label style={{ fontSize: '1.1rem', fontWeight: 'bold', color: '#61dafb' }}>
+                      Retry Failed Analysis
+                    </label>
+                    <p className="muted" style={{ marginTop: '0.5rem' }}>
+                      Retry the incident using the original payload, or add optional instructions above before rerunning.
+                    </p>
+                    <button
+                      type="button"
+                      className="secondary-action"
+                      disabled={isReanalyzing}
+                      onClick={() => handleRetryAnalysis(selectedIncident._id)}
+                      style={{
+                        width: '100%',
+                        marginTop: '0.6rem',
+                        padding: '0.75rem 1.25rem',
+                        backgroundColor: '#21262d',
+                        color: '#c9d1d9',
+                        border: '1px solid #30363d',
+                        borderRadius: '6px',
+                        fontWeight: 'bold',
+                        fontSize: '1rem',
+                        cursor: isReanalyzing ? 'not-allowed' : 'pointer',
+                        opacity: isReanalyzing ? 0.7 : 1,
+                      }}
+                    >
+                      {isReanalyzing ? 'Retrying...' : 'Retry Failed Analysis'}
+                    </button>
+                  </div>
+                )}
                 <label style={{ marginTop: '1rem' }}>Proposed PR Details</label>
                 <p><strong>Title:</strong> {selectedRemediation?.pr_title || 'No PR draft yet.'}</p>
                 <p><strong>Status:</strong> {(selectedRemediation?.status || 'not_created').replace('_', ' ')}</p>

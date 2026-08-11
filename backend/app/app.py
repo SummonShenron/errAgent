@@ -3,12 +3,14 @@ import hmac
 import json
 import hashlib
 import logging
+from uuid import uuid4
 from typing import List, Dict, Any
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException, Depends, status, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pymongo.errors import DuplicateKeyError
 from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
 # Utility imports from your backend/utils directory
 from backend.utils.db_utils import get_db
@@ -31,7 +33,7 @@ SUPPRESS_DEBUG_INCIDENTS = os.getenv("SUPPRESS_DEBUG_INCIDENTS", "false").lower(
 INCIDENT_DEDUPE_WINDOW_SECONDS = int(os.getenv("INCIDENT_DEDUPE_WINDOW_SECONDS", "600"))
 
 class ReanalyzeRequest(BaseModel):
-    instructions: str
+    instructions: str = ""
 
 def _serialize_mongo_doc(value: Any) -> Any:
     if isinstance(value, ObjectId):
@@ -133,7 +135,7 @@ def _store_incident_and_queue_analysis(
     incident_id: str | None = None,
 ) -> str:
     now = datetime.now(timezone.utc)
-    incident_id = incident_id or f"inc_{int(now.timestamp())}"
+    incident_id = incident_id or f"inc_{int(now.timestamp() * 1000)}_{uuid4().hex[:8]}"
     fingerprint = _build_incident_fingerprint(payload)
 
     dedupe_cutoff = now - timedelta(seconds=max(30, INCIDENT_DEDUPE_WINDOW_SECONDS))
@@ -164,7 +166,28 @@ def _store_incident_and_queue_analysis(
         "updated_at": now,
     }
 
-    db["incidents"].insert_one(incident_doc)
+    try:
+        db["incidents"].insert_one(incident_doc)
+    except DuplicateKeyError:
+        existing_after_race = db["incidents"].find_one(
+            {
+                "$or": [
+                    {"_id": incident_id},
+                    {"fingerprint": fingerprint},
+                ]
+            },
+            sort=[("created_at", -1)],
+        )
+        if existing_after_race:
+            existing_id = existing_after_race.get("_id")
+            logger.info(
+                "Duplicate incident insert raced with another request. fingerprint=%s existing_id=%s",
+                fingerprint,
+                existing_id,
+            )
+            return str(existing_id)
+        raise
+
     db["audit_logs"].insert_one({
         "incident_id": incident_id,
         "actor": actor,
@@ -647,9 +670,23 @@ async def merge_hotfix_pr(
     current_user: dict = Depends(require_role("Incident_Managers"))
 ):
     db = get_db()
-    remediation = db["remediations"].find_one({"incident_id": incident_id}, sort=[("updated_at", -1), ("created_at", -1)])
+    remediation = db["remediations"].find_one(
+        {
+            "incident_id": incident_id,
+            "pr_number": {"$exists": True, "$ne": None},
+        },
+        sort=[("updated_at", -1), ("created_at", -1)],
+    )
+    if not remediation:
+        remediation = db["remediations"].find_one(
+            {
+                "incident_id": incident_id,
+                "status": {"$in": ["pr_created", "executed"]},
+            },
+            sort=[("updated_at", -1), ("created_at", -1)],
+        )
     if not remediation or not remediation.get("pr_number"):
-        raise HTTPException(status_code=404, detail="No active PR found to merge.")
+        raise HTTPException(status_code=404, detail="No active PR found to merge. The latest remediation may not have a PR number yet.")
 
     repo = remediation["target_repo"]
     pr_number = remediation["pr_number"]
@@ -687,13 +724,14 @@ async def reanalyze_incident(
     if incident.get("status") not in ["fix_proposed", "analysis_failed"]:
          raise HTTPException(status_code=400, detail="Incident cannot be re-analyzed in current state.")
 
-    # 2. Add 'instructions' to the original payload metadata
+    # 2. Add optional 'instructions' to the original payload metadata
     original_payload = incident.get("raw_payload", {}) # Assuming you saved this!
     if "metadata" not in original_payload:
         original_payload["metadata"] = {}
     
-    # Store engineering instructions in metadata
-    original_payload["metadata"]["engineering_instructions"] = request.instructions
+    # Store engineering instructions in metadata only when supplied
+    if request.instructions.strip():
+        original_payload["metadata"]["engineering_instructions"] = request.instructions
 
     # 3. Fire the LLM re-analysis pipeline in the background
     background_tasks.add_task(run_ai_analysis_pipeline, incident_id, original_payload)
