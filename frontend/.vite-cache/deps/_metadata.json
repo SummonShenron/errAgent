@@ -1,31 +1,31 @@
 {
-  "hash": "9d00c1f4",
-  "configHash": "6d34bcb5",
+  "hash": "738b1449",
+  "configHash": "a843343b",
   "lockfileHash": "d4dec80c",
-  "browserHash": "284f1920",
+  "browserHash": "10b38414",
   "optimized": {
     "@clerk/clerk-react": {
       "src": "../../node_modules/@clerk/clerk-react/dist/index.mjs",
       "file": "@clerk_clerk-react.js",
-      "fileHash": "fbcadaf8",
+      "fileHash": "a4525a02",
       "needsInterop": false
     },
     "react-dom/client": {
       "src": "../../node_modules/react-dom/client.js",
       "file": "react-dom_client.js",
-      "fileHash": "6238193a",
+      "fileHash": "740c0307",
       "needsInterop": true
     },
     "react": {
       "src": "../../node_modules/react/index.js",
       "file": "react.js",
-      "fileHash": "226259bc",
+      "fileHash": "1be1687c",
       "needsInterop": true
     },
     "react/jsx-dev-runtime": {
       "src": "../../node_modules/react/jsx-dev-runtime.js",
       "file": "react_jsx-dev-runtime.js",
-      "fileHash": "5df52e64",
+      "fileHash": "146d4447",
       "needsInterop": true
     }
   },

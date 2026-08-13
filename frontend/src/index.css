@@ -426,6 +426,38 @@ button {
 	}
 }
 
+.retry-analysis-btn {
+	display: inline-flex !important;
+	align-items: center;
+	justify-content: center;
+	padding: 0.28rem 0.62rem;
+	border-radius: 999px !important;
+	border: 1px solid rgba(96, 165, 250, 0.9) !important;
+	background: rgba(37, 99, 235, 0.18) !important;
+	color: #dbeafe !important;
+	font-size: 0.7rem !important;
+	font-weight: 800 !important;
+	letter-spacing: 0.04em !important;
+	text-transform: uppercase !important;
+	cursor: pointer;
+	height: 1.7rem;
+	line-height: 1.2;
+	box-shadow: inset 0 0 0 1px rgba(147, 197, 253, 0.18);
+	transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.retry-analysis-btn:hover {
+	transform: translateY(-1px);
+	border-color: rgba(147, 197, 253, 0.95) !important;
+	background: rgba(59, 130, 246, 0.22) !important;
+	box-shadow: 0 8px 18px rgba(59, 130, 246, 0.15);
+}
+
+.retry-analysis-btn:active {
+	transform: translateY(0);
+	box-shadow: none;
+}
+
 .dismiss-btn {
   background: transparent;
   border: none;

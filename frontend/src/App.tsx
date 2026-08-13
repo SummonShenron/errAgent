@@ -373,13 +373,25 @@ export default function App() {
                           {inc.status === 'analysis_failed' && (
                             <button
                               type="button"
-                              className="secondary-action"
+                              className="retry-analysis-btn"
                               title="Retry Analysis"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleRetryAnalysis(inc._id);
                               }}
-                              style={{ padding: '0.25rem 0.55rem', fontSize: '0.8rem' }}
+                              style={{
+                                padding: '0.3rem 0.7rem',
+                                fontSize: '0.68rem',
+                                fontWeight: 800,
+                                lineHeight: 1.2,
+                                letterSpacing: '0.04em',
+                                textTransform: 'uppercase',
+                                borderRadius: '999px',
+                                border: '1px solid rgba(96, 165, 250, 0.9)',
+                                background: 'rgba(37, 99, 235, 0.18)',
+                                color: '#dbeafe',
+                                boxShadow: 'inset 0 0 0 1px rgba(147, 197, 253, 0.18)',
+                              }}
                             >
                               Retry
                             </button>

@@ -1,10 +1,11 @@
 # backend/utils/db_utils.py
 import os
 import logging
+from pathlib import Path
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=True)
 logger = logging.getLogger("Incident Engine Logger")
 _client = None
 
