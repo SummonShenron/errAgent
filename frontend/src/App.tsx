@@ -581,22 +581,9 @@ export default function App() {
                     </p>
                     <button
                       type="button"
-                      className="secondary-action"
+                      className="retry-failed-analysis-btn"
                       disabled={isReanalyzing}
                       onClick={() => handleRetryAnalysis(selectedIncident._id)}
-                      style={{
-                        width: '100%',
-                        marginTop: '0.6rem',
-                        padding: '0.75rem 1.25rem',
-                        backgroundColor: '#21262d',
-                        color: '#c9d1d9',
-                        border: '1px solid #30363d',
-                        borderRadius: '6px',
-                        fontWeight: 'bold',
-                        fontSize: '1rem',
-                        cursor: isReanalyzing ? 'not-allowed' : 'pointer',
-                        opacity: isReanalyzing ? 0.7 : 1,
-                      }}
                     >
                       {isReanalyzing ? 'Retrying...' : 'Retry Failed Analysis'}
                     </button>
