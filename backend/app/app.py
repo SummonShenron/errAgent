@@ -8,6 +8,7 @@ from uuid import uuid4
 from typing import List, Dict, Any
 from datetime import datetime, timezone, timedelta, time
 from bson import ObjectId
+import requests
 from fastapi import Body, FastAPI, HTTPException, Depends, status, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -43,11 +44,56 @@ github_service = GitHubOpsService()
 SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
 # Backward-compatible legacy shared secret for existing app-to-app clients.
 INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET") or os.getenv("ERRAGENT_INGEST_SECRET")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 SUPPRESS_DEBUG_INCIDENTS = os.getenv("SUPPRESS_DEBUG_INCIDENTS", "false").lower() in {"1", "true", "yes", "on"}
 INCIDENT_DEDUPE_WINDOW_SECONDS = int(os.getenv("INCIDENT_DEDUPE_WINDOW_SECONDS", "600"))
 HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "300"))
 HEALTH_SNAPSHOT_RETENTION_DAYS = int(os.getenv("HEALTH_SNAPSHOT_RETENTION_DAYS", "14"))
+LAST_ALERTED_DOWN_SERVICES: set[str] = set()
+
+
+def should_send_discord_alert(report: dict, already_alerted: bool = False) -> bool:
+    if already_alerted:
+        return False
+    if report.get("overall_status") != "CRITICAL":
+        return False
+    services = report.get("services", [])
+    return any(service.get("status") == "down" for service in services)
+
+
+def build_discord_alert_message(report: dict) -> str:
+    down_services = [
+        service.get("service")
+        for service in report.get("services", [])
+        if service.get("status") == "down"
+    ]
+    service_list = ", ".join(down_services) if down_services else "unknown service"
+    return (
+        "@everyone errAgent health alert\n"
+        f"Status: {report.get('overall_status', 'UNKNOWN')}\n"
+        f"Down services: {service_list}\n"
+        f"Summary: {report.get('summary', 'No summary available')}"
+    )
+
+
+def send_discord_alert(report: dict) -> bool:
+    if not DISCORD_WEBHOOK_URL:
+        logger.warning("DISCORD_WEBHOOK_URL is not configured. Skipping Discord alert.")
+        return False
+
+    if not should_send_discord_alert(report, False):
+        return False
+
+    message = build_discord_alert_message(report)
+    try:
+        response = requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10)
+        response.raise_for_status()
+        logger.warning("Discord alert sent for down services: %s", message)
+        return True
+    except Exception as exc:
+        logger.exception("Failed to send Discord health alert: %s", exc)
+        return False
 
 class ReanalyzeRequest(BaseModel):
     instructions: str = ""
@@ -78,6 +124,13 @@ async def health_monitor_loop() -> None:
             results = run_service_health_checks()
             report = build_health_report(results)
             logger.info("Scheduled health check complete: %s", report["overall_status"])
+
+            down_services = {service["service"] for service in report.get("services", []) if service.get("status") == "down"}
+            if down_services and not down_services.issubset(LAST_ALERTED_DOWN_SERVICES):
+                if send_discord_alert(report):
+                    LAST_ALERTED_DOWN_SERVICES.update(down_services)
+            elif not down_services:
+                LAST_ALERTED_DOWN_SERVICES.clear()
 
             db = get_db()
             if db is not None:
