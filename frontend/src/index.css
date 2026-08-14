@@ -195,9 +195,37 @@ button {
 	margin-bottom: 12px;
 }
 
+.incident-panel-header {
+	margin-bottom: 10px;
+}
+
 .panel-header h2 {
 	margin: 0;
 	font-size: 1.05rem;
+}
+
+.incident-tabs {
+	display: flex;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+
+.incident-tab {
+	flex: 1;
+	padding: 8px 10px;
+	border-radius: 10px;
+	border: 1px solid #28364f;
+	background: rgba(15, 23, 42, 0.65);
+	color: #cbd5e1;
+	font-weight: 700;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.incident-tab.active {
+	background: linear-gradient(135deg, rgba(37, 99, 235, 0.28), rgba(14, 165, 233, 0.2));
+	border-color: rgba(96, 165, 250, 0.9);
+	color: #eff6ff;
 }
 
 .count-pill {

@@ -99,7 +99,19 @@ export default function App() {
   const [isApproving, setIsApproving] = useState(false);
   const [reanalyzeInstructions, setReanalyzeInstructions] = useState('');
   const [isReanalyzing, setIsReanalyzing] = useState(false);
-  const selectedIncident = incidents.find((inc) => inc._id === selectedIncidentId) || incidents[0] || null;
+  const [isMerging, setIsMerging] = useState(false);
+  const [services, setServices] = useState<any[]>([]);
+  const [healthResults, setHealthResults] = useState<any[]>([]);
+  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
+  const [incidentTab, setIncidentTab] = useState<'open' | 'resolved'>('open');
+
+  const visibleIncidents = incidents.filter((incident) => {
+    const status = (incident.status || 'open').toLowerCase();
+    const isResolved = ['resolved', 'closed'].includes(status);
+    return incidentTab === 'open' ? !isResolved : isResolved;
+  });
+
+  const selectedIncident = visibleIncidents.find((inc) => inc._id === selectedIncidentId) || visibleIncidents[0] || null;
   const selectedIncidentFromDetail = selectedIncidentDetail?.incident || selectedIncident;
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
@@ -107,10 +119,6 @@ export default function App() {
   const isIncidentAnalyzing = selectedIncidentFromDetail?.status === 'analyzing';
   const isPrMerged = selectedRemediation?.status === 'merged';
   useDynamicFavicon({ activeIncidentsCount });
-  const [isMerging, setIsMerging] = useState(false);
-  const [services, setServices] = useState<any[]>([]);
-  const [healthResults, setHealthResults] = useState<any[]>([]);
-  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   // --- DATA FETCHING & POLLING ---
   const fetchServices = useCallback(async () => {
     try {
@@ -252,6 +260,18 @@ export default function App() {
       setSelectedIncidentDetail(null);
     }
   }, [selectedIncidentId, fetchIncidentDetail]);
+
+  useEffect(() => {
+    if (visibleIncidents.length === 0) {
+      setSelectedIncidentId(null);
+      return;
+    }
+
+    const selectionStillVisible = visibleIncidents.some((inc) => inc._id === selectedIncidentId);
+    if (!selectionStillVisible) {
+      setSelectedIncidentId(visibleIncidents[0]._id);
+    }
+  }, [visibleIncidents, selectedIncidentId]);
 
   // --- ACTIONS ---
 
@@ -481,17 +501,39 @@ export default function App() {
   </div>
       <main className="dashboard-grid">
         <section className="panel">
-          <div className="panel-header">
+          <div className="panel-header incident-panel-header">
             <h2>Ingested Incidents</h2>
-            <span className="count-pill">{incidents.length}</span>
+            <span className="count-pill">{visibleIncidents.length}</span>
           </div>
+
+          <div className="incident-tabs" role="tablist" aria-label="Incident views">
+            <button
+              type="button"
+              className={`incident-tab ${incidentTab === 'open' ? 'active' : ''}`}
+              onClick={() => setIncidentTab('open')}
+            >
+              Active
+            </button>
+            <button
+              type="button"
+              className={`incident-tab ${incidentTab === 'resolved' ? 'active' : ''}`}
+              onClick={() => setIncidentTab('resolved')}
+            >
+              Resolved
+            </button>
+          </div>
+
           {loading ? (
             <p className="muted">Loading incidents from backend...</p>
-          ) : incidents.length === 0 ? (
-            <p className="muted">No incidents found. Run seed_db.py on backend or trigger an error webhook.</p>
+          ) : visibleIncidents.length === 0 ? (
+            <p className="muted">
+              {incidentTab === 'open'
+                ? 'No active incidents found. Run seed_db.py on backend or trigger an error webhook.'
+                : 'No resolved incidents yet.'}
+            </p>
           ) : (
             <ul className="incident-list">
-              {incidents.map((inc) => {
+              {visibleIncidents.map((inc) => {
                 const tone = statusTone[inc.status || ''] || 'status-open';
                 const isActive = selectedIncident?._id === inc._id;
                 return (
@@ -499,7 +541,7 @@ export default function App() {
                     <div className={`incident-card ${isActive ? 'active' : ''}`} onClick={() => setSelectedIncidentId(inc._id)}>
                       <div className="incident-card-top">
                         <span className={`status-chip ${tone}`}>{(inc.status || 'open').replace('_', ' ').toUpperCase()}</span>
-                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>         
+                        <span className="service-name">{inc.service_name || 'unknown-service'}</span>
                         <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
                           {inc.status === 'analysis_failed' && (
                             <button
