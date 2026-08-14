@@ -95,6 +95,7 @@ def send_discord_alert(report: dict) -> bool:
         logger.exception("Failed to send Discord health alert: %s", exc)
         return False
 
+
 class ReanalyzeRequest(BaseModel):
     instructions: str = ""
 
@@ -210,9 +211,28 @@ def full_health_check():
 
 @app.get("/api/v1/health/services")
 def list_services():
-    return {
-        "services": SERVICES
-    }
+    db = get_db()
+    latest_snapshot = None
+    latest_status_by_service: dict[str, dict[str, Any]] = {}
+
+    if db is not None:
+        latest_snapshot = db["health_snapshots"].find_one({}, sort=[("timestamp", -1)])
+        if isinstance(latest_snapshot, dict):
+            for service in latest_snapshot.get("services", []):
+                if isinstance(service, dict) and service.get("service"):
+                    latest_status_by_service[service["service"]] = service
+
+    services_payload = []
+    for svc in SERVICES:
+        entry = dict(svc)
+        last_status = latest_status_by_service.get(svc["name"], {})
+        entry["status"] = last_status.get("status", "unknown")
+        entry["latency_ms"] = last_status.get("latency_ms")
+        entry["http_status"] = last_status.get("http_status")
+        entry["last_checked_at"] = latest_snapshot.get("timestamp") if isinstance(latest_snapshot, dict) else None
+        services_payload.append(entry)
+
+    return {"services": services_payload}
 
 @app.get("/api/v1/events")
 async def incident_events():

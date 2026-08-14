@@ -411,6 +411,15 @@ export default function App() {
         <div className="service-info">
           <strong>{svc.name}</strong>
           <span className="service-url">{svc.url}</span>
+          <span className={`service-status ${svc.status || 'unknown'}`}>
+            {svc.status ? svc.status.toUpperCase() : 'UNKNOWN'}
+            {svc.latency_ms != null ? ` • ${svc.latency_ms}ms` : ''}
+          </span>
+          {svc.last_checked_at && (
+            <span className="service-last-check">
+              Last check: {new Date(svc.last_checked_at).toLocaleString()}
+            </span>
+          )}
         </div>
 
         <button
