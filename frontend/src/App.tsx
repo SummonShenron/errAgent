@@ -76,8 +76,44 @@ export default function App() {
   const isIncidentAnalyzing = selectedIncidentFromDetail?.status === 'analyzing';
   const isPrMerged = selectedRemediation?.status === 'merged';
   const [isMerging, setIsMerging] = useState(false);
-
+  const [services, setServices] = useState<any[]>([]);
+  const [healthResults, setHealthResults] = useState<any[]>([]);
+  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   // --- DATA FETCHING & POLLING ---
+  const fetchServices = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/health/services`);
+      if (res.ok) {
+        const data = await res.json();
+        setServices(data.services);
+      }
+    } catch (err) {
+      console.error("Error fetching services:", err);
+    }
+  }, []);
+
+  const runHealthCheck = async (serviceName?: string) => {
+    setIsCheckingHealth(true);
+    try {
+      const body = serviceName ? { service: serviceName } : { service: "all" };
+
+      const res = await fetch(`${API_BASE_URL}/health/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setHealthResults(data.results);
+      }
+    } catch (err) {
+      console.error("Error running health check:", err);
+    } finally {
+      setIsCheckingHealth(false);
+    }
+  };
+
 
   const fetchIncidents = useCallback(async () => {
     if (!isSignedIn) return;
@@ -140,8 +176,11 @@ export default function App() {
     }
   }, [getToken, isSignedIn]);
 
-  // Unified Polling Loop
-  // Unified Polling Loop for List and Active Details
+  useEffect(() => {
+    fetchServices();
+  }, [fetchServices]);
+
+  // Real-time updates via a single SSE connection instead of polling.
   useEffect(() => {
     if (!isSignedIn) {
       setIncidents([]);
@@ -150,21 +189,27 @@ export default function App() {
       return;
     }
 
-    // Initial fetch
     fetchIncidents();
     if (selectedIncidentId) {
       fetchIncidentDetail(selectedIncidentId);
     }
 
-    // Poll both list and active detail every 4 seconds
-    const intervalId = setInterval(() => {
+    const source = new EventSource(`${API_BASE_URL}/events`);
+
+    source.onmessage = () => {
       fetchIncidents();
       if (selectedIncidentId) {
         fetchIncidentDetail(selectedIncidentId);
       }
-    }, 4000);
+    };
 
-    return () => clearInterval(intervalId);
+    source.onerror = () => {
+      source.close();
+    };
+
+    return () => {
+      source.close();
+    };
   }, [fetchIncidents, fetchIncidentDetail, selectedIncidentId, isSignedIn]);
 
   // Fetch Incident Details when selection changes
@@ -348,6 +393,48 @@ export default function App() {
         <span className="session-label">Active Session Principal</span>
         <span className="session-value">{principal || 'Guest Sandbox Mode'}</span>
       </section>
+      <div className="health-panel">
+  <h2>Connected Apps Health</h2>
+
+  <div className="health-actions">
+    <button
+      disabled={isCheckingHealth}
+      onClick={() => runHealthCheck()}
+    >
+      Check All Services
+    </button>
+  </div>
+
+  <div className="services-list">
+    {services.map((svc) => (
+      <div key={svc.name} className="service-item">
+        <div className="service-info">
+          <strong>{svc.name}</strong>
+          <span className="service-url">{svc.url}</span>
+        </div>
+
+        <button
+          disabled={isCheckingHealth}
+          onClick={() => runHealthCheck(svc.name)}
+        >
+          Check
+        </button>
+      </div>
+    ))}
+  </div>
+    {healthResults.length > 0 && (
+      <div className="health-results">
+        <h3>Latest Health Check Results</h3>
+        {healthResults.map((r) => (
+          <div key={r.service} className={`health-result ${r.status}`}>
+            <strong>{r.service}</strong> — {r.status.toUpperCase()}
+            <div>Latency: {r.latency_ms ?? "N/A"} ms</div>
+            <div>HTTP: {r.http_status ?? "N/A"}</div>
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
       <main className="dashboard-grid">
         <section className="panel">
           <div className="panel-header">

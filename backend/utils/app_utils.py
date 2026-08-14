@@ -1,12 +1,22 @@
 import os
 import re
 import hashlib
+import hmac
 import logging
 import difflib
 import urllib.request
+import json
 from urllib.error import HTTPError
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timezone, timedelta
+import time
+from pymongo.errors import DuplicateKeyError
+from typing import Any, Dict
+from uuid import uuid4
+from bson import ObjectId
+from bson import ObjectId
+import requests
+from fastapi import BackgroundTasks, HTTPException
+from typing import Dict
 from pydantic import BaseModel, Field
 from backend.utils.db_utils import get_db
 from backend.prompts.constraints import INCIDENT_ANALYSIS_PROMPT
@@ -14,13 +24,356 @@ from google import genai
 from google.genai import types
 import subprocess
 import tempfile
+from dotenv import load_dotenv
 
 logger = logging.getLogger("errAgent Logger")
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 MAX_PATCH_CHANGE_RATIO = float(os.getenv("MAX_PATCH_CHANGE_RATIO", "0.2"))
 MAX_PATCH_CHANGED_LINES = int(os.getenv("MAX_PATCH_CHANGED_LINES", "120"))
 MAX_PATCH_HUNKS = int(os.getenv("MAX_PATCH_HUNKS", "6"))
+INCIDENT_DEDUPE_WINDOW_SECONDS = int(os.getenv("INCIDENT_DEDUPE_WINDOW_SECONDS", "600"))
+SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
+INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET") or os.getenv("ERRAGENT_INGEST_SECRET")
+load_dotenv()
 
+SERVICES = [
+    {
+        "name": "BTY Fitness",
+        "url": "https://btyapp.onrender.com",
+        "health_path": "/api/health"
+    },
+    {
+        "name": "SAAPP Widget",
+        "url": "https://saapp.onrender.com",
+        "health_path": "/api/health"
+    }
+]
+
+def serialize_mongo_doc(value: Any) -> Any:
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: serialize_mongo_doc(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [serialize_mongo_doc(item) for item in value]
+    return value
+
+
+def resolve_commit_file_content(remediation: Dict[str, Any]) -> str:
+    """
+    Commit payload must be the full file content, never a unified diff string.
+    """
+    file_content = remediation.get("full_file_content")
+    if not isinstance(file_content, str) or not file_content.strip():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation is missing full_file_content. Re-analyze incident before approving hotfix."
+            ),
+        )
+
+    content_source = remediation.get("content_source")
+    if content_source != "sandbox_applied":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation content source is not trusted for commit. "
+                "Re-analyze incident before approving hotfix."
+            ),
+        )
+
+    stripped = file_content.lstrip()
+    if stripped.startswith("diff --git ") or stripped.startswith("--- a/") or stripped.startswith("+++ b/"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation full_file_content looks like patch text, not file contents. "
+                "Re-analyze incident before approving hotfix."
+            ),
+        )
+
+    actual_hash = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
+    expected_hash = remediation.get("full_file_content_sha256")
+    if not isinstance(expected_hash, str) or not expected_hash.strip():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation is missing full_file_content_sha256. "
+                "Re-analyze incident before approving hotfix."
+            ),
+        )
+    if isinstance(expected_hash, str) and expected_hash.strip() and expected_hash != actual_hash:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remediation content hash mismatch detected. Refusing to commit potentially stale "
+                "or corrupted file content. Re-analyze incident before approving hotfix."
+            ),
+        )
+
+    return file_content
+
+
+def build_incident_fingerprint(payload: Dict[str, Any]) -> str:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    canonical = {
+        "service_name": str(payload.get("service_name") or "").strip().lower(),
+        "environment": str(payload.get("environment") or "").strip().lower(),
+        "repository": str(payload.get("repository") or "").strip().lower(),
+        "error_message": str(payload.get("error_message") or "").strip(),
+        "stack_trace": str(payload.get("stack_trace") or "").strip(),
+        "source": str(metadata.get("source") or "").strip(),
+        "exception_type": str(metadata.get("exception_type") or "").strip(),
+    }
+    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def is_synthetic_debug_incident(payload: Dict[str, Any]) -> bool:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    source = str(metadata.get("source") or "")
+    stack_trace = str(payload.get("stack_trace") or "")
+    return source == "/api/erragent-debug" or "/api/erragent-debug" in stack_trace
+
+
+def debug_suppression_bypassed(payload: Dict[str, Any]) -> bool:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return bool(payload.get("force_ingest_debug") or metadata.get("force_ingest_debug"))
+
+
+def _store_incident_and_queue_analysis(
+    db,
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any],
+    actor: str,
+    incident_id: str | None = None,
+) -> str:
+    now = datetime.now(timezone.utc)
+    incident_id = incident_id or f"inc_{int(now.timestamp() * 1000)}_{uuid4().hex[:8]}"
+    fingerprint = build_incident_fingerprint(payload)
+
+    dedupe_cutoff = now - timedelta(seconds=max(30, INCIDENT_DEDUPE_WINDOW_SECONDS))
+    existing = db["incidents"].find_one(
+        {
+            "fingerprint": fingerprint,
+            "created_at": {"$gte": dedupe_cutoff},
+            "status": {"$in": ["open", "analyzing", "fix_proposed"]},
+        },
+        sort=[("created_at", -1)],
+    )
+    if existing:
+        existing_id = existing.get("_id")
+        logger.info("Skipping duplicate incident ingest. fingerprint=%s existing_id=%s", fingerprint, existing_id)
+        return str(existing_id)
+
+    incident_doc = {
+        "_id": incident_id,
+        "service_name": payload.get("service_name", "unknown-service"),
+        "environment": payload.get("environment", "production"),
+        "error_message": payload.get("error_message", "Unhandled Exception"),
+        "stack_trace": payload.get("stack_trace", ""),
+        "repository": payload.get("repository", ""),
+        "fingerprint": fingerprint,
+        "status": "open",
+        "metadata": payload.get("metadata", {}),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    try:
+        db["incidents"].insert_one(incident_doc)
+    except DuplicateKeyError:
+        existing_after_race = db["incidents"].find_one(
+            {
+                "$or": [
+                    {"_id": incident_id},
+                    {"fingerprint": fingerprint},
+                ]
+            },
+            sort=[("created_at", -1)],
+        )
+        if existing_after_race:
+            existing_id = existing_after_race.get("_id")
+            logger.info(
+                "Duplicate incident insert raced with another request. fingerprint=%s existing_id=%s",
+                fingerprint,
+                existing_id,
+            )
+            return str(existing_id)
+        raise
+
+    db["audit_logs"].insert_one({
+        "incident_id": incident_id,
+        "actor": actor,
+        "action": "INCIDENT_CREATED",
+        "details": {"service_name": incident_doc["service_name"]},
+        "timestamp": now,
+    })
+    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
+    return incident_id
+
+
+def require_sentry_secret(incoming_secret: str | None):
+    if not SENTRY_WEBHOOK_SECRET:
+        logger.error("SENTRY_WEBHOOK_SECRET is not configured.")
+        raise HTTPException(status_code=500, detail="Webhook configuration error")
+    if incoming_secret != SENTRY_WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+
+def authenticate_ingest_client(db, incoming_secret: str | None, app_id: str | None) -> Dict[str, Any]:
+    """
+    Returns ingestion context:
+    {
+      "actor": str,
+      "app_id": str | None,
+      "default_repo": str | None,
+    }
+
+    Behavior:
+    - If x-app-id is provided, validate against ingest_clients collection.
+    - If no x-app-id, fallback to legacy shared secret for backward compatibility.
+    """
+    if not incoming_secret:
+        raise HTTPException(status_code=401, detail="Missing ingest secret")
+
+    if app_id:
+        client = db["ingest_clients"].find_one({"app_id": app_id, "enabled": True}) or {}
+        expected_secret = client.get("secret")
+        if not expected_secret or not hmac.compare_digest(str(incoming_secret), str(expected_secret)):
+            raise HTTPException(status_code=401, detail="Invalid ingest credentials")
+
+        return {
+            "actor": f"MACHINE_INGEST:{app_id}",
+            "app_id": app_id,
+            "default_repo": client.get("default_repo"),
+        }
+
+    if not INGEST_WEBHOOK_SECRET:
+        logger.error("INGEST_WEBHOOK_SECRET (or ERRAGENT_INGEST_SECRET) is not configured.")
+        raise HTTPException(status_code=500, detail="Ingest configuration error")
+
+    if not hmac.compare_digest(str(incoming_secret), str(INGEST_WEBHOOK_SECRET)):
+        raise HTTPException(status_code=401, detail="Invalid ingest secret")
+
+    return {
+        "actor": "MACHINE_INGEST",
+        "app_id": None,
+        "default_repo": None,
+    }
+
+
+def extract_repository_from_tag_collection(tag_collection: Any) -> str | None:
+    """Supports Sentry tags as dict, list[{key,value}], or list[[key,value]]."""
+    if isinstance(tag_collection, dict):
+        for key in ("repository", "repo", "target_repo", "github_repo"):
+            value = tag_collection.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    if isinstance(tag_collection, list):
+        for item in tag_collection:
+            if isinstance(item, dict):
+                key = str(item.get("key", "")).strip().lower()
+                value = item.get("value")
+                if key in {"repository", "repo", "target_repo", "github_repo"} and isinstance(value, str) and value.strip():
+                    return value.strip()
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                key = str(item[0]).strip().lower()
+                value = item[1]
+                if key in {"repository", "repo", "target_repo", "github_repo"} and isinstance(value, str) and value.strip():
+                    return value.strip()
+
+    return None
+
+
+def _lookup_repo_from_service_registry(db, service_name: str, app_id: str | None = None) -> str | None:
+    if not service_name:
+        return None
+
+    # Prefer app-specific service mapping when app_id is present.
+    registry_entry = {}
+    if app_id:
+        registry_entry = db["service_registry"].find_one({"service_name": service_name, "app_id": app_id}) or {}
+
+    if not registry_entry:
+        registry_entry = db["service_registry"].find_one({"service_name": service_name}) or {}
+
+    for key in ("target_repo", "repository", "repo"):
+        value = registry_entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _resolve_target_repository(
+    db,
+    payload: Dict[str, Any],
+    app_id: str | None = None,
+    app_default_repo: str | None = None,
+) -> str:
+    direct_repo = payload.get("repository")
+    if isinstance(direct_repo, str) and direct_repo.strip():
+        return direct_repo.strip()
+
+    for collection in (
+        payload.get("tags"),
+        (payload.get("data") or {}).get("tags"),
+    ):
+        resolved = extract_repository_from_tag_collection(collection)
+        if resolved:
+            return resolved
+
+    extra_repo = (payload.get("extra") or {}).get("repository")
+    if isinstance(extra_repo, str) and extra_repo.strip():
+        return extra_repo.strip()
+
+    service_name = payload.get("service_name") or payload.get("project_name") or payload.get("logger")
+    if isinstance(service_name, str):
+        resolved_from_registry = _lookup_repo_from_service_registry(db, service_name.strip(), app_id=app_id)
+        if resolved_from_registry:
+            return resolved_from_registry
+
+    if isinstance(app_default_repo, str) and app_default_repo.strip():
+        return app_default_repo.strip()
+
+    return DEFAULT_TARGET_REPO
+
+
+def ingest_machine_payload(
+    db,
+    background_tasks: BackgroundTasks,
+    payload: Dict[str, Any],
+    actor: str,
+    incident_id: str | None = None,
+    app_id: str | None = None,
+    app_default_repo: str | None = None,
+) -> str:
+    normalized_payload = dict(payload)
+    normalized_payload["service_name"] = (
+        normalized_payload.get("service_name")
+        or normalized_payload.get("project_name")
+        or normalized_payload.get("logger")
+        or "unknown-service"
+    )
+    normalized_payload["repository"] = _resolve_target_repository(
+        db,
+        normalized_payload,
+        app_id=app_id,
+        app_default_repo=app_default_repo,
+    )
+    if app_id:
+        metadata = normalized_payload.get("metadata") or {}
+        if isinstance(metadata, dict):
+            metadata["app_id"] = app_id
+            normalized_payload["metadata"] = metadata
+    return _store_incident_and_queue_analysis(
+        db,
+        background_tasks,
+        normalized_payload,
+        actor,
+        incident_id=incident_id,
+    )
 
 def _upsert_remediation_failure(
     db,
@@ -606,3 +959,122 @@ CRITICAL RETRY RULES:
             {"_id": incident_id},
             {"$set": {"status": "analysis_failed", "updated_at": datetime.now(timezone.utc)}}
         )
+
+# ---------------------------------------------------------
+# 2. RUN HEALTH CHECKS FOR ALL SERVICES
+# ---------------------------------------------------------
+
+def run_service_health_checks() -> list[dict]:
+    results = []
+
+    for svc in SERVICES:
+        full_url = svc["url"] + svc.get("health_path", "/")
+        start = time.perf_counter()
+
+        try:
+            response = requests.get(full_url, timeout=5)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+
+            # classify service status
+            if response.status_code == 200:
+                if latency_ms < 500:
+                    status = "healthy"
+                elif latency_ms < 2000:
+                    status = "warming"
+                else:
+                    status = "degraded"
+            else:
+                status = "down"
+
+            # normalize JSON body if present
+            try:
+                details = response.json()
+            except Exception:
+                details = {}
+
+            results.append({
+                "service": svc["name"],
+                "url": full_url,
+                "status": status,
+                "latency_ms": latency_ms,
+                "http_status": response.status_code,
+                "details": details
+            })
+
+        except Exception as e:
+            results.append({
+                "service": svc["name"],
+                "url": full_url,
+                "status": "down",
+                "latency_ms": None,
+                "http_status": None,
+                "details": {"error": str(e)}
+            })
+
+    return results
+# ---------------------------------------------------------
+# 3. CLASSIFY OVERALL STATUS
+# ---------------------------------------------------------
+def classify_overall_status(results: list[dict]) -> str:
+    if any(r["status"] == "down" for r in results):
+        return "CRITICAL"
+    if any(r["status"] in {"warming", "degraded"} for r in results):
+        return "WARNING"
+    return "OK"
+# ---------------------------------------------------------
+# 4. HUMAN SUMMARY + RECOMMENDATIONS
+# ---------------------------------------------------------
+def build_human_summary(results: list[dict], overall: str) -> str:
+    parts = []
+    for r in results:
+        if r["status"] == "healthy":
+            parts.append(f"{r['service']} is healthy")
+        elif r["status"] == "warming":
+            parts.append(f"{r['service']} is warming up (latency {r['latency_ms']}ms)")
+        elif r["status"] == "degraded":
+            parts.append(f"{r['service']} is degraded (latency {r['latency_ms']}ms)")
+        else:
+            parts.append(f"{r['service']} is DOWN")
+
+    return ". ".join(parts) + f". Overall status: {overall}."
+
+def build_recommendations(results: list[dict], overall: str) -> list[str]:
+    recs = []
+
+    for r in results:
+        if r["status"] == "healthy":
+            recs.append(f"{r['service']} is healthy.")
+        elif r["status"] == "warming":
+            recs.append(
+                f"{r['service']} is warming up ({r['latency_ms']}ms). "
+                "This is often a free-tier cold start; monitor for persistence."
+            )
+        elif r["status"] == "degraded":
+            recs.append(
+                f"{r['service']} latency is high ({r['latency_ms']}ms). "
+                "Check server logs or hosting provider."
+            )
+        else:
+            recs.append(
+                f"{r['service']} is DOWN. Immediate investigation required."
+            )
+
+    if overall == "CRITICAL":
+        recs.append("At least one critical service is down. Triggering emergency workflow.")
+
+    return recs
+
+# ---------------------------------------------------------
+# 5. BUILD STRUCTURED HEALTH REPORT
+# ---------------------------------------------------------
+
+def build_health_report(results: list[dict]) -> dict:
+    overall = classify_overall_status(results)
+
+    return {
+        "overall_status": overall,
+        "services": results,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "summary": build_human_summary(results, overall),
+        "recommendations": build_recommendations(results, overall)
+    }
