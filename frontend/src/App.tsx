@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/clerk-react';
 import { useAppUser } from './context/Clerk';
 import { CodeDiffView } from './components/CodeDiffView';
+import { useDynamicFavicon } from './hooks/useDynamicFavicon';
 
 const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL =
@@ -59,6 +60,35 @@ const statusTone: Record<string, string> = {
   closed: 'status-closed',
 };
 
+function PatchyBrandMark({ activeIncidentsCount }: { activeIncidentsCount: number }) {
+  const hasIncidents = activeIncidentsCount > 0;
+  const eyeColor = hasIncidents ? '#EF4444' : '#38C2DE';
+  const glowColor = hasIncidents ? 'rgba(239, 68, 68, 0.35)' : 'rgba(56, 194, 222, 0.35)';
+
+  return (
+    <div className="brand-mark" aria-label={hasIncidents ? `${activeIncidentsCount} active incidents` : 'No active incidents'}>
+      <svg width="42" height="42" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="32" cy="32" r="28" fill={glowColor} />
+        <line x1="32" y1="14" x2="32" y2="8" stroke="#8E95A2" strokeWidth="3" strokeLinecap="round" />
+        <circle cx="32" cy="6" r="4" fill={eyeColor} />
+        <rect x="14" y="14" width="36" height="30" rx="10" fill="#121316" stroke="#2A2A32" strokeWidth="2" />
+        <rect x="10" y="24" width="4" height="10" rx="2" fill="#8E95A2" />
+        <rect x="50" y="24" width="4" height="10" rx="2" fill="#8E95A2" />
+        <rect x="18" y="18" width="28" height="22" rx="6" fill="#0C1016" stroke="#1F242D" />
+        <circle cx="25" cy="28" r="3.5" fill={eyeColor} />
+        <circle cx="39" cy="28" r="3.5" fill={eyeColor} />
+        {hasIncidents ? (
+          <circle cx="32" cy="34" r="2.5" fill={eyeColor} />
+        ) : (
+          <path d="M26 33 Q32 38 38 33" stroke={eyeColor} strokeWidth="2" strokeLinecap="round" fill="none" />
+        )}
+        <path d="M22 48 H42 V58 H22 Z" fill="#121316" stroke="#2A2A32" />
+        <path d="M32 50 V56 M29 53 H35" stroke={eyeColor} strokeWidth="2" strokeLinecap="round" />
+      </svg>
+    </div>
+  );
+}
+
 export default function App() {
   const { principal, getToken, isSignedIn } = useAppUser();
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -73,8 +103,10 @@ export default function App() {
   const selectedIncidentFromDetail = selectedIncidentDetail?.incident || selectedIncident;
   const selectedAnalysis = selectedIncidentDetail?.analysis || null;
   const selectedRemediation = selectedIncidentDetail?.remediation || null;
+  const activeIncidentsCount = incidents.filter((incident) => !['resolved', 'closed'].includes(incident.status ?? '')).length;
   const isIncidentAnalyzing = selectedIncidentFromDetail?.status === 'analyzing';
   const isPrMerged = selectedRemediation?.status === 'merged';
+  useDynamicFavicon({ activeIncidentsCount });
   const [isMerging, setIsMerging] = useState(false);
   const [services, setServices] = useState<any[]>([]);
   const [healthResults, setHealthResults] = useState<any[]>([]);
@@ -376,9 +408,12 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div>
-          <p className="eyebrow">Incident Operations Console</p>
-          <h1>errAgent Dashboard</h1>
+        <div className="topbar-brand">
+          <PatchyBrandMark activeIncidentsCount={activeIncidentsCount} />
+          <div>
+            <p className="eyebrow">Incident Operations Console</p>
+            <h1>errAgent Dashboard</h1>
+          </div>
         </div>
         <div className="auth-chip">
           <SignedIn>
