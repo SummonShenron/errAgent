@@ -226,10 +226,11 @@ def list_services():
     for svc in SERVICES:
         entry = dict(svc)
         last_status = latest_status_by_service.get(svc["name"], {})
+        last_ts = latest_snapshot.get("timestamp") if isinstance(latest_snapshot, dict) else None
         entry["status"] = last_status.get("status", "unknown")
         entry["latency_ms"] = last_status.get("latency_ms")
         entry["http_status"] = last_status.get("http_status")
-        entry["last_checked_at"] = latest_snapshot.get("timestamp") if isinstance(latest_snapshot, dict) else None
+        entry["last_checked_at"] = last_ts.isoformat() if isinstance(last_ts, datetime) else last_ts
         services_payload.append(entry)
 
     return {"services": services_payload}

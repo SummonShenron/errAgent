@@ -51,48 +51,8 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({ tab }) => {
           70% { opacity: 0.4; }
           85%, 100% { transform: translateX(60px); opacity: 0; }
         }
-
-        /* 6. Arm Path Morph Sequence: Hip Bend -> Upright Wave -> Raised Curl Pose */
-        @keyframes ibmArmMorph {
-          0% {
-            d: path("M 76 62 C 84 68, 84 76, 78 82"); /* Bent down at hip */
-          }
-          10% {
-            d: path("M 76 62 C 88 56, 94 42, 92 30"); /* Wave Out */
-          }
-          20% {
-            d: path("M 76 62 C 82 50, 86 36, 84 26"); /* Wave In */
-          }
-          30% {
-            d: path("M 76 62 C 88 56, 94 42, 92 30"); /* Wave Out */
-          }
-          40% {
-            d: path("M 76 62 C 82 50, 86 36, 84 26"); /* Wave In */
-          }  
-          50% {
-            d: path("M 76 62 C 88 56, 94 42, 92 30"); /* Wave Out */
-          }  
-          60% {
-            d: path("M 76 62 C 84 68, 84 76, 78 82"); /* Bent down at hip */
-          }
-          100% {
-            d: path("M 76 62 C 84 68, 84 76, 78 82"); /* Bent down at hip */
-          }  
-        }
-
-        /* 7. Hand Dot Tracking Keyframes */
-        @keyframes ibmHandMorph {
-          0% { cx: 78px; cy: 82px; }
-          10% { cx: 92px; cy: 30px; }
-          20% { cx: 84px; cy: 26px; }
-          30% { cx: 92px; cy: 30px; }
-          40% { cx: 84px; cy: 26px; }
-          50% { cx: 92px; cy: 30px; }
-          60% { cx: 78px; cy: 82px; }
-          100% { cx: 78px; cy: 82px; }
-        }
         
-        /* 8. Subtle Foot Dangle Kick */
+        /* 6. Subtle Foot Dangle Kick */
         @keyframes ibmFootDangle {
           0%, 100% { transform: translateY(0px); }
           50% { transform: translateY(1.5px); }
@@ -104,13 +64,6 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({ tab }) => {
         .ibm-bot-radar-1 { animation: ibmRadarPulse 2.2s ease-out infinite; }
         .ibm-bot-radar-2 { animation: ibmRadarPulse 2.2s ease-out 1.1s infinite; }
         .ibm-bot-glint { animation: ibmGlint 4s ease-in-out infinite; }
-        
-        .ibm-bot-arm-path {
-          animation: ibmArmMorph 8s cubic-bezier(0.25, 1, 0.5, 1) infinite;
-        }
-        .ibm-bot-hand-dot {
-          animation: ibmHandMorph 8s cubic-bezier(0.25, 1, 0.5, 1) infinite;
-        }
         .ibm-bot-left-foot { animation: ibmFootDangle 4s ease-in-out infinite; }
         .ibm-bot-right-foot { animation: ibmFootDangle 4s ease-in-out 0.3s infinite; }
       `}</style>
@@ -125,9 +78,10 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({ tab }) => {
         >
           <defs>
             <clipPath id="visor-screen-clip">
-            <rect x="33" y="25" width="34" height="24" rx="6" />
+              <rect x="33" y="25" width="34" height="24" rx="6" />
             </clipPath>
-        </defs>
+          </defs>
+
           {/* Main Floating Body Group */}
           <g className="ibm-bot-float">
             {/* Backdrop Glow */}
@@ -136,9 +90,11 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({ tab }) => {
             {/* Radar Wave Emission */}
             <circle cx="50" cy="10" r="4" stroke="#38C2DE" fill="none" className="ibm-bot-radar-1" />
             <circle cx="50" cy="10" r="4" stroke="#38C2DE" fill="none" className="ibm-bot-radar-2" />
-            {/* Flat Box Feet (Layered behind torso) */}
+
+            {/* Flat Box Feet */}
             <rect className="ibm-bot-left-foot" x="35" y="85" width="12" height="6" rx="2" fill="#8E95A2" />
             <rect className="ibm-bot-right-foot" x="53" y="85" width="12" height="6" rx="2" fill="#8E95A2" />
+
             {/* Left Arm (Resting on side) */}
             <path
               d="M24 62 C16 66, 16 76, 22 82"
@@ -149,23 +105,79 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({ tab }) => {
             />
             <circle cx="22" cy="82" r="3.5" fill="#8E95A2" />
 
-            {/* Right Arm (Morphs dynamically from hip bend -> wave -> raised curl) */}
+            {/* Right Arm & Hand Dot (Native SVG SMIL Animation for Universal Mobile Support) */}
             <g>
               <path
-                className="ibm-bot-arm-path"
                 d="M 76 62 C 84 68, 84 76, 78 82"
                 stroke="#8E95A2"
                 strokeWidth="4"
                 strokeLinecap="round"
                 fill="none"
-              />
-              <circle
-                className="ibm-bot-hand-dot"
-                cx="78"
-                cy="82"
-                r="3.5"
-                fill="#38C2DE"
-              />
+              >
+                <animate
+                  attributeName="d"
+                  dur="8s"
+                  repeatCount="indefinite"
+                  calcMode="spline"
+                  keyTimes="0; 0.1; 0.2; 0.3; 0.4; 0.5; 0.6; 1"
+                  keySplines="
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1
+                  "
+                  values="
+                    M 76 62 C 84 68, 84 76, 78 82;
+                    M 76 62 C 88 56, 94 42, 92 30;
+                    M 76 62 C 82 50, 86 36, 84 26;
+                    M 76 62 C 88 56, 94 42, 92 30;
+                    M 76 62 C 82 50, 86 36, 84 26;
+                    M 76 62 C 88 56, 94 42, 92 30;
+                    M 76 62 C 84 68, 84 76, 78 82;
+                    M 76 62 C 84 68, 84 76, 78 82
+                  "
+                />
+              </path>
+
+              <circle r="3.5" fill="#38C2DE">
+                <animate
+                  attributeName="cx"
+                  dur="8s"
+                  repeatCount="indefinite"
+                  calcMode="spline"
+                  keyTimes="0; 0.1; 0.2; 0.3; 0.4; 0.5; 0.6; 1"
+                  keySplines="
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1
+                  "
+                  values="78; 92; 84; 92; 84; 92; 78; 78"
+                />
+                <animate
+                  attributeName="cy"
+                  dur="8s"
+                  repeatCount="indefinite"
+                  calcMode="spline"
+                  keyTimes="0; 0.1; 0.2; 0.3; 0.4; 0.5; 0.6; 1"
+                  keySplines="
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1;
+                    0.25 1 0.5 1
+                  "
+                  values="82; 30; 26; 30; 26; 30; 82; 82"
+                />
+              </circle>
             </g>
 
             {/* Torso */}
@@ -173,7 +185,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({ tab }) => {
             <rect x="42" y="64" width="16" height="16" rx="3" fill="#0C1016" stroke="#1F242D" />
             <path d="M50 67 V77 M45 72 H55" stroke="#38C2DE" strokeWidth="2.5" strokeLinecap="round" />
 
-            {/* Head Group with Tilting Expression */}
+            {/* Head Group */}
             <g className="ibm-bot-head">
               {/* Antenna */}
               <line x1="50" y1="20" x2="50" y2="12" stroke="#8E95A2" strokeWidth="2.5" strokeLinecap="round" />
@@ -187,18 +199,12 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({ tab }) => {
               <rect x="72" y="32" width="5" height="10" rx="2" fill="#8E95A2" />
 
               {/* Visor Screen */}
-                <g>
+              <g>
                 <rect x="33" y="25" width="34" height="24" rx="6" fill="#0C1016" stroke="#1F242D" />
-                
-                {/* Clipped & Thinner Sheen Swipe */}
                 <g clipPath="url(#visor-screen-clip)">
-                    <path 
-                    d="M30 20 L34 20 L28 52 L24 52 Z" 
-                    fill="#FFFFFF" 
-                    className="ibm-bot-glint" 
-                    />
+                  <path d="M30 20 L34 20 L28 52 L24 52 Z" fill="#FFFFFF" className="ibm-bot-glint" />
                 </g>
-                </g>
+              </g>
 
               {/* Blinking Eyes */}
               <g className="ibm-bot-eyes">

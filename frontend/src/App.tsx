@@ -64,7 +64,16 @@ const formatCentralTime = (value?: string | null) => {
   if (!value) return 'n/a';
 
   try {
-    return new Date(value).toLocaleString('en-US', {
+    const trimmed = String(value).trim();
+    const hasExplicitTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(trimmed);
+    const normalizedValue = hasExplicitTimezone ? trimmed : trimmed.replace(' ', 'T') + 'Z';
+    const date = new Date(normalizedValue);
+
+    if (Number.isNaN(date.getTime())) {
+      return 'n/a';
+    }
+
+    return date.toLocaleString('en-US', {
       timeZone: 'America/Chicago',
       dateStyle: 'medium',
       timeStyle: 'short',
