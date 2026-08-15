@@ -3,7 +3,7 @@ import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/clerk-reac
 import { useAppUser } from './context/Clerk';
 import { CodeDiffView } from './components/CodeDiffView';
 import { useDynamicFavicon } from './hooks/useDynamicFavicon';
-
+import { PatchyEmptyState } from './components/PatchyEmptyState';
 const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || (isLocalHost ? 'http://127.0.0.1:8000/api/v1' : '/api/v1');
@@ -58,6 +58,20 @@ const statusTone: Record<string, string> = {
   fix_proposed: 'status-fix',
   resolved: 'status-resolved',
   closed: 'status-closed',
+};
+
+const formatCentralTime = (value?: string | null) => {
+  if (!value) return 'n/a';
+
+  try {
+    return new Date(value).toLocaleString('en-US', {
+      timeZone: 'America/Chicago',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  } catch {
+    return 'n/a';
+  }
 };
 
 function PatchyBrandMark({ activeIncidentsCount }: { activeIncidentsCount: number }) {
@@ -472,7 +486,7 @@ export default function App() {
           </span>
           {svc.last_checked_at && (
             <span className="service-last-check">
-              Last check: {new Date(svc.last_checked_at).toLocaleString()}
+              Last check: {formatCentralTime(svc.last_checked_at)}
             </span>
           )}
         </div>
@@ -592,6 +606,15 @@ export default function App() {
             </ul>
           )}
         </section>
+        {loading ? (
+          <p className="muted">Loading incidents from backend...</p>
+        ) : visibleIncidents.length === 0 ? (
+          <PatchyEmptyState tab={incidentTab} />
+        ) : (
+          <ul className="incident-list">
+            {/* Incident list mapping */}
+          </ul>
+        )}
         <section className="panel detail-panel">
           <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2>Incident Details</h2>
@@ -633,7 +656,7 @@ export default function App() {
                 </div>
                 <div>
                   <label>Created At</label>
-                  <p>{selectedIncidentFromDetail?.created_at ? new Date(selectedIncidentFromDetail.created_at).toLocaleString() : 'n/a'}</p>
+                  <p>{formatCentralTime(selectedIncidentFromDetail?.created_at)}</p>
                 </div>
               </div>
               <div className="detail-block">
