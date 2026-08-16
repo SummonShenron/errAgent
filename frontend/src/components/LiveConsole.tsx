@@ -73,13 +73,26 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
 
     let disposed = false;
     let socket: WebSocket | null = null;
+    let retryTimer: number | undefined;
+    let retryAttempt = 0;
+
+    const scheduleReconnect = () => {
+      if (disposed || paused || retryTimer !== undefined) return;
+      const delay = Math.min(1000 * 2 ** retryAttempt, 15000);
+      retryAttempt += 1;
+      setConnectionState('error');
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        void connect();
+      }, delay);
+    };
 
     const connect = async () => {
       setConnectionState('connecting');
       const token = await getTokenRef.current();
       if (disposed) return;
       if (!token) {
-        setConnectionState('error');
+        scheduleReconnect();
         return;
       }
 
@@ -88,23 +101,31 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
         socket?.send(JSON.stringify({ type: 'auth', token }));
       };
       socket.onmessage = (event) => {
-        const message = JSON.parse(event.data) as StreamMessage;
-        setConnectionState('live');
-        if (message.type === 'history') {
-          setLogs(message.entries.slice(-MAX_RENDERED_LOGS));
-        } else if (message.type === 'log') {
-          setLogs((current) => [...current, message.entry].slice(-MAX_RENDERED_LOGS));
+        try {
+          const message = JSON.parse(event.data) as StreamMessage;
+          retryAttempt = 0;
+          setConnectionState('live');
+          if (message.type === 'history') {
+            setLogs(message.entries.slice(-MAX_RENDERED_LOGS));
+          } else if (message.type === 'log') {
+            setLogs((current) => [...current, message.entry].slice(-MAX_RENDERED_LOGS));
+          }
+        } catch {
+          setConnectionState('error');
         }
       };
       socket.onerror = () => setConnectionState('error');
       socket.onclose = () => {
-        if (!disposed) setConnectionState('error');
+        scheduleReconnect();
       };
     };
 
     void connect();
     return () => {
       disposed = true;
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+      }
       socket?.close();
     };
   }, [apiBaseUrl, level, open, paused, service]);

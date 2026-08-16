@@ -155,7 +155,11 @@ async def health_monitor_loop() -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     global health_monitor_task, internal_log_handler
-    internal_log_handler = install_internal_log_handler(log_broker, asyncio.get_running_loop())
+    internal_log_handler = install_internal_log_handler(
+        log_broker,
+        asyncio.get_running_loop(),
+        target_logger=logger,
+    )
     logger.info("errAgent internal log streaming enabled")
     health_monitor_task = asyncio.create_task(health_monitor_loop())
 
@@ -170,6 +174,7 @@ async def shutdown_event() -> None:
             logger.info("Health monitor loop cancelled during shutdown")
     if internal_log_handler is not None:
         logging.getLogger().removeHandler(internal_log_handler)
+        logger.removeHandler(internal_log_handler)
         internal_log_handler = None
 
 # --- 1. HEALTH CHECK ENDPOINTS ---

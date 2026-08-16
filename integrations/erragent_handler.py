@@ -22,12 +22,16 @@ class ErrAgentHandler(logging.Handler):
         service: str,
         timeout_seconds: float = 3.0,
         queue_size: int = 1000,
+        max_delivery_attempts: int = 4,
+        retry_delay_seconds: float = 0.5,
     ) -> None:
         super().__init__(level=logging.INFO)
         self.endpoint = f"{erragent_url.rstrip('/')}/api/v1/logs"
         self.ingest_secret = ingest_secret
         self.service = service
         self.timeout_seconds = timeout_seconds
+        self.max_delivery_attempts = max(1, max_delivery_attempts)
+        self.retry_delay_seconds = max(0.0, retry_delay_seconds)
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=queue_size)
         self._worker = threading.Thread(
             target=self._send_loop,
@@ -70,6 +74,13 @@ class ErrAgentHandler(logging.Handler):
         while True:
             payload = self._queue.get()
             try:
+                self._deliver_with_retries(payload)
+            finally:
+                self._queue.task_done()
+
+    def _deliver_with_retries(self, payload: dict[str, Any]) -> None:
+        for attempt in range(self.max_delivery_attempts):
+            try:
                 request = urllib.request.Request(
                     self.endpoint,
                     data=json.dumps(payload).encode("utf-8"),
@@ -80,11 +91,12 @@ class ErrAgentHandler(logging.Handler):
                     method="POST",
                 )
                 with urllib.request.urlopen(request, timeout=self.timeout_seconds):
-                    pass
+                    return
             except Exception:
-                pass
-            finally:
-                self._queue.task_done()
+                if attempt + 1 < self.max_delivery_attempts:
+                    delay = self.retry_delay_seconds * (2**attempt)
+                    if delay:
+                        threading.Event().wait(delay)
 
     def handleError(self, record: logging.LogRecord) -> None:
         pass

@@ -143,14 +143,19 @@ class InternalLogHandler(logging.Handler):
 def install_internal_log_handler(
     broker: LogBroker,
     loop: asyncio.AbstractEventLoop,
+    target_logger: logging.Logger | None = None,
 ) -> InternalLogHandler:
     root_logger = logging.getLogger()
-    for handler in root_logger.handlers:
-        if isinstance(handler, InternalLogHandler):
-            return handler
+    existing_handler = next(
+        (handler for handler in root_logger.handlers if isinstance(handler, InternalLogHandler)),
+        None,
+    )
+    handler = existing_handler or InternalLogHandler(broker, loop)
+    if existing_handler is None:
+        root_logger.addHandler(handler)
 
-    handler = InternalLogHandler(broker, loop)
-    root_logger.addHandler(handler)
+    if target_logger is not None and handler not in target_logger.handlers:
+        target_logger.addHandler(handler)
     return handler
 
 
