@@ -1,9 +1,11 @@
 import asyncio
+import logging
 
 from fastapi.testclient import TestClient
 
 import backend.app.app as app_module
-from backend.services.log_broker import LogBroker, LogEventInput
+from backend.app.logging.logger import NOISY_LOGGERS
+from backend.services.log_broker import InternalLogHandler, LogBroker, LogEventInput
 from backend.services.log_broker import log_broker
 
 
@@ -55,6 +57,44 @@ def test_log_broker_normalizes_epoch_milliseconds():
             )
         )
         assert entry["timestamp"] == "2024-08-15T22:00:00Z"
+
+    asyncio.run(scenario())
+
+
+def test_internal_log_handler_excludes_configured_noisy_loggers():
+    async def scenario():
+        broker = LogBroker()
+        handler = InternalLogHandler(broker, asyncio.get_running_loop())
+        handler.emit(
+            logging.LogRecord(
+                "ErrAgent Logger",
+                logging.WARNING,
+                __file__,
+                1,
+                "Useful warning",
+                (),
+                None,
+            )
+        )
+        for logger_name in NOISY_LOGGERS:
+            handler.emit(
+                logging.LogRecord(
+                    logger_name,
+                    logging.CRITICAL,
+                    __file__,
+                    1,
+                    "Noise",
+                    (),
+                    None,
+                )
+            )
+
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        _, history = await broker.subscribe("errAgent")
+
+        assert [entry["message"] for entry in history] == ["Useful warning"]
+        assert history[0]["level"] == "warn"
 
     asyncio.run(scenario())
 

@@ -1,12 +1,21 @@
 import asyncio
+import logging
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from backend.app.logging.logger import NOISY_LOGGERS
 
 LogLevel = Literal["info", "warn", "error"]
+
+_INTERNAL_LOG_LEVELS: dict[int, LogLevel] = {
+    logging.WARNING: "warn",
+    logging.ERROR: "error",
+    logging.CRITICAL: "error",
+}
+_EXCLUDED_LOGGER_PREFIXES = NOISY_LOGGERS
 
 
 class LogEventInput(BaseModel):
@@ -93,6 +102,56 @@ class LogBroker:
         async with self._lock:
             self._buffers.clear()
             self._subscribers.clear()
+
+
+class InternalLogHandler(logging.Handler):
+    def __init__(self, broker: LogBroker, loop: asyncio.AbstractEventLoop):
+        super().__init__(level=logging.INFO)
+        self._broker = broker
+        self._loop = loop
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.name.startswith(_EXCLUDED_LOGGER_PREFIXES):
+            return
+
+        try:
+            message = record.getMessage()
+            if record.exc_info:
+                traceback = logging.Formatter().formatException(record.exc_info)
+                message = f"{message}\n{traceback}"
+
+            event = LogEventInput(
+                service="errAgent",
+                level=_INTERNAL_LOG_LEVELS.get(record.levelno, "info"),
+                message=message,
+                timestamp=record.created,
+                context={
+                    "logger": record.name,
+                    "module": record.module,
+                    "function": record.funcName,
+                    "line": record.lineno,
+                },
+            )
+            self._loop.call_soon_threadsafe(
+                asyncio.create_task,
+                self._broker.publish(event),
+            )
+        except Exception:
+            pass
+
+
+def install_internal_log_handler(
+    broker: LogBroker,
+    loop: asyncio.AbstractEventLoop,
+) -> InternalLogHandler:
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, InternalLogHandler):
+            return handler
+
+    handler = InternalLogHandler(broker, loop)
+    root_logger.addHandler(handler)
+    return handler
 
 
 log_broker = LogBroker()

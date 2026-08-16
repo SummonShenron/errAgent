@@ -2,6 +2,20 @@ import os
 import logging
 import sys
 
+NOISY_LOGGERS = (
+    "uvicorn.access",
+    "httpx",
+    "httpcore",
+    "h11",
+    "anyio",
+    "asyncio",
+    "transformers",
+    "huggingface_hub",
+    "sentence_transformers",
+    "chromadb",
+)
+
+
 def setup_logging():
     print("DEBUG: Logger setup is executing!")
     logger = logging.getLogger("errAgent Logger")
@@ -35,12 +49,7 @@ def setup_logging():
         logger.propagate = False
         
         # Silence noisy third-party libraries
-        noisy_loggers = [
-            "uvicorn.access",
-            "httpx", "httpcore", "h11", "anyio", "asyncio",
-            "transformers", "huggingface_hub", "sentence_transformers", "chromadb"
-        ]
-        for logger_name in noisy_loggers:
+        for logger_name in NOISY_LOGGERS:
             logging.getLogger(logger_name).setLevel(logging.CRITICAL)     
             
         logging.getLogger("uvicorn.error").setLevel(logging.ERROR)

@@ -32,7 +32,7 @@ from backend.utils.app_utils import (
 )
 from backend.utils.isolation_auth import decode_access_token, get_current_user
 from backend.services.github_service import GitHubOpsService
-from backend.services.log_broker import LogEventInput, log_broker
+from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
 from backend.middleware.rbac import require_role
 
 logging.basicConfig(level=logging.INFO)
@@ -40,6 +40,7 @@ logger = logging.getLogger("ErrAgent Logger")
 
 app = FastAPI(title="errAgent Incident Engine", version="1.0.0")
 health_monitor_task: asyncio.Task | None = None
+internal_log_handler: InternalLogHandler | None = None
 
 github_service = GitHubOpsService()
 SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
@@ -153,18 +154,23 @@ async def health_monitor_loop() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global health_monitor_task
+    global health_monitor_task, internal_log_handler
+    internal_log_handler = install_internal_log_handler(log_broker, asyncio.get_running_loop())
+    logger.info("errAgent internal log streaming enabled")
     health_monitor_task = asyncio.create_task(health_monitor_loop())
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    global health_monitor_task
+    global health_monitor_task, internal_log_handler
     if health_monitor_task is not None:
         health_monitor_task.cancel()
         try:
             await health_monitor_task
         except asyncio.CancelledError:
             logger.info("Health monitor loop cancelled during shutdown")
+    if internal_log_handler is not None:
+        logging.getLogger().removeHandler(internal_log_handler)
+        internal_log_handler = None
 
 # --- 1. HEALTH CHECK ENDPOINTS ---
 @app.get("/health", tags=["Health"])

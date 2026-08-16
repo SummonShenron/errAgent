@@ -146,6 +146,7 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
             <select value={service} onChange={(event) => setService(event.target.value)}>
               <option value="SAAPP">SAAPP</option>
               <option value="BTY">BTY</option>
+              <option value="errAgent">errAgent</option>
             </select>
           </label>
 
