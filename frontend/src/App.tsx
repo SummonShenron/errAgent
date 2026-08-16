@@ -1,9 +1,10 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { SignedIn, SignedOut, SignInButton, UserButton } from '@clerk/clerk-react';
 import { useAppUser } from './context/Clerk';
 import { CodeDiffView } from './components/CodeDiffView';
 import { useDynamicFavicon } from './hooks/useDynamicFavicon';
 import { PatchyEmptyState } from './components/PatchyEmptyState';
+import { LiveConsole } from './components/LiveConsole';
 
 const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL =
@@ -153,6 +154,7 @@ function PatchyBrandMark({ activeIncidentsCount }: { activeIncidentsCount: numbe
 
 export default function App() {
   const { principal, getToken, isSignedIn } = useAppUser();
+  const getTokenRef = useRef(getToken);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<IncidentDetailResponse | null>(null);
@@ -166,6 +168,7 @@ export default function App() {
   const [healthResults, setHealthResults] = useState<any[]>([]);
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [incidentTab, setIncidentTab] = useState<'open' | 'resolved'>('open');
+  const [consoleOpen, setConsoleOpen] = useState(false);
 
   const visibleIncidents = incidents.filter((incident) => {
     const status = (incident.status || 'open').toLowerCase();
@@ -182,6 +185,10 @@ export default function App() {
   const isPrMerged = selectedRemediation?.status === 'merged';
   const activeIncident = incidents.find(i => i._id === selectedIncidentId) || incidents[0];
   useDynamicFavicon({ activeIncidentsCount });
+
+  useEffect(() => {
+    getTokenRef.current = getToken;
+  }, [getToken]);
 
   // --- DATA FETCHING & POLLING ---
   const fetchServices = useCallback(async () => {
@@ -221,7 +228,7 @@ export default function App() {
   const fetchIncidents = useCallback(async () => {
     if (!isSignedIn) return;
     try {
-      const token = await getToken();
+      const token = await getTokenRef.current();
       if (!token) return;
 
       const res = await fetch(`${API_BASE_URL}/incidents`, {
@@ -244,7 +251,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [getToken, isSignedIn]);
+  }, [isSignedIn]);
 
   const fetchIncidentDetail = useCallback(async (incidentId: string) => {
     if (!isSignedIn || !incidentId) {
@@ -253,7 +260,7 @@ export default function App() {
     }
     try {
       setDetailLoading(true);
-      const token = await getToken();
+      const token = await getTokenRef.current();
       if (!token) {
         setSelectedIncidentDetail(null);
         return;
@@ -277,7 +284,7 @@ export default function App() {
     } finally {
       setDetailLoading(false);
     }
-  }, [getToken, isSignedIn]);
+  }, [isSignedIn]);
 
   useEffect(() => {
     fetchServices();
@@ -498,15 +505,28 @@ export default function App() {
             <h1>errAgent Dashboard</h1>
           </div>
         </div>
-        <div className="auth-chip">
-          <SignedIn>
-            <UserButton />
-          </SignedIn>
-          <SignedOut>
-            <SignInButton mode="modal" />
-          </SignedOut>
+        <div className="topbar-actions">
+          <button type="button" className="console-launch" onClick={() => setConsoleOpen(true)}>
+            <span aria-hidden="true">&gt;_</span>
+            Console
+          </button>
+          <div className="auth-chip">
+            <SignedIn>
+              <UserButton />
+            </SignedIn>
+            <SignedOut>
+              <SignInButton mode="modal" />
+            </SignedOut>
+          </div>
         </div>
       </header>
+
+      <LiveConsole
+        open={consoleOpen}
+        onClose={() => setConsoleOpen(false)}
+        apiBaseUrl={API_BASE_URL}
+        getToken={getToken}
+      />
       
       <section className="session-band">
         <span className="session-label">Active Session Principal</span>

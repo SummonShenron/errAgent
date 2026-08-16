@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 from datetime import datetime, timezone, timedelta, time
 from bson import ObjectId
 import requests
-from fastapi import Body, FastAPI, HTTPException, Depends, status, BackgroundTasks, Header
+from fastapi import Body, FastAPI, HTTPException, Depends, status, BackgroundTasks, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -30,8 +30,9 @@ from backend.utils.app_utils import (
     is_synthetic_debug_incident,
     debug_suppression_bypassed,
 )
-from backend.utils.isolation_auth import get_current_user
+from backend.utils.isolation_auth import decode_access_token, get_current_user
 from backend.services.github_service import GitHubOpsService
+from backend.services.log_broker import LogEventInput, log_broker
 from backend.middleware.rbac import require_role
 
 logging.basicConfig(level=logging.INFO)
@@ -250,6 +251,61 @@ async def incident_events():
             await asyncio.sleep(15)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/v1/logs", status_code=status.HTTP_202_ACCEPTED, tags=["Logs"])
+async def ingest_logs(
+    payload: LogEventInput | list[LogEventInput],
+    x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    ingest_context = authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    events = payload if isinstance(payload, list) else [payload]
+    if len(events) > 100:
+        raise HTTPException(status_code=413, detail="Log batches are limited to 100 entries")
+
+    for event in events:
+        await log_broker.publish(event, source_app_id=ingest_context.get("app_id"))
+
+    return {"status": "accepted", "count": len(events)}
+
+
+@app.websocket("/api/v1/live-logs")
+async def live_logs(
+    websocket: WebSocket,
+    service: str = Query(..., min_length=1, max_length=64),
+    level: str | None = Query(default=None),
+    history: int = Query(default=500, ge=1, le=5000),
+):
+    await websocket.accept()
+    if level not in {None, "info", "warn", "error"}:
+        await websocket.close(code=4400, reason="Invalid log level")
+        return
+
+    try:
+        auth_message = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+        if auth_message.get("type") != "auth" or not auth_message.get("token"):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        decode_access_token(str(auth_message["token"]))
+    except WebSocketDisconnect:
+        return
+    except (HTTPException, asyncio.TimeoutError, ValueError, TypeError):
+        await websocket.close(code=4401, reason="Authentication failed")
+        return
+
+    queue, history_entries = await log_broker.subscribe(service, level, history)
+    try:
+        await websocket.send_json({"type": "history", "entries": history_entries})
+        while True:
+            entry = await queue.get()
+            await websocket.send_json({"type": "log", "entry": entry})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await log_broker.unsubscribe(queue)
 
 # --- 2. LIST ALL INCIDENTS ---
 @app.get("/api/v1/incidents", response_model=List[Dict[str, Any]], tags=["Incidents"])

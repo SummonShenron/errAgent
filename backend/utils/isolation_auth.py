@@ -43,6 +43,40 @@ def get_clerk_public_key():
 
     return _cached_jwks
 
+
+def decode_access_token(token: str) -> dict:
+    if token == "guest-sandbox-token" and GUEST_ACCESS_ENABLED:
+        logger.info("Guest session detected. Bypassing JWT verification.")
+        return {
+            "sub": "user_guest_sandbox_123",
+            "email": "guest@example.com",
+            "username": "guest-recruiter@example.com",
+            "full_name": "Guest Recruiter",
+        }
+
+    try:
+        header = jwt.get_unverified_header(token)
+        jwks = get_clerk_public_key()
+        key_data = next((key for key in jwks["keys"] if key["kid"] == header["kid"]), None)
+        if not key_data:
+            raise HTTPException(status_code=401, detail="Invalid token key ID")
+
+        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            leeway=JWT_CLOCK_SKEW_SECONDS,
+        )
+        if "username" not in payload:
+            payload["username"] = payload.get("sub")
+        return payload
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Manual JWT verification failed: %s", exc)
+        raise HTTPException(status_code=401, detail="Authentication failed") from exc
+
 async def get_current_user(request: Request) -> dict:
     """Extracts and validates the Bearer JWT or handles the guest sandbox bypass,
 
@@ -54,46 +88,9 @@ async def get_current_user(request: Request) -> dict:
     
     token = auth_header.split(" ")[1]
     
-    # 1. GUEST BYPASS: Check for sandbox token first
-    if token == "guest-sandbox-token" and GUEST_ACCESS_ENABLED:
-        logger.info("Guest session detected. Bypassing JWT verification.")
-        payload = {
-            "sub": "user_guest_sandbox_123",
-            "email": "guest@example.com",
-            "username": "guest-recruiter@example.com",
-            "full_name": "Guest Recruiter"
-        }
-    else:
-        # 2. Clerk JWT verification logic
-        try:
-            # Get header to find the 'kid' (Key ID)
-            header = jwt.get_unverified_header(token)
-            jwks = get_clerk_public_key()
-            
-            # Find matching key
-            key_data = next((k for k in jwks['keys'] if k['kid'] == header['kid']), None)
-            if not key_data:
-                raise HTTPException(status_code=401, detail="Invalid token key ID")
+    payload = decode_access_token(token)
 
-            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
-            
-            # Verify and decode
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=["RS256"],
-                leeway=JWT_CLOCK_SKEW_SECONDS,
-            )
-            
-            # Ensure 'username' exists for compatibility with rbac.py
-            if "username" not in payload:
-                payload["username"] = payload.get("sub")
-
-        except Exception as e:
-            logger.error(f"Manual JWT verification failed: {e}")
-            raise HTTPException(status_code=401, detail="Authentication failed")
-
-    # 3. DIRECTORY AUTO-PROVISIONING & RBAC SYNC
+    # DIRECTORY AUTO-PROVISIONING & RBAC SYNC
     db = get_db()
     if db is not None:
         clerk_id = payload.get("sub")
