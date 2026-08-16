@@ -120,6 +120,7 @@ async def cleanup_old_health_snapshots() -> None:
 
 async def health_monitor_loop() -> None:
     logger.info("Starting scheduled health monitor loop every %s seconds", HEALTH_CHECK_INTERVAL_SECONDS)
+    monitoring_initialized = False
     while True:
         try:
             results = run_service_health_checks()
@@ -127,11 +128,13 @@ async def health_monitor_loop() -> None:
             logger.info("Scheduled health check complete: %s", report["overall_status"])
 
             down_services = {service["service"] for service in report.get("services", []) if service.get("status") == "down"}
-            if down_services and not down_services.issubset(LAST_ALERTED_DOWN_SERVICES):
+            if monitoring_initialized and down_services and not down_services.issubset(LAST_ALERTED_DOWN_SERVICES):
                 if send_discord_alert(report):
                     LAST_ALERTED_DOWN_SERVICES.update(down_services)
             elif not down_services:
                 LAST_ALERTED_DOWN_SERVICES.clear()
+
+            monitoring_initialized = True
 
             db = get_db()
             if db is not None:

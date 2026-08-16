@@ -4,6 +4,7 @@ import { useAppUser } from './context/Clerk';
 import { CodeDiffView } from './components/CodeDiffView';
 import { useDynamicFavicon } from './hooks/useDynamicFavicon';
 import { PatchyEmptyState } from './components/PatchyEmptyState';
+
 const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || (isLocalHost ? 'http://127.0.0.1:8000/api/v1' : '/api/v1');
@@ -87,24 +88,62 @@ function PatchyBrandMark({ activeIncidentsCount }: { activeIncidentsCount: numbe
   const hasIncidents = activeIncidentsCount > 0;
   const eyeColor = hasIncidents ? '#EF4444' : '#38C2DE';
   const glowColor = hasIncidents ? 'rgba(239, 68, 68, 0.35)' : 'rgba(56, 194, 222, 0.35)';
+  const faceBg = hasIncidents ? '#1c0d11' : '#0C1016'; // Red-tinted face screen when active
 
   return (
-    <div className="brand-mark" aria-label={hasIncidents ? `${activeIncidentsCount} active incidents` : 'No active incidents'}>
+    <div 
+      className={`brand-mark ${hasIncidents ? 'patchy-alert' : 'patchy-idle-wave'}`} 
+      aria-label={hasIncidents ? `${activeIncidentsCount} active incidents` : 'No active incidents'}
+    >
+      <style>{`
+        /* Alert Pulse & Jitter (When incident present) */
+        @keyframes patchyAlertPulse {
+          0%, 100% {
+            filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.5));
+          }
+          50% {
+            filter: drop-shadow(0 0 14px rgba(239, 68, 68, 0.9));
+          }
+        }
+        .patchy-alert {
+        }
+      `}</style>
+
       <svg width="42" height="42" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
         <circle cx="32" cy="32" r="28" fill={glowColor} />
+        
+        {/* Antenna */}
         <line x1="32" y1="14" x2="32" y2="8" stroke="#8E95A2" strokeWidth="3" strokeLinecap="round" />
         <circle cx="32" cy="6" r="4" fill={eyeColor} />
+        
+        {/* Head Shell */}
         <rect x="14" y="14" width="36" height="30" rx="10" fill="#121316" stroke="#2A2A32" strokeWidth="2" />
+        
+        {/* Left Ear */}
         <rect x="10" y="24" width="4" height="10" rx="2" fill="#8E95A2" />
-        <rect x="50" y="24" width="4" height="10" rx="2" fill="#8E95A2" />
-        <rect x="18" y="18" width="28" height="22" rx="6" fill="#0C1016" stroke="#1F242D" />
+        
+        {/* Right Arm / Ear (Targeted for wave animation) */}
+        <g className="patchy-arm-right">
+          <rect x="50" y="24" width="4" height="10" rx="2" fill="#8E95A2" />
+        </g>
+        
+        {/* Face Display Screen */}
+        <rect x="18" y="18" width="28" height="22" rx="6" fill={faceBg} stroke={hasIncidents ? '#3d161a' : '#1F242D'} />
+        
+        {/* Eyes */}
         <circle cx="25" cy="28" r="3.5" fill={eyeColor} />
         <circle cx="39" cy="28" r="3.5" fill={eyeColor} />
+        
+        {/* Mouth Expression */}
         {hasIncidents ? (
-          <circle cx="32" cy="34" r="2.5" fill={eyeColor} />
+          /* Worried/Alert Frown line */
+          <path d="M26 36 Q32 31 38 36" stroke={eyeColor} strokeWidth="2" strokeLinecap="round" fill="none" />
         ) : (
+          /* Happy Smile curve */
           <path d="M26 33 Q32 38 38 33" stroke={eyeColor} strokeWidth="2" strokeLinecap="round" fill="none" />
         )}
+        
+        {/* Body Base & Chest '+' Icon */}
         <path d="M22 48 H42 V58 H22 Z" fill="#121316" stroke="#2A2A32" />
         <path d="M32 50 V56 M29 53 H35" stroke={eyeColor} strokeWidth="2" strokeLinecap="round" />
       </svg>
@@ -141,7 +180,9 @@ export default function App() {
   const activeIncidentsCount = incidents.filter((incident) => !['resolved', 'closed'].includes(incident.status ?? '')).length;
   const isIncidentAnalyzing = selectedIncidentFromDetail?.status === 'analyzing';
   const isPrMerged = selectedRemediation?.status === 'merged';
+  const activeIncident = incidents.find(i => i._id === selectedIncidentId) || incidents[0];
   useDynamicFavicon({ activeIncidentsCount });
+
   // --- DATA FETCHING & POLLING ---
   const fetchServices = useCallback(async () => {
     try {
@@ -176,7 +217,6 @@ export default function App() {
       setIsCheckingHealth(false);
     }
   };
-
 
   const fetchIncidents = useCallback(async () => {
     if (!isSignedIn) return;
@@ -243,7 +283,6 @@ export default function App() {
     fetchServices();
   }, [fetchServices]);
 
-  // Real-time updates via a single SSE connection instead of polling.
   useEffect(() => {
     if (!isSignedIn) {
       setIncidents([]);
@@ -259,23 +298,26 @@ export default function App() {
 
     const source = new EventSource(`${API_BASE_URL}/events`);
 
-    source.onmessage = () => {
+    const refreshIncidents = () => {
       fetchIncidents();
       if (selectedIncidentId) {
         fetchIncidentDetail(selectedIncidentId);
       }
     };
 
+    source.onmessage = refreshIncidents;
+    source.addEventListener('ping', refreshIncidents);
+
     source.onerror = () => {
       source.close();
     };
 
     return () => {
+      source.removeEventListener('ping', refreshIncidents);
       source.close();
     };
   }, [fetchIncidents, fetchIncidentDetail, selectedIncidentId, isSignedIn]);
 
-  // Fetch Incident Details when selection changes
   useEffect(() => {
     if (selectedIncidentId) {
       fetchIncidentDetail(selectedIncidentId);
@@ -425,8 +467,6 @@ export default function App() {
     }
   };
 
-  // --- RENDER ---
-
   if (!isSignedIn) {
     return (
       <div className="landing-shell">
@@ -467,61 +507,66 @@ export default function App() {
           </SignedOut>
         </div>
       </header>
+      
       <section className="session-band">
         <span className="session-label">Active Session Principal</span>
         <span className="session-value">{principal || 'Guest Sandbox Mode'}</span>
       </section>
-      <div className="health-panel">
-  <h2>Connected Apps Health</h2>
 
-  <div className="health-actions">
-    <button
-      disabled={isCheckingHealth}
-      onClick={() => runHealthCheck()}
-    >
-      Check All Services
-    </button>
-  </div>
+      {/* Split Top Grid: Health Panel & Patchy Assistant Side-by-Side */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', marginBottom: '1.5rem' }}>
+        <div className="health-panel" style={{ margin: 0 }}>
+          <h2>Connected Apps Health</h2>
 
-  <div className="services-list">
-    {services.map((svc) => (
-      <div key={svc.name} className="service-item">
-        <div className="service-info">
-          <strong>{svc.name}</strong>
-          <span className="service-url">{svc.url}</span>
-          <span className={`service-status ${svc.status || 'unknown'}`}>
-            {svc.status ? svc.status.toUpperCase() : 'UNKNOWN'}
-            {svc.latency_ms != null ? ` • ${svc.latency_ms}ms` : ''}
-          </span>
-          {svc.last_checked_at && (
-            <span className="service-last-check">
-              Last check: {formatCentralTime(svc.last_checked_at)}
-            </span>
+          <div className="health-actions">
+            <button disabled={isCheckingHealth} onClick={() => runHealthCheck()}>
+              Check All Services
+            </button>
+          </div>
+
+          <div className="services-list">
+            {services.map((svc) => (
+              <div key={svc.name} className="service-item">
+                <div className="service-info">
+                  <strong>{svc.name}</strong>
+                  <span className="service-url">{svc.url}</span>
+                  <span className={`service-status ${svc.status || 'unknown'}`}>
+                    {svc.status ? svc.status.toUpperCase() : 'UNKNOWN'}
+                    {svc.latency_ms != null ? ` • ${svc.latency_ms}ms` : ''}
+                  </span>
+                  {svc.last_checked_at && (
+                    <span className="service-last-check">
+                      Last check: {formatCentralTime(svc.last_checked_at)}
+                    </span>
+                  )}
+                </div>
+
+                <button disabled={isCheckingHealth} onClick={() => runHealthCheck(svc.name)}>
+                  Check
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {healthResults.length > 0 && (
+            <div className="health-results">
+              <h3>Latest Health Check Results</h3>
+              {healthResults.map((r) => (
+                <div key={r.service} className={`health-result ${r.status}`}>
+                  <strong>{r.service}</strong> — {r.status.toUpperCase()}
+                  <div>Latency: {r.latency_ms ?? "N/A"} ms</div>
+                  <div>HTTP: {r.http_status ?? "N/A"}</div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
 
-        <button
-          disabled={isCheckingHealth}
-          onClick={() => runHealthCheck(svc.name)}
-        >
-          Check
-        </button>
+        <div className="panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: '1rem' }}>
+          <PatchyEmptyState activeIncidentsCount={activeIncidentsCount} tab={incidentTab} status={activeIncident?.status} />
+        </div>
       </div>
-    ))}
-  </div>
-    {healthResults.length > 0 && (
-      <div className="health-results">
-        <h3>Latest Health Check Results</h3>
-        {healthResults.map((r) => (
-          <div key={r.service} className={`health-result ${r.status}`}>
-            <strong>{r.service}</strong> — {r.status.toUpperCase()}
-            <div>Latency: {r.latency_ms ?? "N/A"} ms</div>
-            <div>HTTP: {r.http_status ?? "N/A"}</div>
-          </div>
-        ))}
-      </div>
-    )}
-  </div>
+
       <main className="dashboard-grid">
         <section className="panel">
           <div className="panel-header incident-panel-header">
@@ -615,15 +660,7 @@ export default function App() {
             </ul>
           )}
         </section>
-        {loading ? (
-          <p className="muted">Loading incidents from backend...</p>
-        ) : visibleIncidents.length === 0 ? (
-          <PatchyEmptyState tab={incidentTab} />
-        ) : (
-          <ul className="incident-list">
-            {/* Incident list mapping */}
-          </ul>
-        )}
+
         <section className="panel detail-panel">
           <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2>Incident Details</h2>

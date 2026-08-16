@@ -1,7 +1,13 @@
+import asyncio
+
+import pytest
+
 from backend.app.app import (
     HEALTH_CHECK_INTERVAL_SECONDS,
+    LAST_ALERTED_DOWN_SERVICES,
     should_send_discord_alert,
     build_discord_alert_message,
+    health_monitor_loop,
     list_services,
 )
 
@@ -62,3 +68,31 @@ def test_build_discord_alert_message_includes_down_services():
     assert "erragent health alert" in message.lower()
     assert "backend" in message.lower()
     assert "CRITICAL" in message
+
+
+def test_health_monitor_uses_first_check_as_alert_baseline(monkeypatch):
+    report = {
+        "overall_status": "CRITICAL",
+        "services": [{"service": "BTY Fitness", "status": "down"}],
+        "summary": "BTY Fitness is DOWN. Overall status: CRITICAL.",
+    }
+    alerts = []
+    completed_sleeps = 0
+
+    async def stop_after_two_checks(_seconds):
+        nonlocal completed_sleeps
+        completed_sleeps += 1
+        if completed_sleeps == 2:
+            raise asyncio.CancelledError
+
+    LAST_ALERTED_DOWN_SERVICES.clear()
+    monkeypatch.setattr("backend.app.app.run_service_health_checks", lambda: report["services"])
+    monkeypatch.setattr("backend.app.app.build_health_report", lambda _results: report)
+    monkeypatch.setattr("backend.app.app.send_discord_alert", lambda sent_report: alerts.append(sent_report) or True)
+    monkeypatch.setattr("backend.app.app.get_db", lambda: None)
+    monkeypatch.setattr("backend.app.app.asyncio.sleep", stop_after_two_checks)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(health_monitor_loop())
+
+    assert alerts == [report]
