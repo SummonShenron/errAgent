@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 
 export type SystemHealth = 'healthy' | 'degraded' | 'unhealthy';
-export type IncidentStatus = 'idle' | 'analyzing' | 'fix_proposed' | 'resolved' | 'alert' | 'analysis_failed';
+export type IncidentStatus = 'idle' | 'analyzing' | 'fix_proposed' | 'validating' | 'resolved' | 'alert' | 'analysis_failed';
 
 interface PatchyEmptyStateProps {
   tab: 'open' | 'resolved';
@@ -32,7 +32,6 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   const isSystemDegradedOrUnhealthy = systemHealth === 'degraded' || systemHealth === 'unhealthy';
   const isAllClear = tab === 'open';
 
-  // Normalize status string from selectedIncident, status prop, or legacy booleans
   const rawStatus = (
     selectedIncident?.status || 
     status || 
@@ -45,7 +44,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
 
   const isAnActiveStatus = (s: string | null) => {
     if (!s) return false;
-    return s.includes('analyz') || s.includes('fix') || s.includes('proposed') || s.includes('alert') || s.includes('active') || s.includes('open');
+    return s.includes('analyz') || s.includes('fix') || s.includes('validat') || s.includes('proposed') || s.includes('alert') || s.includes('active') || s.includes('open');
   };
 
   useEffect(() => {
@@ -66,16 +65,17 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   const currentStatus: IncidentStatus = useMemo(() => {
     if (isRawResolved && !celebrationDone) return 'resolved';
     if (isRawFailed) return 'analysis_failed';
+    if (rawStatus.includes('validat')) return 'validating';
     if (rawStatus.includes('fix') || rawStatus.includes('proposed')) return 'fix_proposed';
     if (rawStatus.includes('analyz') || isAnalyzing) return 'analyzing';
     if (hasActiveIncidents || isSystemDegradedOrUnhealthy) return 'alert';
     return 'idle';
   }, [isRawResolved, celebrationDone, isRawFailed, rawStatus, isAnalyzing, hasActiveIncidents, isSystemDegradedOrUnhealthy]);
 
-  // Dynamic Theme Colors
   const getAccentColor = () => {
     switch (currentStatus) {
       case 'resolved': return '#22C55E';
+      case 'validating': return '#A855F7';
       case 'analyzing': return '#EAB308';
       case 'fix_proposed': return '#38C2DE';
       case 'analysis_failed':
@@ -88,6 +88,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   const getGlowColor = () => {
     switch (currentStatus) {
       case 'resolved': return 'rgba(34, 197, 94, 0.3)';
+      case 'validating': return 'rgba(168, 85, 247, 0.25)';
       case 'analyzing': return 'rgba(234, 179, 8, 0.25)';
       case 'fix_proposed': return 'rgba(56, 194, 222, 0.25)';
       case 'analysis_failed':
@@ -100,6 +101,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   const getVisorBg = () => {
     switch (currentStatus) {
       case 'resolved': return '#0d1f12';
+      case 'validating': return '#160d21';
       case 'analyzing': return '#1a160a';
       case 'fix_proposed': return '#09151c';
       case 'analysis_failed':
@@ -112,6 +114,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   const getVisorBorder = () => {
     switch (currentStatus) {
       case 'resolved': return '#174722';
+      case 'validating': return '#421a63';
       case 'analyzing': return '#4a3b10';
       case 'fix_proposed': return '#16384a';
       case 'analysis_failed':
@@ -129,6 +132,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   const getHeaderTitle = () => {
     switch (currentStatus) {
       case 'resolved': return 'Incident Resolved!';
+      case 'validating': return 'Patchy is Validating...';
       case 'analyzing': return 'Patchy is Analyzing...';
       case 'fix_proposed': return 'Fix Proposed — Review Ready';
       case 'analysis_failed': return 'Analysis Failed';
@@ -143,6 +147,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   const getSubtext = () => {
     switch (currentStatus) {
       case 'resolved': return 'Patchy verified the fix! Systems are stable and green.';
+      case 'validating': return 'Monitoring post-deploy telemetry and health metrics to confirm stability.';
       case 'analyzing': return 'Parsing webhook telemetry and investigating root cause analysis.';
       case 'fix_proposed': return 'Patchy generated a hotfix. Waiting for pull request review!';
       case 'analysis_failed': return 'Patchy encountered an error while analyzing telemetry. Manual review needed.';
@@ -166,7 +171,6 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
       textAlign: 'center',
     }}>
       <style>{`
-        /* Animations */
         @keyframes ibmFloat {
           0%, 100% { transform: translateY(0px) scale(1, 1); }
           50% { transform: translateY(-10px) scale(0.97, 1.03); }
@@ -228,6 +232,12 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
           100% { transform: translateY(12px); opacity: 0; }
         }
 
+        @keyframes ibmMagnifierScan {
+          0%, 100% { transform: translate(0px, 0px) rotate(0deg); }
+          33% { transform: translate(-2px, -1px) rotate(-3deg); }
+          66% { transform: translate(1px, 1px) rotate(2deg); }
+        }
+
         .ibm-bot-float { 
           animation: ${
             currentStatus === 'resolved'
@@ -247,6 +257,11 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
 
         .ibm-bot-sweat-drop {
           animation: ibmSweatDrip 1.8s ease-in-out infinite;
+        }
+
+        .ibm-bot-magnifier-group {
+          transform-origin: 66px 45px;
+          animation: ibmMagnifierScan 3s ease-in-out infinite;
         }
       `}</style>
 
@@ -277,24 +292,102 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
             <rect className="ibm-bot-left-foot" x="35" y="85" width="12" height="6" rx="2" fill="#8E95A2" />
             <rect className="ibm-bot-right-foot" x="53" y="85" width="12" height="6" rx="2" fill="#8E95A2" />
 
+            {/* Torso */}
+            <rect x="34" y="56" width="32" height="30" rx="7" fill="#121316" stroke="#2A2A32" strokeWidth="2" />
+            
+            {/* Static Chest Brandmark */}
+            <rect x="43" y="63" width="14" height="14" rx="3" fill="#0C1016" stroke="#1F242D" />
+            <path d="M50 66 V74 M46 70 H54" stroke={accentColor} strokeWidth="2" strokeLinecap="round" opacity="0.6" />
+
             {/* Left Arm */}
             <path
-              d={currentStatus === 'resolved' ? "M 24 62 C 16 50, 14 36, 18 24" : "M24 62 C16 66, 16 76, 22 82"}
+              d={
+                currentStatus === 'resolved'
+                  ? "M 24 62 C 16 50, 14 36, 18 24"
+                  : "M24 62 C16 66, 16 76, 22 82"
+              }
               stroke="#8E95A2"
               strokeWidth="4"
               strokeLinecap="round"
               fill="none"
             />
-            <circle cx={currentStatus === 'resolved' ? 18 : 22} cy={currentStatus === 'resolved' ? 24 : 82} r="3.5" fill={currentStatus === 'resolved' ? accentColor : "#8E95A2"} />
+            <circle 
+              cx={currentStatus === 'resolved' ? 18 : 22} 
+              cy={currentStatus === 'resolved' ? 24 : 82} 
+              r="3.5" 
+              fill={currentStatus === 'resolved' ? accentColor : "#8E95A2"} 
+            />
 
-            {/* Right Arm & Hand Dot */}
-            <g>
+            {/* Head Group */}
+            <g className="ibm-bot-head">
+              {/* Antenna */}
+              <line x1="50" y1="20" x2="50" y2="12" stroke="#8E95A2" strokeWidth="2.5" strokeLinecap="round" />
+              <circle cx="50" cy="10" r="4" fill={accentColor} />
+
+              {/* Head Shell */}
+              <rect x="28" y="20" width="44" height="34" rx="10" fill="#121316" stroke="#2A2A32" strokeWidth="2" />
+
+              {/* Anxious Sweat Drop */}
+              {currentStatus === 'fix_proposed' && (
+                <path
+                  className="ibm-bot-sweat-drop"
+                  d="M74 22 C72 20, 70 23, 71 25 C72 27, 74 27, 75 25 C76 23, 76 22, 74 22 Z"
+                  fill="#38C2DE"
+                />
+              )}
+
+              {/* Ears */}
+              <rect x="23" y="32" width="5" height="10" rx="2" fill="#8E95A2" />
+              <rect x="72" y="32" width="5" height="10" rx="2" fill="#8E95A2" />
+
+              {/* Visor Screen */}
+              <g>
+                <rect x="33" y="25" width="34" height="24" rx="6" fill={visorBg} stroke={visorBorder} />
+                <g clipPath="url(#visor-screen-clip)">
+                  <path d="M30 20 L34 20 L28 52 L24 52 Z" fill="#FFFFFF" className="ibm-bot-glint" />
+                </g>
+              </g>
+
+              {/* Anxious Worried Eyebrows */}
+              {currentStatus === 'fix_proposed' && (
+                <g stroke={accentColor} strokeWidth="1.8" strokeLinecap="round">
+                  <path d="M38 30 L45 32" />
+                  <path d="M62 30 L55 32" />
+                </g>
+              )}
+
+              {/* Blinking Eyes */}
+              <g className="ibm-bot-eyes">
+                <circle cx="42" cy="35" r="3.5" fill={accentColor} />
+                <circle cx="58" cy="35" r="3.5" fill={accentColor} />
+              </g>
+
+              {/* Mouth Expression */}
+              {currentStatus === 'resolved' ? (
+                <path d="M41 40 Q50 48 59 40" stroke={accentColor} strokeWidth="2.5" strokeLinecap="round" fill="none" />
+              ) : currentStatus === 'validating' ? (
+                <path d="M44 42 H56" stroke={accentColor} strokeWidth="2.5" strokeLinecap="round" />
+              ) : currentStatus === 'fix_proposed' ? (
+                <path d="M42 43 Q46 40 50 43 T58 43" stroke={accentColor} strokeWidth="2" strokeLinecap="round" fill="none" />
+              ) : currentStatus === 'analyzing' ? (
+                <path d="M44 42 H56" stroke={accentColor} strokeWidth="2" strokeLinecap="round" />
+              ) : (currentStatus === 'alert' || currentStatus === 'analysis_failed') ? (
+                <path d="M43 43 Q50 38 57 43" stroke={accentColor} strokeWidth="2" strokeLinecap="round" fill="none" />
+              ) : (
+                <path d="M43 41 Q50 46 57 41" stroke={accentColor} strokeWidth="2" strokeLinecap="round" fill="none" />
+              )}
+            </g>
+
+            {/* Right Arm & Hand Group */}
+            <g className={currentStatus === 'validating' ? 'ibm-bot-magnifier-group' : undefined}>
               <path
                 d={
                   currentStatus === 'resolved'
                     ? "M 76 62 C 84 50, 86 36, 82 24"
                     : currentStatus === 'analyzing'
                     ? "M 76 62 C 88 50, 84 32, 74 28"
+                    : currentStatus === 'validating'
+                    ? "M 76 62 C 82 60, 74 52, 66 45"
                     : "M 76 62 C 84 68, 84 76, 78 82"
                 }
                 stroke="#8E95A2"
@@ -345,6 +438,8 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
                     ? 82 
                     : currentStatus === 'analyzing'
                     ? 74
+                    : currentStatus === 'validating'
+                    ? 66
                     : (currentStatus !== 'idle' ? 78 : undefined)
                 } 
                 cy={
@@ -352,6 +447,8 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
                     ? 24 
                     : currentStatus === 'analyzing'
                     ? 28
+                    : currentStatus === 'validating'
+                    ? 45
                     : (currentStatus !== 'idle' ? 82 : undefined)
                 } 
                 r="3.5" 
@@ -402,70 +499,17 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
                   </>
                 )}
               </circle>
-            </g>
 
-            {/* Torso */}
-            <rect x="34" y="56" width="32" height="30" rx="7" fill="#121316" stroke="#2A2A32" strokeWidth="2" />
-            
-            {/* Muted Static Chest Brandmark */}
-            <rect x="43" y="63" width="14" height="14" rx="3" fill="#0C1016" stroke="#1F242D" />
-            <path d="M50 66 V74 M46 70 H54" stroke="#38C2DE" strokeWidth="2" strokeLinecap="round" opacity="0.6" />
-
-            {/* Head Group */}
-            <g className="ibm-bot-head">
-              {/* Antenna */}
-              <line x1="50" y1="20" x2="50" y2="12" stroke="#8E95A2" strokeWidth="2.5" strokeLinecap="round" />
-              <circle cx="50" cy="10" r="4" fill={accentColor} />
-
-              {/* Head Shell */}
-              <rect x="28" y="20" width="44" height="34" rx="10" fill="#121316" stroke="#2A2A32" strokeWidth="2" />
-
-              {/* Anxious Sweat Drop */}
-              {currentStatus === 'fix_proposed' && (
-                <path
-                  className="ibm-bot-sweat-drop"
-                  d="M74 22 C72 20, 70 23, 71 25 C72 27, 74 27, 75 25 C76 23, 76 22, 74 22 Z"
-                  fill="#38C2DE"
-                />
-              )}
-
-              {/* Ears */}
-              <rect x="23" y="32" width="5" height="10" rx="2" fill="#8E95A2" />
-              <rect x="72" y="32" width="5" height="10" rx="2" fill="#8E95A2" />
-
-              {/* Visor Screen */}
-              <g>
-                <rect x="33" y="25" width="34" height="24" rx="6" fill={visorBg} stroke={visorBorder} />
-                <g clipPath="url(#visor-screen-clip)">
-                  <path d="M30 20 L34 20 L28 52 L24 52 Z" fill="#FFFFFF" className="ibm-bot-glint" />
+              {/* Magnifying Glass Element centered over Right Eye (58, 35) */}
+              {currentStatus === 'validating' && (
+                <g>
+                  {/* Handle */}
+                  <line x1="66" y1="45" x2="61" y2="39" stroke="#8E95A2" strokeWidth="3" strokeLinecap="round" />
+                  {/* Lens Rim framing right eye */}
+                  <circle cx="58" cy="35" r="6.5" stroke={accentColor} strokeWidth="2" fill="rgba(168, 85, 247, 0.35)" />
+                  {/* Glint on Lens */}
+                  <path d="M55 33 Q57 31 59 32" stroke="#FFFFFF" strokeWidth="1.2" strokeLinecap="round" opacity="0.85" fill="none" />
                 </g>
-              </g>
-
-              {/* Anxious Worried Eyebrows */}
-              {currentStatus === 'fix_proposed' && (
-                <g stroke={accentColor} strokeWidth="1.8" strokeLinecap="round">
-                  <path d="M38 30 L45 32" />
-                  <path d="M62 30 L55 32" />
-                </g>
-              )}
-
-              {/* Blinking Eyes */}
-              <g className="ibm-bot-eyes">
-                <circle cx="42" cy="35" r="3.5" fill={accentColor} />
-                <circle cx="58" cy="35" r="3.5" fill={accentColor} />
-              </g>
-
-              {/* Mouth Expression */}
-              {currentStatus === 'resolved' ? (
-                <path d="M41 40 Q50 48 59 40" stroke={accentColor} strokeWidth="2.5" strokeLinecap="round" fill="none" />
-              ) : currentStatus === 'fix_proposed' ? (
-                <path d="M42 43 Q46 40 50 43 T58 43" stroke={accentColor} strokeWidth="2" strokeLinecap="round" fill="none" />
-              ) : currentStatus === 'analyzing' ? (
-                <path d="M44 42 H56" stroke={accentColor} strokeWidth="2" strokeLinecap="round" />
-              ) : (currentStatus === 'alert' || currentStatus === 'analysis_failed') ? (
-                <path d="M43 43 Q50 38 57 43" stroke={accentColor} strokeWidth="2" strokeLinecap="round" fill="none" />
-              ) : (
-                <path d="M43 41 Q50 46 57 41" stroke={accentColor} strokeWidth="2" strokeLinecap="round" fill="none" />
               )}
             </g>
           </g>

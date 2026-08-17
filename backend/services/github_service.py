@@ -160,6 +160,16 @@ class GitHubOpsService:
                 headers=self.headers,
                 json={"content": file_content, "encoding": "utf-8"}
             )
+
+            # Raise exception on non-2xx status so Tenacity retries on 503/502/500
+            if blob_res.status_code not in (200, 201):
+                error_msg = blob_res.text
+                try:
+                    error_msg = blob_res.json().get("message", blob_res.text)
+                except Exception:
+                    pass
+                raise Exception(f"GitHub Blob Creation Failed [{blob_res.status_code}]: {error_msg}")
+
             blob_sha = blob_res.json()["sha"]
 
             # 4. Create new tree

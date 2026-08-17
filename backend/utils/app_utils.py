@@ -159,7 +159,7 @@ def _store_incident_and_queue_analysis(
         {
             "fingerprint": fingerprint,
             "created_at": {"$gte": dedupe_cutoff},
-            "status": {"$in": ["open", "analyzing", "fix_proposed"]},
+            "status": {"$in": ["open", "analyzing", "fix_proposed", "validating"]}
         },
         sort=[("created_at", -1)],
     )

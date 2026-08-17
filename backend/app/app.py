@@ -318,6 +318,55 @@ async def live_logs(
     finally:
         await log_broker.unsubscribe(queue)
 
+# --- REPLAY ENDPOINT ---
+@app.post("/api/v1/replay", tags=["Replay"])
+async def replay_workflow(payload: dict = Body(...)):
+    """
+    Replays a workflow execution using logged node inputs.
+    Required fields:
+      - workflowName
+      - requestId
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    workflow_name = payload.get("workflowName")
+    request_id = payload.get("requestId")
+
+    if not workflow_name or not request_id:
+        raise HTTPException(status_code=400, detail="workflowName and requestId are required")
+
+    # 1. Fetch logs for this workflow run
+    logs = list(
+        db["logs"].find({
+            "context.workflowName": workflow_name,
+            "context.requestId": request_id
+        }).sort("timestamp", 1)
+    )
+
+    if not logs:
+        raise HTTPException(status_code=404, detail="No logs found for this workflow run")
+
+    # 2. Build replay timeline
+    timeline = []
+    for entry in logs:
+        ctx = entry.get("context", {})
+        timeline.append({
+            "node": ctx.get("node"),
+            "input": ctx.get("input"),
+            "output": ctx.get("output"),
+            "timestamp": entry.get("timestamp")
+        })
+
+    # 3. Return replay timeline
+    return {
+        "workflowName": workflow_name,
+        "requestId": request_id,
+        "timeline": timeline
+    }
+
+
 # --- 2. LIST ALL INCIDENTS ---
 @app.get("/api/v1/incidents", response_model=List[Dict[str, Any]], tags=["Incidents"])
 async def list_incidents(current_user: dict = Depends(get_current_user)):
@@ -512,7 +561,7 @@ async def approve_and_execute_hotfix(
     
     db["incidents"].update_one(
         {"_id": incident_id},
-        {"$set": {"status": "resolved", "updated_at": now}}
+        {"$set": {"status": "validating", "updated_at": now}}
     )
 
     # 4. Audit Log

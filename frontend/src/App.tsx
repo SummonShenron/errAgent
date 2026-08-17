@@ -5,6 +5,7 @@ import { CodeDiffView } from './components/CodeDiffView';
 import { useDynamicFavicon } from './hooks/useDynamicFavicon';
 import { PatchyEmptyState } from './components/PatchyEmptyState';
 import { LiveConsole } from './components/LiveConsole';
+import { ReplayConsole } from './components/ReplayConsole';
 
 const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL =
@@ -58,6 +59,7 @@ const statusTone: Record<string, string> = {
   open: 'status-open',
   analyzing: 'status-analyzing',
   fix_proposed: 'status-fix',
+  validating: 'status-validating',
   resolved: 'status-resolved',
   closed: 'status-closed',
 };
@@ -169,7 +171,7 @@ export default function App() {
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [incidentTab, setIncidentTab] = useState<'open' | 'resolved'>('open');
   const [consoleOpen, setConsoleOpen] = useState(false);
-
+  const [replayOpen, setReplayOpen] = useState(false);
   const visibleIncidents = incidents.filter((incident) => {
     const status = (incident.status || 'open').toLowerCase();
     const isResolved = ['resolved', 'closed'].includes(status);
@@ -506,6 +508,7 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <button type="button" className="console-launch" onClick={() => setReplayOpen(true)}>Replay Workflow</button>
           <button type="button" className="console-launch" onClick={() => setConsoleOpen(true)}>
             <span aria-hidden="true">&gt;_</span>
             Console
@@ -520,7 +523,12 @@ export default function App() {
           </div>
         </div>
       </header>
-
+      <ReplayConsole
+        open={replayOpen}
+        onClose={() => setReplayOpen(false)}
+        apiBaseUrl={API_BASE_URL}
+        getToken={getToken}
+      />
       <LiveConsole
         open={consoleOpen}
         onClose={() => setConsoleOpen(false)}
