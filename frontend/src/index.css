@@ -930,6 +930,32 @@ button {
 	cursor: pointer;
 }
 
+.console-retry-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	height: 34px;
+	padding: 0 10px;
+	border: 1px solid #34506f;
+	border-radius: 6px;
+	background: #0b1728;
+	color: #bae6fd;
+	font-size: 0.78rem;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.console-retry-button:hover:not(:disabled) {
+	border-color: #38bdf8;
+	background: #10233a;
+}
+
+.console-retry-button:disabled {
+	opacity: 0.45;
+	cursor: wait;
+}
+
 .console-connection {
 	display: inline-flex;
 	align-items: center;

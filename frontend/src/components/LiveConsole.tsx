@@ -51,6 +51,7 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [paused, setPaused] = useState(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
   const viewportRef = useRef<HTMLDivElement>(null);
   const getTokenRef = useRef(getToken);
 
@@ -128,7 +129,7 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
       }
       socket?.close();
     };
-  }, [apiBaseUrl, level, open, paused, service]);
+  }, [apiBaseUrl, connectionAttempt, level, open, paused, service]);
 
   useEffect(() => {
     if (!paused) {
@@ -157,6 +158,19 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
           </div>
           <div className="console-header-actions">
             <span className={`console-connection ${connectionState}`}>{statusLabel}</span>
+            <button
+              type="button"
+              className="console-retry-button"
+              onClick={() => {
+                setPaused(false);
+                setConnectionAttempt((current) => current + 1);
+              }}
+              disabled={connectionState === 'connecting'}
+              title="Reconnect now"
+            >
+              <span aria-hidden="true">↻</span>
+              Retry
+            </button>
             <button type="button" className="console-icon-button" onClick={onClose} title="Close console" aria-label="Close console">×</button>
           </div>
         </header>

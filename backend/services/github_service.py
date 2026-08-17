@@ -3,24 +3,44 @@ import logging
 import base64
 import hashlib
 import re
+from pathlib import Path
 import httpx
+from dotenv import load_dotenv
 from fastapi import HTTPException
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=True)
 
 logger = logging.getLogger("Incident Ops Logger")
+
+github_network_retry = retry(
+    retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(min=2, max=10),
+    reraise=True,
+)
 
 class GitHubOpsService:
     def __init__(self):
         self.token = os.getenv("GITHUB_TOKEN")
         self.headers = {
-            "Authorization": f"Bearer {self.token}",
             "Accept": "application/vnd.github+json"
         }
+        if self.token:
+            self.headers["Authorization"] = f"Bearer {self.token}"
         self.api_base = "https://api.github.com"
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    def _require_token(self) -> None:
+        if not self.token or not self.token.strip():
+            raise HTTPException(
+                status_code=503,
+                detail="GitHub integration is not configured. Set GITHUB_TOKEN and restart errAgent.",
+            )
+
+    @github_network_retry
     async def fetch_branch_diff(self, repo: str, base: str, head: str) -> dict:
         """Fetches commit and file diff context between two branches."""
+        self._require_token()
         url = f"{self.api_base}/repos/{repo}/compare/{base}...{head}"
         
         async with httpx.AsyncClient() as client:
@@ -37,7 +57,7 @@ class GitHubOpsService:
                 "files_changed": files[:15]
             }
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    @github_network_retry
     async def create_branch_and_commit(
         self, 
         repo: str, 
@@ -50,6 +70,7 @@ class GitHubOpsService:
         expected_full_file_sha256: str | None = None,
     ) -> dict:
         """Creates a new branch and commits file changes using the GitHub Git Data API."""
+        self._require_token()
         async with httpx.AsyncClient() as client:
             base_url = f"{self.api_base}/repos/{repo}"
 
@@ -120,6 +141,11 @@ class GitHubOpsService:
             
             # 1. Get base branch reference SHA
             ref_res = await client.get(f"{base_url}/git/refs/heads/{base_branch}", headers=self.headers)
+            if ref_res.status_code == 401:
+                raise HTTPException(
+                    status_code=502,
+                    detail="GitHub rejected GITHUB_TOKEN. Replace the token and restart errAgent.",
+                )
             if ref_res.status_code != 200:
                 raise HTTPException(status_code=400, detail=f"Could not find base branch '{base_branch}': {ref_res.text}")
             base_sha = ref_res.json()["object"]["sha"]
@@ -211,9 +237,10 @@ class GitHubOpsService:
 
             raise HTTPException(status_code=400, detail=f"Failed to create branch: {branch_res.text}")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    @github_network_retry
     async def create_pull_request(self, repo: str, title: str, body: str, head: str, base: str) -> dict:
         """Executes actual PR creation via GitHub API."""
+        self._require_token()
         url = f"{self.api_base}/repos/{repo}/pulls"
         payload = {"title": title, "body": body, "head": head, "base": base}
         
@@ -221,9 +248,10 @@ class GitHubOpsService:
             res = await client.post(url, headers=self.headers, json=payload)
             return {"status_code": res.status_code, "data": res.json()}
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    @github_network_retry
     async def find_open_pull_request(self, repo: str, head: str) -> dict:
         """Finds an open PR for the given branch head, if one exists."""
+        self._require_token()
         owner, _, branch = repo.partition("/")
         if not owner or not branch:
             return {"status_code": 400, "data": {"message": "Invalid repo format."}}
@@ -251,9 +279,10 @@ class GitHubOpsService:
                 },
             }
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
+    @github_network_retry
     async def merge_pull_request(self, repo: str, pull_number: int, commit_message: str = "Auto-merged hotfix by errAgent") -> dict:
         """Merges an open pull request automatically."""
+        self._require_token()
         url = f"{self.api_base}/repos/{repo}/pulls/{pull_number}/merge"
         payload = {"commit_message": commit_message, "merge_method": "merge"}
         
