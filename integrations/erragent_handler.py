@@ -14,6 +14,18 @@ _LEVELS = {
 }
 
 
+def _json_fallback(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+
+    return str(value)
+
+
 class ErrAgentHandler(logging.Handler):
     def __init__(
         self,
@@ -83,7 +95,7 @@ class ErrAgentHandler(logging.Handler):
             try:
                 request = urllib.request.Request(
                     self.endpoint,
-                    data=json.dumps(payload).encode("utf-8"),
+                    data=json.dumps(payload, default=_json_fallback).encode("utf-8"),
                     headers={
                         "Content-Type": "application/json",
                         "x-ingest-secret": self.ingest_secret,

@@ -196,5 +196,12 @@ def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
         assert replay_response.status_code == 200
         assert replay_response.json()["timeline"][0]["node"] == "retriever"
         assert replay_response.json()["timeline"][0]["output"] == {"documents": 3}
+
+        get_replay_response = client.get(
+            "/api/v1/replay",
+            params={"workflowName": "sonic_assistant", "requestId": "req_test_123"},
+        )
+        assert get_replay_response.status_code == 200
+        assert get_replay_response.json()["timeline"] == replay_response.json()["timeline"]
     finally:
         app_module.app.dependency_overrides.clear()

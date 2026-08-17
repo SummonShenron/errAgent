@@ -382,6 +382,43 @@ async def replay_workflow(
     }
 
 
+@app.get("/api/v1/replay", tags=["Replay"])
+async def get_replay(
+    workflowName: str = Query(..., min_length=1),
+    requestId: str = Query(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
+):
+    """Retrieves a persisted workflow timeline using query parameters."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    logs = list(
+        db["logs"].find({
+            "context.workflowName": workflowName,
+            "context.requestId": requestId,
+        }).sort("timestamp", 1)
+    )
+    if not logs:
+        raise HTTPException(status_code=404, detail="No logs found for this workflow run")
+
+    timeline = []
+    for entry in logs:
+        context = entry.get("context", {})
+        timeline.append({
+            "node": context.get("node") or "unknown-node",
+            "input": context.get("input") if isinstance(context.get("input"), dict) else {},
+            "output": context.get("output") if isinstance(context.get("output"), dict) else {},
+            "timestamp": entry.get("timestamp"),
+        })
+
+    return {
+        "workflowName": workflowName,
+        "requestId": requestId,
+        "timeline": timeline,
+    }
+
+
 # --- 2. LIST ALL INCIDENTS ---
 @app.get("/api/v1/incidents", response_model=List[Dict[str, Any]], tags=["Incidents"])
 async def list_incidents(current_user: dict = Depends(get_current_user)):

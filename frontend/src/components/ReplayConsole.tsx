@@ -47,13 +47,14 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
 
     try {
       const token = await getToken();
-      const res = await fetch(`${apiBaseUrl}/replay`, {
-        method: "POST",
+      const query = new URLSearchParams({
+        workflowName,
+        requestId: requestId.trim(),
+      });
+      const res = await fetch(`${apiBaseUrl}/replay?${query.toString()}`, {
         headers: {
-          "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ workflowName, requestId }),
       });
 
       if (!res.ok) {
