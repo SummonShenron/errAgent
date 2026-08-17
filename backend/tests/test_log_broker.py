@@ -134,3 +134,67 @@ def test_log_ingestion_streams_to_authenticated_websocket(monkeypatch):
         assert message["type"] == "log"
         assert message["entry"]["message"] == "Dashboard failed"
         assert message["entry"]["source_app_id"] == "saapp"
+
+
+def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
+    stored_logs = []
+
+    class FakeCursor(list):
+        def sort(self, *_args):
+            return self
+
+    class FakeCollection:
+        def insert_one(self, document):
+            stored_logs.append(document)
+
+        def find(self, query):
+            matches = [
+                document
+                for document in stored_logs
+                if document["context"].get("workflowName") == query["context.workflowName"]
+                and document["context"].get("requestId") == query["context.requestId"]
+            ]
+            return FakeCursor(matches)
+
+    class FakeDB:
+        def __getitem__(self, _name):
+            return FakeCollection()
+
+    monkeypatch.setattr(app_module, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(
+        app_module,
+        "authenticate_ingest_client",
+        lambda *_args: {"actor": "MACHINE_INGEST", "app_id": None, "default_repo": None},
+    )
+    app_module.app.dependency_overrides[app_module.get_current_user] = lambda: {"sub": "operator"}
+    client = TestClient(app_module.app)
+
+    try:
+        ingest_response = client.post(
+            "/api/v1/logs",
+            headers={"x-ingest-secret": "test-secret"},
+            json={
+                "service": "SAAPP",
+                "level": "info",
+                "message": "Retriever completed",
+                "context": {
+                    "workflowName": "sonic_assistant",
+                    "requestId": "req_test_123",
+                    "node": "retriever",
+                    "input": {"query": "test"},
+                    "output": {"documents": 3},
+                },
+            },
+        )
+        assert ingest_response.status_code == 202
+        assert ingest_response.json()["persistedReplayEvents"] == 1
+
+        replay_response = client.post(
+            "/api/v1/replay",
+            json={"workflowName": "sonic_assistant", "requestId": "req_test_123"},
+        )
+        assert replay_response.status_code == 200
+        assert replay_response.json()["timeline"][0]["node"] == "retriever"
+        assert replay_response.json()["timeline"][0]["output"] == {"documents": 3}
+    finally:
+        app_module.app.dependency_overrides.clear()

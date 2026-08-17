@@ -36,6 +36,11 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
   const viewportRef = useRef<HTMLDivElement>(null);
 
   const runReplay = async () => {
+    if (!requestId.trim()) {
+      setError("Enter the request ID emitted by the target workflow.");
+      return;
+    }
+
     setLoading(true);
     setError("");
     setTimeline([]);
@@ -52,7 +57,8 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
       });
 
       if (!res.ok) {
-        throw new Error(`Replay failed: ${res.status}`);
+        const responseBody = await res.json().catch(() => ({}));
+        throw new Error(responseBody.detail || `Replay failed: ${res.status}`);
       }
 
       const data = await res.json();

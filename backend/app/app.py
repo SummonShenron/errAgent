@@ -278,10 +278,22 @@ async def ingest_logs(
     if len(events) > 100:
         raise HTTPException(status_code=413, detail="Log batches are limited to 100 entries")
 
+    persisted_replay_events = 0
     for event in events:
-        await log_broker.publish(event, source_app_id=ingest_context.get("app_id"))
+        entry = await log_broker.publish(event, source_app_id=ingest_context.get("app_id"))
+        context = event.context
+        if all(context.get(field) for field in ("workflowName", "requestId", "node")):
+            db["logs"].insert_one({
+                **entry,
+                "received_at": datetime.now(timezone.utc),
+            })
+            persisted_replay_events += 1
 
-    return {"status": "accepted", "count": len(events)}
+    return {
+        "status": "accepted",
+        "count": len(events),
+        "persistedReplayEvents": persisted_replay_events,
+    }
 
 
 @app.websocket("/api/v1/live-logs")
@@ -320,7 +332,10 @@ async def live_logs(
 
 # --- REPLAY ENDPOINT ---
 @app.post("/api/v1/replay", tags=["Replay"])
-async def replay_workflow(payload: dict = Body(...)):
+async def replay_workflow(
+    payload: dict = Body(...),
+    current_user: dict = Depends(get_current_user),
+):
     """
     Replays a workflow execution using logged node inputs.
     Required fields:
@@ -353,9 +368,9 @@ async def replay_workflow(payload: dict = Body(...)):
     for entry in logs:
         ctx = entry.get("context", {})
         timeline.append({
-            "node": ctx.get("node"),
-            "input": ctx.get("input"),
-            "output": ctx.get("output"),
+            "node": ctx.get("node") or "unknown-node",
+            "input": ctx.get("input") if isinstance(ctx.get("input"), dict) else {},
+            "output": ctx.get("output") if isinstance(ctx.get("output"), dict) else {},
             "timestamp": entry.get("timestamp")
         })
 
