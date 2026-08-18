@@ -81,7 +81,7 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
 
   const runReplay = async () => {
     if (!requestId.trim()) {
-      setError("Select a captured node.");
+      setError("Select a captured request ID.");
       return;
     }
 
@@ -162,7 +162,7 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
           </label>
 
           <label>
-            <span>Node</span>
+            <span>Request ID</span>
             <select
               value={requestId}
               onChange={(e) => setRequestId(e.target.value)}
@@ -173,7 +173,7 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
               ) : (
                 runs.map((run) => (
                   <option key={run.requestId} value={run.requestId}>
-                    {run.nodeName}
+                    {run.requestId} ({run.nodeCount} {run.nodeCount === 1 ? "node" : "nodes"})
                   </option>
                 ))
               )}
