@@ -32,7 +32,7 @@ class ErrAgentHandler(logging.Handler):
         erragent_url: str,
         ingest_secret: str,
         service: str,
-        timeout_seconds: float = 3.0,
+        timeout_seconds: float = 30.0,
         queue_size: int = 1000,
         max_delivery_attempts: int = 4,
         retry_delay_seconds: float = 0.5,
@@ -118,6 +118,7 @@ def install_erragent_logging(logger: logging.Logger | None = None) -> bool:
     erragent_url = os.getenv("ERRAGENT_URL")
     ingest_secret = os.getenv("ERRAGENT_INGEST_SECRET")
     service = os.getenv("ERRAGENT_SERVICE")
+    timeout_seconds = float(os.getenv("ERRAGENT_TIMEOUT_SECONDS", "30"))
     if not erragent_url or not ingest_secret or not service:
         return False
 
@@ -130,6 +131,7 @@ def install_erragent_logging(logger: logging.Logger | None = None) -> bool:
             erragent_url=erragent_url,
             ingest_secret=ingest_secret,
             service=service,
+            timeout_seconds=timeout_seconds,
         )
     )
     if target_logger.level == logging.NOTSET or target_logger.level > logging.INFO:

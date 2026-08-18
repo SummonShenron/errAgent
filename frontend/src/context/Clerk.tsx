@@ -17,7 +17,7 @@ const UserContext = createContext<UserContextType>({
 
 export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, isLoaded } = useUser();
-  const { getToken } = useAuth();
+  const { getToken: getClerkToken } = useAuth();
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
@@ -37,7 +37,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
         principal: localStorage.getItem('principal'),
         isReady,
         isSignedIn: Boolean(user),
-        getToken,
+        getToken: () => getClerkToken({ skipCache: true }),
       }}
     >
       {isReady ? children : <div style={{ padding: '20px' }}>Loading session...</div>}
