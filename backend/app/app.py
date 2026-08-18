@@ -414,6 +414,17 @@ async def replay_workflow(
         "timeline": timeline
     }
 
+# --- SAAPP Integration Endpoints ---
+@app.get("/ops/context")
+async def get_ops_context():
+    return {
+        "incidents": [],
+        "health": [],
+        "warmingEvents": [],
+        "latency": [],
+        "deploys": [],
+        "riskScore": 0.0
+    }
 
 @app.get("/api/v1/replay", tags=["Replay"])
 async def get_replay(
