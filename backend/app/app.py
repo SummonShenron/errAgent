@@ -267,6 +267,7 @@ async def incident_events():
 @app.post("/api/v1/logs", status_code=status.HTTP_202_ACCEPTED, tags=["Logs"])
 async def ingest_logs(
     payload: LogEventInput | list[LogEventInput],
+    background_tasks: BackgroundTasks,
     x_ingest_secret: str | None = Header(default=None),
     x_app_id: str | None = Header(default=None),
 ):
@@ -279,6 +280,7 @@ async def ingest_logs(
         raise HTTPException(status_code=413, detail="Log batches are limited to 100 entries")
 
     persisted_replay_events = 0
+    incident_ids: list[str] = []
     for event in events:
         entry = await log_broker.publish(event, source_app_id=ingest_context.get("app_id"))
         context = event.context
@@ -289,10 +291,41 @@ async def ingest_logs(
             })
             persisted_replay_events += 1
 
+        if event.level == "error":
+            metadata = dict(context)
+            metadata.update({
+                "source": "structured_log",
+                "log_level": event.level,
+                "log_timestamp": entry["timestamp"],
+            })
+            incident_payload = {
+                "service_name": event.service,
+                "environment": context.get("environment", "production"),
+                "error_message": event.message.splitlines()[0],
+                "stack_trace": event.message,
+                "metadata": metadata,
+            }
+            repository = context.get("repository")
+            if isinstance(repository, str) and repository.strip():
+                incident_payload["repository"] = repository.strip()
+
+            incident_ids.append(
+                ingest_machine_payload(
+                    db,
+                    background_tasks,
+                    incident_payload,
+                    ingest_context["actor"],
+                    app_id=ingest_context.get("app_id"),
+                    app_default_repo=ingest_context.get("default_repo"),
+                )
+            )
+
     return {
         "status": "accepted",
         "count": len(events),
         "persistedReplayEvents": persisted_replay_events,
+        "incidentCount": len(set(incident_ids)),
+        "incidentIds": list(dict.fromkeys(incident_ids)),
     }
 
 

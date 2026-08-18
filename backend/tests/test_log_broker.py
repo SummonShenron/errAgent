@@ -136,6 +136,53 @@ def test_log_ingestion_streams_to_authenticated_websocket(monkeypatch):
         assert message["entry"]["source_app_id"] == "saapp"
 
 
+def test_error_log_creates_incident_but_info_and_warning_do_not(monkeypatch):
+    captured_incidents = []
+
+    class FakeDB:
+        pass
+
+    monkeypatch.setattr(app_module, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(
+        app_module,
+        "authenticate_ingest_client",
+        lambda *_args: {"actor": "MACHINE_INGEST", "app_id": None, "default_repo": "owner/repo"},
+    )
+
+    def capture_incident(_db, _background_tasks, payload, actor, **kwargs):
+        captured_incidents.append({"payload": payload, "actor": actor, "kwargs": kwargs})
+        return "inc_error_1"
+
+    monkeypatch.setattr(app_module, "ingest_machine_payload", capture_incident)
+    client = TestClient(app_module.app)
+
+    response = client.post(
+        "/api/v1/logs",
+        headers={"x-ingest-secret": "test-secret"},
+        json=[
+            {"service": "SAAPP", "level": "info", "message": "Started"},
+            {"service": "SAAPP", "level": "warn", "message": "Slow request"},
+            {
+                "service": "SAAPP",
+                "level": "error",
+                "message": "Workflow failed\nTraceback: ValueError",
+                "context": {"workflowName": "sonic_assistant", "node": "reasoner", "environment": "prod"},
+            },
+        ],
+    )
+
+    assert response.status_code == 202
+    assert response.json()["incidentCount"] == 1
+    assert response.json()["incidentIds"] == ["inc_error_1"]
+    assert len(captured_incidents) == 1
+    incident = captured_incidents[0]["payload"]
+    assert incident["error_message"] == "Workflow failed"
+    assert incident["stack_trace"] == "Workflow failed\nTraceback: ValueError"
+    assert incident["environment"] == "prod"
+    assert incident["metadata"]["source"] == "structured_log"
+    assert incident["metadata"]["node"] == "reasoner"
+
+
 def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
     stored_logs = []
 
