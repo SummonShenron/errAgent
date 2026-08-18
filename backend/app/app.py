@@ -454,6 +454,7 @@ async def list_replay_runs(
             request_id,
             {
                 "requestId": request_id,
+                "nodeName": context.get("node") or "unknown-node",
                 "latestTimestamp": entry.get("timestamp"),
                 "nodeCount": 0,
             },

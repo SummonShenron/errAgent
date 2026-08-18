@@ -16,6 +16,7 @@ interface ReplayNode {
 
 interface ReplayRun {
   requestId: string;
+  nodeName: string;
   latestTimestamp?: string;
   nodeCount: number;
 }
@@ -80,7 +81,7 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
 
   const runReplay = async () => {
     if (!requestId.trim()) {
-      setError("Enter the request ID emitted by the target workflow.");
+      setError("Select a captured node.");
       return;
     }
 
@@ -161,7 +162,7 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
           </label>
 
           <label>
-            <span>Request ID</span>
+            <span>Node</span>
             <select
               value={requestId}
               onChange={(e) => setRequestId(e.target.value)}
@@ -172,7 +173,7 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
               ) : (
                 runs.map((run) => (
                   <option key={run.requestId} value={run.requestId}>
-                    {run.requestId} ({run.nodeCount} {run.nodeCount === 1 ? "node" : "nodes"})
+                    {run.nodeName}
                   </option>
                 ))
               )}

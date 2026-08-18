@@ -220,6 +220,7 @@ def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
         runs = runs_response.json()["runs"]
         assert len(runs) == 1
         assert runs[0]["requestId"] == "req_test_123"
+        assert runs[0]["nodeName"] == "retriever"
         assert runs[0]["nodeCount"] == 1
         assert isinstance(runs[0]["latestTimestamp"], str)
     finally:
