@@ -143,16 +143,24 @@ def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
         def sort(self, *_args):
             return self
 
+        def limit(self, count):
+            return FakeCursor(self[:count])
+
     class FakeCollection:
         def insert_one(self, document):
             stored_logs.append(document)
 
-        def find(self, query):
+        def find(self, query, *_args):
+            requested_id = query["context.requestId"]
             matches = [
                 document
                 for document in stored_logs
                 if document["context"].get("workflowName") == query["context.workflowName"]
-                and document["context"].get("requestId") == query["context.requestId"]
+                and (
+                    isinstance(requested_id, dict)
+                    and bool(document["context"].get("requestId"))
+                    or document["context"].get("requestId") == requested_id
+                )
             ]
             return FakeCursor(matches)
 
@@ -203,5 +211,16 @@ def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
         )
         assert get_replay_response.status_code == 200
         assert get_replay_response.json()["timeline"] == replay_response.json()["timeline"]
+
+        runs_response = client.get(
+            "/api/v1/replay/runs",
+            params={"workflowName": "sonic_assistant"},
+        )
+        assert runs_response.status_code == 200
+        runs = runs_response.json()["runs"]
+        assert len(runs) == 1
+        assert runs[0]["requestId"] == "req_test_123"
+        assert runs[0]["nodeCount"] == 1
+        assert isinstance(runs[0]["latestTimestamp"], str)
     finally:
         app_module.app.dependency_overrides.clear()

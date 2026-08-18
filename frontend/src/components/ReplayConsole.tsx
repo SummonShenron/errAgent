@@ -14,6 +14,12 @@ interface ReplayNode {
   timestamp: string;
 }
 
+interface ReplayRun {
+  requestId: string;
+  latestTimestamp?: string;
+  nodeCount: number;
+}
+
 function formatTimestamp(timestamp: string) {
   const date = new Date(timestamp);
   return Number.isNaN(date.getTime())
@@ -30,10 +36,47 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
   const [workflowName, setWorkflowName] = useState("sonic_assistant");
   const [requestId, setRequestId] = useState("");
   const [timeline, setTimeline] = useState<ReplayNode[]>([]);
+  const [runs, setRuns] = useState<ReplayRun[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const viewportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+
+    const loadRuns = async () => {
+      setRunsLoading(true);
+      setError("");
+      try {
+        const token = await getToken();
+        const query = new URLSearchParams({ workflowName });
+        const response = await fetch(`${apiBaseUrl}/replay/runs?${query.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.detail || `Could not load runs: ${response.status}`);
+        if (cancelled) return;
+        const nextRuns = (body.runs || []) as ReplayRun[];
+        setRuns(nextRuns);
+        setRequestId((current) => nextRuns.some((run) => run.requestId === current) ? current : nextRuns[0]?.requestId || "");
+      } catch (err) {
+        if (!cancelled) {
+          setRuns([]);
+          setError(String(err));
+        }
+      } finally {
+        if (!cancelled) setRunsLoading(false);
+      }
+    };
+
+    void loadRuns();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBaseUrl, getToken, open, workflowName]);
 
   const runReplay = async () => {
     if (!requestId.trim()) {
@@ -119,11 +162,21 @@ export function ReplayConsole({ open, onClose, apiBaseUrl, getToken }: ReplayCon
 
           <label>
             <span>Request ID</span>
-            <input
+            <select
               value={requestId}
               onChange={(e) => setRequestId(e.target.value)}
-              placeholder="req_2026_08_17_abc123"
-            />
+              disabled={runsLoading || runs.length === 0}
+            >
+              {runs.length === 0 ? (
+                <option value="">{runsLoading ? "Loading runs..." : "No captured runs"}</option>
+              ) : (
+                runs.map((run) => (
+                  <option key={run.requestId} value={run.requestId}>
+                    {run.requestId} ({run.nodeCount} {run.nodeCount === 1 ? "node" : "nodes"})
+                  </option>
+                ))
+              )}
+            </select>
           </label>
 
           <button

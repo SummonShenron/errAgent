@@ -419,6 +419,50 @@ async def get_replay(
     }
 
 
+@app.get("/api/v1/replay/runs", tags=["Replay"])
+async def list_replay_runs(
+    workflowName: str = Query(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
+):
+    """Lists recent persisted request IDs for a workflow."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    entries = list(
+        db["logs"].find(
+            {
+                "context.workflowName": workflowName,
+                "context.requestId": {"$exists": True, "$ne": ""},
+            },
+            {
+                "_id": 0,
+                "context.requestId": 1,
+                "context.node": 1,
+                "timestamp": 1,
+            },
+        ).sort("timestamp", -1).limit(1000)
+    )
+
+    runs: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        context = entry.get("context", {})
+        request_id = context.get("requestId")
+        if not isinstance(request_id, str) or not request_id:
+            continue
+        run = runs.setdefault(
+            request_id,
+            {
+                "requestId": request_id,
+                "latestTimestamp": entry.get("timestamp"),
+                "nodeCount": 0,
+            },
+        )
+        run["nodeCount"] += 1
+
+    return {"workflowName": workflowName, "runs": list(runs.values())}
+
+
 # --- 2. LIST ALL INCIDENTS ---
 @app.get("/api/v1/incidents", response_model=List[Dict[str, Any]], tags=["Incidents"])
 async def list_incidents(current_user: dict = Depends(get_current_user)):
