@@ -232,6 +232,22 @@ When a hotfix is merged but the deployment system is not yet connected, an opera
 Use:
 
 ```text
+test guide <incident-id>
+```
+
+This guided mode keeps the current commands intact but auto-selects the next safe step in sequence:
+
+1. `test generate <incident-id>`
+2. `test approve <generated-test-id>`
+3. `test plan <incident-id>`
+4. `test run <test-plan-id>`
+5. `test status <test-plan-id>`
+
+When a pending approval already exists, `test guide` resumes that approval card instead of creating duplicate work.
+
+Use:
+
+```text
 test plan <incident-id>
 ```
 
@@ -316,6 +332,14 @@ Advance the most recent active plan with:
 ```text
 next
 ```
+
+Or use guided approval mode:
+
+```text
+guide [plan-id]
+```
+
+`guide` proposes the next allowlisted plan step as an approval card. The operator can approve or disapprove without typing the next command manually.
 
 You can still target a specific plan with `next <plan-id>`.
 

@@ -263,6 +263,7 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
           ? [
               `HTTP ${result.httpStatus}`,
               `Answer: ${result.answer || result.body?.answer || JSON.stringify(result.body)}`,
+              `Response: ${JSON.stringify(result.body)}`,
             ]
           : result.samples
           ? [
@@ -318,6 +319,45 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
         ...entry,
         status: 'error',
         title: 'Approval failed',
+        lines: [String(error)],
+      } : entry));
+    } finally {
+      setRunning(false);
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    }
+  };
+
+  const declineProposal = async (entryId: string, proposalId: string) => {
+    if (running) return;
+    setRunning(true);
+    setEntries((current) => current.map((entry) => entry.id === entryId ? {
+      ...entry,
+      status: 'running',
+      title: 'Declining proposal',
+      lines: [...entry.lines, 'Operator declined this action.'],
+    } : entry));
+
+    try {
+      const token = await getOperatorToken();
+      if (!token) throw new Error('Operator session unavailable.');
+      const response = await fetch(`${apiBaseUrl}/patchy/proposals/${proposalId}/decline`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail || `Decline failed: ${response.status}`);
+      setEntries((current) => current.map((entry) => entry.id === entryId ? {
+        ...entry,
+        status: 'warning',
+        title: 'Action declined',
+        lines: ['Proposal marked as declined. Run guide again when ready for the next action.'],
+        proposal: { ...entry.proposal!, status: body.status || 'declined' },
+      } : entry));
+    } catch (error) {
+      setEntries((current) => current.map((entry) => entry.id === entryId ? {
+        ...entry,
+        status: 'error',
+        title: 'Decline failed',
         lines: [String(error)],
       } : entry));
     } finally {
@@ -441,6 +481,13 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
                         disabled={running}
                       >
                         Approve &amp; Run
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void declineProposal(entry.id, entry.proposal!._id)}
+                        disabled={running}
+                      >
+                        Disapprove
                       </button>
                     </div>
                   )}

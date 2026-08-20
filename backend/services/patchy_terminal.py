@@ -5,7 +5,7 @@ from typing import Any
 
 from backend.services.log_broker import LogBroker
 from backend.services.patchy_hitl import create_probe_proposal, create_verification_workflow
-from backend.services.patchy_hitl import create_probe_proposal, create_synthetic_proposal, create_verification_workflow
+from backend.services.patchy_hitl import create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
 from backend.services.patchy_planner import PatchyPlanError, build_plan_report, create_incident_investigation_plan, create_plan, next_step, record_adaptive_step_result, get_plan, get_latest_active_plan
 from backend.services.production_ops import collect_production_status, format_production_status
 from backend.services.patchy_reasoning import PatchyReasoningError, synthesize_incident
@@ -34,10 +34,12 @@ COMMAND_HELP = (
     ("plan verify [bty|saapp] stability", "Create a deterministic multi-step plan"),
     ("investigate [incident-id]", "Create an investigation or request an incident to investigate"),
     ("next [plan-id]", "Run the next pending step for a plan"),
+    ("guide [plan-id]", "Propose the next plan step for approval (no manual next typing)"),
     ("explain <incident-id>", "Show structured incident details and analysis"),
     ("summarize <incident-id>", "Use the LLM to synthesize supplied incident evidence"),
     ("confirm deployed <incident-id>", "Record operator-confirmed production deployment"),
     ("test plan <incident-id>", "Inspect GitHub tests and draft a focused test plan"),
+    ("test guide <incident-id>", "Auto-select and run the next test workflow step"),
     ("test run <test-plan-id>", "Propose approved CI execution for a test plan"),
     ("test status <test-plan-id>", "Read the latest GitHub Actions test result"),
     ("test generate <incident-id>", "Draft a regression test for operator review"),
@@ -260,6 +262,28 @@ async def execute_patchy_command(
             lines.extend(["", *report["lines"]])
         return _response(report["status"] if report else result["status"], report["title"] if report else f"Plan step {step['index'] + 1} complete", lines, data)
 
+    if command == "guide":
+        if len(args) > 1:
+            raise PatchyCommandError("Usage: guide [plan-id]")
+        try:
+            proposal = create_plan_step_proposal(db, actor, args[0] if args else None)
+        except (PatchyPlanError, ValueError) as exc:
+            raise PatchyCommandError(str(exc)) from exc
+        action = proposal["action"]
+        return _response(
+            "approval_required",
+            "Approval required for guided next step",
+            [
+                proposal["summary"],
+                f"Plan: {proposal['planId']}",
+                f"Step: {proposal['planStepIndex'] + 1}",
+                f"Command: {action['command']}",
+                f"Reason: {action.get('reason', 'n/a')}",
+                "Risk: allowlisted Patchy command only.",
+            ],
+            {"proposal": proposal},
+        )
+
     if command == "health":
         return await _run_health(args[0].lower() if args else "all")
 
@@ -383,8 +407,101 @@ async def execute_patchy_command(
         )
 
     if command == "test":
-        if len(args) != 2 or args[0].lower() not in {"plan", "run", "status", "generate", "approve"}:
-            raise PatchyCommandError("Usage: test plan|run|status|generate|approve <id>")
+        if len(args) != 2 or args[0].lower() not in {"plan", "run", "status", "generate", "approve", "guide"}:
+            raise PatchyCommandError("Usage: test plan|run|status|generate|approve|guide <id>")
+        if args[0].lower() == "guide":
+            incident_id = args[1]
+            generated = db["patchy_generated_tests"].find_one(
+                {"incident_id": incident_id},
+                sort=[("updated_at", -1), ("created_at", -1)],
+            )
+            if not generated:
+                selected_command = f"test generate {incident_id}"
+            else:
+                generated_status = str(generated.get("status") or "").lower()
+                if generated_status == "ready_for_review":
+                    selected_command = f"test approve {generated['_id']}"
+                elif generated_status == "awaiting_approval":
+                    proposal_id = generated.get("proposal_id")
+                    proposal = db["patchy_proposals"].find_one({"_id": proposal_id}) if proposal_id else None
+                    if proposal and proposal.get("status") == "awaiting_approval":
+                        return _response(
+                            "approval_required",
+                            "Approval required for generated test commit",
+                            [
+                                proposal["summary"],
+                                f"Repository: {proposal['repository']}",
+                                f"Hotfix branch: {proposal['action']['branch']}",
+                                f"File: {proposal['action']['file']}",
+                                "Risk: new regression test on the hotfix branch only.",
+                                "Patchy resumed the existing pending step.",
+                            ],
+                            {"proposal": proposal},
+                        )
+                    selected_command = f"test approve {generated['_id']}"
+                elif generated_status == "committed":
+                    plan = db["patchy_test_plans"].find_one(
+                        {"incident_id": incident_id},
+                        sort=[("updated_at", -1), ("created_at", -1)],
+                    )
+                    if not plan:
+                        selected_command = f"test plan {incident_id}"
+                    else:
+                        plan_status = str(plan.get("status") or "").lower()
+                        if plan_status == "ready_for_review":
+                            selected_command = f"test run {plan['_id']}"
+                        elif plan_status == "awaiting_execution_approval":
+                            proposal_id = plan.get("proposal_id")
+                            proposal = db["patchy_proposals"].find_one({"_id": proposal_id}) if proposal_id else None
+                            if proposal and proposal.get("status") == "awaiting_approval":
+                                action = proposal["action"]
+                                return _response(
+                                    "approval_required",
+                                    "Approval required for test execution",
+                                    [
+                                        proposal["summary"],
+                                        f"Repository: {proposal['repository']}",
+                                        f"Branch: {action['branch']}",
+                                        f"Workflow: {action['url']}",
+                                        "Commands:",
+                                        *[f"- {command}" for command in action["commands"]],
+                                        "Risk: repository CI only; no local shell execution.",
+                                        "Patchy resumed the existing pending step.",
+                                    ],
+                                    {"proposal": proposal},
+                                )
+                            selected_command = f"test run {plan['_id']}"
+                        elif plan_status == "running":
+                            selected_command = f"test status {plan['_id']}"
+                        elif plan_status == "passed":
+                            return _response(
+                                "success",
+                                "Guided test workflow complete",
+                                [
+                                    f"Incident: {incident_id}",
+                                    f"Test plan: {plan['_id']}",
+                                    "Status: passed",
+                                ],
+                                {"incidentId": incident_id, "testPlanId": plan["_id"], "status": "passed"},
+                            )
+                        else:
+                            selected_command = f"test status {plan['_id']}"
+                else:
+                    selected_command = f"test generate {incident_id}"
+
+            guided = await execute_patchy_command(selected_command, db, broker, actor=actor)
+            guided_lines = [f"Patchy selected next step: {selected_command}", "", *(guided.get("lines") or [])]
+            return {
+                **guided,
+                "title": f"Guided test workflow · {guided.get('title', 'step complete')}",
+                "lines": guided_lines,
+                "data": serialize_mongo_doc(
+                    {
+                        **(guided.get("data") or {}),
+                        "guidedCommand": selected_command,
+                    }
+                ),
+            }
         if args[0].lower() == "approve":
             try:
                 proposal = create_generated_test_proposal(args[1], actor, db)

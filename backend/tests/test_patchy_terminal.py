@@ -309,3 +309,55 @@ def test_patchy_plan_creates_and_advances_allowlisted_steps(monkeypatch):
             await execute_patchy_command("plan run powershell", db, broker, actor="operator")
 
     asyncio.run(scenario())
+
+
+def test_guide_command_creates_approval_for_next_plan_step(monkeypatch):
+    monkeypatch.setattr(
+        terminal_module,
+        "run_service_health_checks",
+        lambda: [
+            {"service": "BTY Fitness", "status": "healthy", "latency_ms": 120, "http_status": 200, "details": {}},
+            {"service": "SAAPP Widget", "status": "healthy", "latency_ms": 130, "http_status": 200, "details": {}},
+        ],
+    )
+
+    async def scenario():
+        broker = LogBroker()
+        db = FakeDB()
+        await execute_patchy_command("plan verify bty stability", db, broker, actor="operator")
+        guided = await execute_patchy_command("guide", db, broker, actor="operator")
+        assert guided["status"] == "approval_required"
+        proposal = guided["data"]["proposal"]
+        assert proposal["kind"] == "plan_step"
+        assert proposal["action"]["command"] == "verify bty"
+        assert proposal["risk"] == "allowlisted_command_only"
+
+    asyncio.run(scenario())
+
+
+def test_test_guide_selects_generate_when_no_generated_test_exists(monkeypatch):
+    async def scenario():
+        broker = LogBroker()
+        db = FakeDB()
+
+        async def fake_generate_regression_test(incident_id, _db, _github):
+            assert incident_id == "inc_1"
+            return {
+                "_id": "generated_test_123",
+                "repository": "SummonShenron/SAAPP",
+                "test_branch": "hotfix/test",
+                "test_file": "tests/test_regression.py",
+                "test_name": "test_regression_path",
+                "rationale": "Covers the failing path",
+                "content": "def test_regression_path():\n    assert True\n",
+            }
+
+        monkeypatch.setattr(terminal_module, "generate_regression_test", fake_generate_regression_test)
+        monkeypatch.setattr(terminal_module, "GitHubOpsService", lambda: object())
+
+        result = await execute_patchy_command("test guide inc_1", db, broker, actor="operator")
+        assert result["status"] == "success"
+        assert result["data"]["guidedCommand"] == "test generate inc_1"
+        assert "Patchy selected next step: test generate inc_1" in result["lines"][0]
+
+    asyncio.run(scenario())

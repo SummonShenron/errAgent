@@ -8,6 +8,13 @@ import requests
 
 from backend.services.synthetic_adapters import SyntheticAdapterError, get_synthetic_adapter
 from backend.utils.app_utils import SERVICES, serialize_mongo_doc
+from backend.services.patchy_planner import (
+    PatchyPlanError,
+    get_latest_active_plan,
+    get_plan,
+    next_step,
+    record_adaptive_step_result,
+)
 
 
 class PatchyProposalError(ValueError):
@@ -146,6 +153,64 @@ def list_proposals(db, limit: int = 20) -> list[dict[str, Any]]:
     return serialize_mongo_doc(proposals)
 
 
+def create_plan_step_proposal(db, actor: str, plan_id: str | None = None) -> dict[str, Any]:
+    try:
+        plan = get_plan(db, plan_id) if plan_id else get_latest_active_plan(db, actor)
+        step = next_step(plan)
+    except PatchyPlanError as exc:
+        raise PatchyProposalError(str(exc)) from exc
+
+    now = datetime.now(timezone.utc)
+    proposal_id = f"plan_step_{plan['_id']}_{step['index']}"
+    existing = db["patchy_proposals"].find_one({"_id": proposal_id})
+    if existing and existing.get("status") == "awaiting_approval":
+        return serialize_mongo_doc(existing)
+
+    proposal = {
+        "_id": proposal_id,
+        "kind": "plan_step",
+        "risk": "allowlisted_command_only",
+        "status": "awaiting_approval",
+        "summary": f"Run plan step {step['index'] + 1}: {step['command']}",
+        "action": {
+            "method": "PATCHY",
+            "url": f"patchy://command/{step['command']}",
+            "command": step["command"],
+            "reason": step.get("reason", ""),
+        },
+        "planId": plan["_id"],
+        "planStepIndex": step["index"],
+        "created_by": actor,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db["patchy_proposals"].replace_one({"_id": proposal_id}, proposal, upsert=True)
+    return serialize_mongo_doc(proposal)
+
+
+def decline_plan_step_proposal(db, proposal_id: str, actor: str) -> dict[str, Any]:
+    proposal = get_proposal(db, proposal_id)
+    if proposal.get("kind") != "plan_step":
+        raise PatchyProposalError("Only guided plan-step proposals can be declined")
+    if proposal.get("status") != "awaiting_approval":
+        raise PatchyProposalError(f"Proposal cannot be declined from status: {proposal.get('status', 'unknown')}")
+
+    now = datetime.now(timezone.utc)
+    db["patchy_proposals"].update_one(
+        {"_id": proposal_id, "status": "awaiting_approval"},
+        {
+            "$set": {
+                "status": "declined",
+                "declined_by": actor,
+                "declined_at": now,
+                "updated_at": now,
+                "result": {"reason": "operator_declined"},
+            }
+        },
+    )
+    return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal_id}))
+
+
 async def approve_and_execute_probe(
     db,
     proposal_id: str,
@@ -165,6 +230,8 @@ async def approve_and_execute_probe(
             actor,
             outbound_bearer_token=outbound_bearer_token,
         )
+    if proposal.get("kind") == "plan_step":
+        return await _approve_and_execute_plan_step(db, proposal, actor, broker)
     if proposal.get("kind") not in {"http_probe", "latency_probe", "synthetic_http"} or proposal.get("risk") not in {"read_only", "registered_read_only"}:
         raise PatchyProposalError("Only registered read-only probes and synthetic checks are supported")
 
@@ -369,4 +436,76 @@ async def _approve_and_execute_synthetic_question(
         {"_id": proposal["_id"]},
         {"$set": {"status": final_status, "result": result, "completed_at": completed_at, "updated_at": completed_at}},
     )
+    return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal["_id"]}))
+
+
+async def _approve_and_execute_plan_step(db, proposal: dict[str, Any], actor: str, broker=None) -> dict[str, Any]:
+    from backend.services.patchy_terminal import execute_patchy_command
+
+    command = str((proposal.get("action") or {}).get("command") or "").strip()
+    if not command:
+        raise PatchyProposalError("Plan step proposal is missing a command")
+
+    plan_id = proposal.get("planId")
+    expected_step_index = proposal.get("planStepIndex")
+    try:
+        plan = get_plan(db, plan_id)
+        step = next_step(plan)
+    except PatchyPlanError as exc:
+        raise PatchyProposalError(str(exc)) from exc
+
+    if int(step.get("index", -1)) != int(expected_step_index):
+        raise PatchyProposalError("Plan changed since this proposal was created. Request a new guided step.")
+    if step.get("command") != command:
+        raise PatchyProposalError("Plan step command no longer matches proposal command")
+
+    started_at = datetime.now(timezone.utc)
+    claimed = db["patchy_proposals"].update_one(
+        {"_id": proposal["_id"], "status": "awaiting_approval"},
+        {
+            "$set": {
+                "status": "running",
+                "approved_by": actor,
+                "approved_at": started_at,
+                "updated_at": started_at,
+            }
+        },
+    )
+    if claimed.modified_count != 1:
+        raise PatchyProposalError("Proposal was already claimed")
+
+    try:
+        result = await execute_patchy_command(command, db, broker, actor=actor)
+        updated_plan = record_adaptive_step_result(db, plan_id, int(expected_step_index), result)
+        completed_at = datetime.now(timezone.utc)
+        db["patchy_proposals"].update_one(
+            {"_id": proposal["_id"]},
+            {
+                "$set": {
+                    "status": "succeeded",
+                    "result": {
+                        "planId": plan_id,
+                        "planStatus": updated_plan.get("status"),
+                        "stepResult": result,
+                    },
+                    "completed_at": completed_at,
+                    "updated_at": completed_at,
+                }
+            },
+        )
+    except Exception as exc:
+        completed_at = datetime.now(timezone.utc)
+        db["patchy_proposals"].update_one(
+            {"_id": proposal["_id"]},
+            {
+                "$set": {
+                    "status": "failed",
+                    "result": {"error": str(exc)},
+                    "completed_at": completed_at,
+                    "updated_at": completed_at,
+                }
+            },
+        )
+        raise
+
     return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal["_id"]}))

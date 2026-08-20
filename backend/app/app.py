@@ -34,7 +34,7 @@ from backend.utils.isolation_auth import decode_access_token, get_current_user
 from backend.services.github_service import GitHubOpsService
 from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
 from backend.services.patchy_terminal import PatchyCommandError, execute_patchy_command
-from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, list_proposals
+from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_plan_step_proposal, list_proposals
 from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
 from backend.middleware.rbac import require_role
@@ -357,6 +357,21 @@ async def approve_patchy_proposal(
             outbound_bearer_token=outbound_bearer_token,
         )
     except (PatchyProposalError, PatchyTestExecutionError, PatchyGeneratedTestError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/patchy/proposals/{proposal_id}/decline", tags=["Patchy"])
+async def decline_patchy_proposal(
+    proposal_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    try:
+        return await asyncio.to_thread(decline_plan_step_proposal, db, proposal_id, actor)
+    except PatchyProposalError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
