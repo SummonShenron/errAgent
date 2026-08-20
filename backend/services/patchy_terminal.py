@@ -5,6 +5,7 @@ from typing import Any
 
 from backend.services.log_broker import LogBroker
 from backend.services.patchy_hitl import create_probe_proposal, create_verification_workflow
+from backend.services.patchy_hitl import create_probe_proposal, create_synthetic_proposal, create_verification_workflow
 from backend.services.patchy_planner import PatchyPlanError, build_plan_report, create_incident_investigation_plan, create_plan, next_step, record_adaptive_step_result, get_plan, get_latest_active_plan
 from backend.services.production_ops import collect_production_status, format_production_status
 from backend.services.patchy_reasoning import PatchyReasoningError, synthesize_incident
@@ -13,6 +14,7 @@ from backend.services.github_service import GitHubOpsService
 from backend.services.patchy_test_planner import PatchyTestPlanError, create_test_plan
 from backend.services.patchy_test_runner import PatchyTestExecutionError, create_test_execution_proposal, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, create_generated_test_proposal, generate_regression_test
+from backend.services.synthetic_adapters import SyntheticAdapterError, create_question_proposal
 from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
 
 
@@ -26,6 +28,8 @@ COMMAND_HELP = (
     ("logs [all|bty|saapp|erragent] [info|warn|error]", "Show recent in-memory logs"),
     ("diagnostics", "Run health, incident, and log checks together"),
     ("probe [bty|saapp]", "Propose a read-only HTTP probe for approval"),
+        ("synthetic [bty|saapp]", "Propose a registered synthetic HTTP assertion"),
+        ("synthetic ask sonic <question>", "Propose a staging Sonic Assistant question"),
     ("verify [bty|saapp]", "Run a two-step HITL stability verification"),
     ("plan verify [bty|saapp] stability", "Create a deterministic multi-step plan"),
     ("investigate [incident-id]", "Create an investigation or request an incident to investigate"),
@@ -519,6 +523,57 @@ async def execute_patchy_command(
                 f"URL: {action['url']}",
                 f"Timeout: {action['timeoutSeconds']}s",
                 "Risk: read-only",
+            ],
+            {"proposal": proposal},
+        )
+    if command == "synthetic":
+        if len(args) >= 3 and args[0].lower() == "ask":
+            if args[1].lower() != "sonic":
+                raise PatchyCommandError("Usage: synthetic ask sonic <question> [--production-read-only]")
+            production_read_only = args[-1].lower() == "--production-read-only"
+            question_args = args[2:-1] if production_read_only else args[2:]
+            if not question_args:
+                raise PatchyCommandError("A question is required")
+            try:
+                proposal = create_question_proposal(
+                    args[1],
+                    " ".join(question_args),
+                    actor,
+                    db,
+                    allow_production=production_read_only,
+                )
+            except SyntheticAdapterError as exc:
+                raise PatchyCommandError(str(exc)) from exc
+            action = proposal["action"]
+            return _response(
+                "approval_required",
+                "Approval required for staging question",
+                [
+                    proposal["summary"],
+                    f"Environment: {action['environment']}",
+                    f"URL: {action['url']}",
+                    f"Question: {action['question']}",
+                    *[f"Assertion: {assertion}" for assertion in action["assertions"]],
+                    f"Risk: {proposal['risk']}",
+                ],
+                {"proposal": proposal},
+            )
+        if len(args) != 1:
+            raise PatchyCommandError("Usage: synthetic [bty|saapp] or synthetic ask sonic <question> [--production-read-only]")
+        try:
+            proposal = create_synthetic_proposal(args[0], actor, db)
+        except PatchyProposalError as exc:
+            raise PatchyCommandError(str(exc)) from exc
+        action = proposal["action"]
+        return _response(
+            "approval_required",
+            "Approval required for synthetic test",
+            [
+                proposal["summary"],
+                f"Method: {action['method']}",
+                f"URL: {action['url']}",
+                *[f"Assertion: {assertion}" for assertion in action["assertions"]],
+                "Risk: registered read-only endpoint; no staging sandbox is implied.",
             ],
             {"proposal": proposal},
         )

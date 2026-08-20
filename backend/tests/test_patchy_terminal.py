@@ -112,6 +112,10 @@ def test_patchy_commands_are_allowlisted_and_structured(monkeypatch):
         ]
         assert not db["patchy_proposals"].documents
 
+        synthetic_result = await execute_patchy_command("synthetic bty", db, broker)
+        assert synthetic_result["status"] == "approval_required"
+        assert synthetic_result["data"]["proposal"]["kind"] == "synthetic_http"
+
         investigation_clarification = await execute_patchy_command("investigate", db, broker)
         assert investigation_clarification["status"] == "clarification_required"
         assert investigation_clarification["data"]["clarification"]["options"][0]["value"] == "investigate inc_1"

@@ -175,6 +175,7 @@ export default function App() {
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const [patchyTerminalOpen, setPatchyTerminalOpen] = useState(false);
+  const [incidentGuideOpen, setIncidentGuideOpen] = useState(false);
   const visibleIncidents = incidents.filter((incident) => {
     const status = (incident.status || 'open').toLowerCase();
     const isResolved = ['resolved', 'closed'].includes(status);
@@ -194,6 +195,15 @@ export default function App() {
   useEffect(() => {
     getTokenRef.current = getToken;
   }, [getToken]);
+
+  useEffect(() => {
+    if (!incidentGuideOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIncidentGuideOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [incidentGuideOpen]);
 
   useEffect(() => {
     selectedIncidentIdRef.current = selectedIncidentId;
@@ -514,12 +524,21 @@ export default function App() {
         <div className="topbar-actions">
           <button type="button" className="console-launch" onClick={() => setPatchyTerminalOpen(true)}>
             <span aria-hidden="true">$</span>
-            Patchy
+            Patchy Terminal
           </button>
           <button type="button" className="console-launch" onClick={() => setReplayOpen(true)}># Replay Workflow</button>
           <button type="button" className="console-launch" onClick={() => setConsoleOpen(true)}>
             <span aria-hidden="true">&gt;_</span>
-            Console
+            Log Console
+          </button>
+          <button
+            type="button"
+            className="incident-guide-trigger"
+            onClick={() => setIncidentGuideOpen(true)}
+            title="Open incident response guide"
+            aria-label="Open incident response guide"
+          >
+            ?
           </button>
           <div className="auth-chip">
             <SignedIn>
@@ -549,6 +568,45 @@ export default function App() {
         apiBaseUrl={API_BASE_URL}
         getToken={getToken}
       />
+      {incidentGuideOpen && (
+        <div
+          className="console-backdrop incident-guide-backdrop"
+          role="presentation"
+          onMouseDown={(event) => event.target === event.currentTarget && setIncidentGuideOpen(false)}
+        >
+          <section className="incident-guide-panel" role="dialog" aria-modal="true" aria-labelledby="incident-guide-title">
+            <header className="console-header">
+              <div>
+                <p className="eyebrow">Operator runbook</p>
+                <h2 id="incident-guide-title">Validated incident response</h2>
+              </div>
+              <button
+                type="button"
+                className="console-icon-button"
+                onClick={() => setIncidentGuideOpen(false)}
+                title="Close incident response guide"
+                aria-label="Close incident response guide"
+              >
+                ×
+              </button>
+            </header>
+            <div className="incident-guide-content">
+              <p className="incident-guide-lead">Use this sequence to validate a hotfix before merging it into <code>main</code>.</p>
+              <ol className="incident-guide-steps">
+                <li><strong>Analyze</strong><span>Review Patchy&apos;s incident analysis, root cause, and remediation draft.</span></li>
+                <li><strong>Create the hotfix branch</strong><span>Approve the hotfix on the incident detail page so the remediation branch and PR exist.</span></li>
+                <li><strong>Generate a regression test</strong><code>test generate &lt;incident-id&gt;</code></li>
+                <li><strong>Review and approve the test</strong><span>Review the generated file, then run <code>test approve &lt;generated-test-id&gt;</code> and approve the commit proposal.</span></li>
+                <li><strong>Create the test plan</strong><span>After the test commit completes, run <code>test plan &lt;incident-id&gt;</code>.</span></li>
+                <li><strong>Run CI</strong><span>Review the plan, run <code>test run &lt;test-plan-id&gt;</code>, and approve the GitHub Actions proposal.</span></li>
+                <li><strong>Verify the result</strong><span>Run <code>test status &lt;test-plan-id&gt;</code>. Continue only when the status is <code>passed</code>.</span></li>
+                <li><strong>Merge</strong><span>Return to the incident detail page and use the normal Merge Hotfix action.</span></li>
+              </ol>
+              <div className="incident-guide-warning"><strong>Merge gate:</strong> a linked test plan must report <code>passed</code>. Queued, running, failed, cancelled, or missing results cannot be merged.</div>
+            </div>
+          </section>
+        </div>
+      )}
       
       <section className="session-band">
         <span className="session-label">Active Session Principal</span>

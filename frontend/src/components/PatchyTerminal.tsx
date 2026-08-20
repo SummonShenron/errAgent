@@ -31,6 +31,7 @@ type PatchyTestPlan = {
 
 type PatchyProposal = {
   _id: string;
+  kind?: string;
   status: string;
   summary: string;
   risk: string;
@@ -43,6 +44,8 @@ type PatchyProposal = {
     branch?: string;
     file?: string;
     content?: string;
+    question?: string;
+    environment?: string;
   };
   workflow?: {
     id: string;
@@ -87,7 +90,7 @@ type TerminalEntry = {
   };
 };
 
-const QUICK_COMMANDS = ['plan verify bty stability', 'plan verify saapp stability', 'verify bty', 'incidents', 'help'];
+const QUICK_COMMANDS = ['plan verify bty stability', 'verify bty', 'incidents', 'list incidents resolved', 'probe', 'render status all', 'ops status all', 'help'];
 
 export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTerminalProps) {
   const [command, setCommand] = useState('');
@@ -256,7 +259,12 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
       if (!response.ok) throw new Error(body.detail || `Approval failed: ${response.status}`);
       const result = body.result || {};
       const resultLines = body.status === 'succeeded'
-        ? result.samples
+        ? result.question
+          ? [
+              `HTTP ${result.httpStatus}`,
+              `Answer: ${result.answer || result.body?.answer || JSON.stringify(result.body)}`,
+            ]
+          : result.samples
           ? [
               `Samples: ${result.samples.join(', ')}ms`,
               `Median: ${result.medianMs}ms`,
@@ -271,7 +279,9 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
       setEntries((current) => current.map((entry) => entry.id === entryId ? {
         ...entry,
         status: body.status === 'succeeded' ? 'success' : 'error',
-        title: body.status === 'succeeded' ? 'Approved probe succeeded' : 'Approved probe failed',
+        title: body.status === 'succeeded'
+          ? entry.proposal?.kind === 'synthetic_question' ? 'Synthetic question succeeded' : 'Approved probe succeeded'
+          : entry.proposal?.kind === 'synthetic_question' ? 'Synthetic question failed' : 'Approved probe failed',
         lines: resultLines,
         proposal: { ...entry.proposal!, status: body.status },
         timestamp: body.completed_at || new Date().toISOString(),
@@ -418,6 +428,12 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
                       </div>
                       {entry.proposal.action.content && (
                         <pre className="patchy-proposal-content">{entry.proposal.action.content}</pre>
+                      )}
+                      {entry.proposal.action.question && (
+                        <div className="patchy-question-preview">
+                          <strong>Question:</strong> {entry.proposal.action.question}
+                          {entry.proposal.action.environment && <small>Environment: {entry.proposal.action.environment}</small>}
+                        </div>
                       )}
                       <button
                         type="button"

@@ -1,3 +1,4 @@
+synthetic [bty|saapp]
 # Patchy Terminal
 
 Patchy Terminal is errAgent's authenticated operations console. It uses a strict command allowlist for immediate diagnostics and a human-in-the-loop (HITL) proposal flow for executable actions. It does not expose an arbitrary shell.
@@ -166,6 +167,51 @@ probe
 returns a clarification request asking which registered service to use. The operator can choose BTY Fitness or SAAPP Widget from the terminal. Patchy does not guess, create a proposal, or accept an arbitrary URL. The selected value is submitted through the normal command parser and policy checks.
 
 This pattern is the safe foundation for more agentic behavior: ask for missing information, constrain the possible answers, record the decision, then continue through the existing HITL flow.
+
+## Synthetic workflow foundation
+
+The first synthetic adapter is intentionally narrow:
+
+```text
+synthetic [bty|saapp]
+```
+
+It proposes an approved GET against a registered service health endpoint and asserts that the response is successful and completes within the timeout. It does not yet provide a staging sandbox or execute arbitrary user prompts. The endpoint remains visible in the approval panel, and the operator must approve it before the request runs.
+
+The next expansion is a staging-only declarative workflow adapter for structured actions and assertions. Natural-language requests should be translated into that allowlisted structure before execution, never directly into shell, browser, or arbitrary HTTP commands.
+
+The first staging assistant adapter uses:
+
+```env
+ERRAGENT_SONIC_SYNTHETIC_URL=https://<sonic-staging-host>/<question-route>
+ERRAGENT_SONIC_SYNTHETIC_ENV=staging
+```
+
+Once Sonic exposes a staging question endpoint accepting `{"question": "..."}` and returning an answer field, use:
+
+```text
+synthetic ask sonic "What is my balance?"
+```
+
+Patchy displays the exact question, staging URL, and non-empty-answer assertion before approval. The adapter rejects production environments, non-HTTPS URLs, missing configuration, and questions longer than 2000 characters.
+
+If staging is unavailable and the endpoint is explicitly safe for production read-only checks, enable the separate production mode in the errAgent backend environment:
+
+```env
+ERRAGENT_ALLOW_PRODUCTION_SYNTHETICS=true
+ERRAGENT_SONIC_SYNTHETIC_ENV=production
+ERRAGENT_SONIC_SYNTHETIC_URL=https://<sonic-production-host>/<read-only-question-route>
+```
+
+Then the command must include the explicit flag:
+
+```text
+synthetic ask sonic "What is my balance?" --production-read-only
+```
+
+Both the environment flag and command flag are required. The proposal displays `production_read_only` risk and still requires approval. The endpoint must be read-only, HTTPS, side-effect-free, bounded by timeout and response limits, and must not expose credentials or perform account mutations. Leave `ERRAGENT_ALLOW_PRODUCTION_SYNTHETICS` unset unless this production route has been reviewed.
+
+BTY is a normal website, not a conversational assistant. Its current synthetic coverage is limited to registered health checks. Website workflows such as signing in, filling a form, submitting a request, and asserting the resulting page require a separate staging-only Playwright adapter. That adapter should be added only after the staging URL, test account strategy, selectors, and expected assertions are defined.
 
 ## LLM evidence synthesis
 

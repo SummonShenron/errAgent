@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import requests
 
+from backend.services.synthetic_adapters import SyntheticAdapterError, get_synthetic_adapter
 from backend.utils.app_utils import SERVICES, serialize_mongo_doc
 
 
@@ -52,6 +53,30 @@ def create_probe_proposal(alias: str, actor: str, db) -> dict[str, Any]:
     }
     db["patchy_proposals"].insert_one(document)
     return serialize_mongo_doc(document)
+
+
+def create_synthetic_proposal(alias: str, actor: str, db) -> dict[str, Any]:
+    service = _service_by_alias(alias)
+    now = datetime.now(timezone.utc)
+    proposal = {
+        "_id": f"synthetic_{uuid4().hex}",
+        "kind": "synthetic_http",
+        "risk": "registered_read_only",
+        "status": "awaiting_approval",
+        "summary": f"Run a synthetic health assertion for {service['name']}",
+        "action": {
+            "method": "GET",
+            "url": service["url"].rstrip("/") + service.get("health_path", "/"),
+            "timeoutSeconds": 15,
+            "assertions": ["HTTP status is 2xx", "response completes within timeout"],
+        },
+        "serviceAlias": alias.lower(),
+        "created_by": actor,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db["patchy_proposals"].insert_one(proposal)
+    return serialize_mongo_doc(proposal)
 
 
 def create_verification_workflow(alias: str, actor: str, db) -> dict[str, Any]:
@@ -132,8 +157,10 @@ async def approve_and_execute_probe(
         raise PatchyProposalError(
             f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}"
         )
-    if proposal.get("kind") not in {"http_probe", "latency_probe"} or proposal.get("risk") != "read_only":
-        raise PatchyProposalError("Only read-only HTTP and latency probes are supported in this phase")
+    if proposal.get("kind") == "synthetic_question":
+        return await _approve_and_execute_synthetic_question(db, proposal, actor)
+    if proposal.get("kind") not in {"http_probe", "latency_probe", "synthetic_http"} or proposal.get("risk") not in {"read_only", "registered_read_only"}:
+        raise PatchyProposalError("Only registered read-only probes and synthetic checks are supported")
 
     action = proposal.get("action") or {}
     if action.get("method") != "GET":
@@ -267,3 +294,56 @@ async def approve_and_execute_probe(
         "data": serialize_mongo_doc({"incidents": incidents, "errorLogs": error_logs}),
     }
     return completed
+
+
+async def _approve_and_execute_synthetic_question(db, proposal: dict[str, Any], actor: str) -> dict[str, Any]:
+    action = proposal.get("action") or {}
+    try:
+        adapter = get_synthetic_adapter(
+            proposal.get("adapter", ""),
+            allow_production=proposal.get("risk") == "production_read_only",
+        )
+    except SyntheticAdapterError as exc:
+        raise PatchyProposalError(str(exc)) from exc
+    if action.get("method") != "POST" or action.get("url") != adapter["url"]:
+        raise PatchyProposalError("Synthetic question failed its adapter policy")
+    if action.get("environment") not in {"staging", "production"}:
+        raise PatchyProposalError("Synthetic question has an unsupported environment")
+    if action.get("environment") == "production" and proposal.get("risk") != "production_read_only":
+        raise PatchyProposalError("Production synthetic question is not marked read-only")
+
+    claimed = db["patchy_proposals"].update_one(
+        {"_id": proposal["_id"], "status": "awaiting_approval"},
+        {"$set": {"status": "running", "approved_by": actor, "approved_at": datetime.now(timezone.utc)}},
+    )
+    if claimed.modified_count != 1:
+        raise PatchyProposalError("Proposal was already claimed")
+    try:
+        response = await asyncio.to_thread(
+            requests.post,
+            adapter["url"],
+            json={"question": action["question"]},
+            timeout=min(int(action.get("timeoutSeconds", 30)), 30),
+        )
+        try:
+            body: Any = response.json()
+        except Exception:
+            body = response.text[:4000]
+        answer = body.get("answer") if isinstance(body, dict) else body
+        result = {
+            "question": action["question"],
+            "httpStatus": response.status_code,
+            "body": body,
+            "answer": answer,
+            "hasAnswer": bool(str(answer or "").strip()),
+        }
+        final_status = "succeeded" if 200 <= response.status_code < 300 and result["hasAnswer"] else "failed"
+    except Exception as exc:
+        result = {"error": str(exc)}
+        final_status = "failed"
+    completed_at = datetime.now(timezone.utc)
+    db["patchy_proposals"].update_one(
+        {"_id": proposal["_id"]},
+        {"$set": {"status": final_status, "result": result, "completed_at": completed_at, "updated_at": completed_at}},
+    )
+    return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal["_id"]}))

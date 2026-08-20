@@ -123,6 +123,23 @@ button {
 	letter-spacing: -0.02em;
 }
 
+.incident-guide-trigger {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 34px;
+	height: 34px;
+	border: 1px solid #334155;
+	border-radius: 50%;
+	background: #0b1728;
+	color: #bfdbfe;
+	font-size: 1.05rem;
+	font-weight: 800;
+	cursor: pointer;
+}
+
+.incident-guide-trigger:hover { border-color: #38bdf8; color: #f0f9ff; }
+
 .eyebrow {
 	margin: 0 0 4px;
 	text-transform: uppercase;
@@ -1100,6 +1117,52 @@ button {
 	height: min(760px, calc(100vh - 48px));
 }
 
+.incident-guide-backdrop { z-index: 20; }
+
+.incident-guide-panel {
+	width: min(760px, 100%);
+	max-height: min(760px, calc(100vh - 48px));
+	display: grid;
+	grid-template-rows: auto minmax(0, 1fr);
+	overflow: hidden;
+	border: 1px solid #263a55;
+	border-radius: 10px;
+	background: #060c16;
+	box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+
+.incident-guide-content {
+	overflow: auto;
+	padding: 22px 26px 26px;
+	background: #02050b;
+}
+
+.incident-guide-lead { margin: 0 0 18px; color: #cbd5e1; }
+.incident-guide-lead code,
+.incident-guide-steps code,
+.incident-guide-warning code { color: #bfdbfe; }
+
+.incident-guide-steps {
+	display: grid;
+	gap: 10px;
+	margin: 0;
+	padding-left: 28px;
+}
+
+.incident-guide-steps li {
+	display: grid;
+	gap: 4px;
+	padding: 12px 14px;
+	border: 1px solid #1e2e44;
+	border-radius: 6px;
+	background: rgba(15, 23, 42, 0.55);
+}
+
+.incident-guide-steps li::marker { color: #38bdf8; font-weight: 800; }
+.incident-guide-steps strong { color: #f8fafc; }
+.incident-guide-steps span { color: #94a3b8; line-height: 1.5; }
+.incident-guide-warning { margin-top: 18px; padding: 12px 14px; border-left: 3px solid #fbbf24; background: rgba(120, 53, 15, 0.2); color: #fde68a; line-height: 1.5; }
+
 .patchy-terminal-layout {
 	display: grid;
 	grid-template-columns: 150px minmax(0, 1fr);
@@ -1304,6 +1367,15 @@ button {
 	color: #64748b;
 	font-size: 0.66rem;
 	text-transform: uppercase;
+}
+
+.patchy-approval-panel .patchy-question-preview {
+	grid-column: 1 / -1;
+	padding: 8px;
+	border-top: 1px solid rgba(51, 65, 85, 0.55);
+	color: #dbeafe;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
 }
 
 .patchy-approval-panel code {
