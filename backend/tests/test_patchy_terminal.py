@@ -335,6 +335,30 @@ def test_guide_command_creates_approval_for_next_plan_step(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_guide_command_accepts_incident_id(monkeypatch):
+    monkeypatch.setattr(
+        terminal_module,
+        "run_service_health_checks",
+        lambda: [
+            {"service": "BTY Fitness", "status": "healthy", "latency_ms": 120, "http_status": 200, "details": {}},
+            {"service": "SAAPP Widget", "status": "healthy", "latency_ms": 130, "http_status": 200, "details": {}},
+        ],
+    )
+
+    async def scenario():
+        broker = LogBroker()
+        db = FakeDB()
+        await execute_patchy_command("investigate inc_1", db, broker, actor="operator")
+        guided = await execute_patchy_command("guide inc_1", db, broker, actor="operator")
+        assert guided["status"] == "approval_required"
+        proposal = guided["data"]["proposal"]
+        assert proposal["kind"] == "plan_step"
+        assert proposal["planId"].startswith("plan_")
+        assert proposal["action"]["command"] == "explain inc_1"
+
+    asyncio.run(scenario())
+
+
 def test_test_guide_selects_generate_when_no_generated_test_exists(monkeypatch):
     async def scenario():
         broker = LogBroker()

@@ -245,6 +245,8 @@ This guided mode keeps the current commands intact but auto-selects the next saf
 
 When a pending approval already exists, `test guide` resumes that approval card instead of creating duplicate work.
 
+To avoid long-running generation hangs, guided test generation/planning uses a bounded timeout controlled by `PATCHY_LLM_TIMEOUT_SECONDS` (default `60`).
+
 Use:
 
 ```text
@@ -336,10 +338,10 @@ next
 Or use guided approval mode:
 
 ```text
-guide [plan-id]
+guide [plan-id|incident-id]
 ```
 
-`guide` proposes the next allowlisted plan step as an approval card. The operator can approve or disapprove without typing the next command manually.
+`guide` proposes the next allowlisted plan step as an approval card. The operator can approve or disapprove without typing the next command manually. If you pass an incident ID, Patchy resolves it to the latest active plan for that incident.
 
 You can still target a specific plan with `next <plan-id>`.
 

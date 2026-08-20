@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 from typing import Any
@@ -67,15 +68,25 @@ async def create_test_plan(incident_id: str, db, github: GitHubOpsService) -> di
         raise PatchyTestPlanError("GOOGLE_API_KEY is not configured for Patchy test planning")
 
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
-        contents=PATCHY_TEST_PLAN_PROMPT.format(evidence=evidence),
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=PatchyTestPlan,
-            temperature=0.1,
-        ),
-    )
+    llm_timeout_seconds = int(os.getenv("PATCHY_LLM_TIMEOUT_SECONDS", "60"))
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                client.models.generate_content,
+                model=os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
+                contents=PATCHY_TEST_PLAN_PROMPT.format(evidence=evidence),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=PatchyTestPlan,
+                    temperature=0.1,
+                ),
+            ),
+            timeout=llm_timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        raise PatchyTestPlanError(
+            f"Patchy test planning timed out after {llm_timeout_seconds}s"
+        ) from exc
     plan = response.parsed
     if not isinstance(plan, PatchyTestPlan):
         raise PatchyTestPlanError("Patchy test planning returned no valid structured plan")

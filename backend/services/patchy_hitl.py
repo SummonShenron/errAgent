@@ -154,8 +154,23 @@ def list_proposals(db, limit: int = 20) -> list[dict[str, Any]]:
 
 
 def create_plan_step_proposal(db, actor: str, plan_id: str | None = None) -> dict[str, Any]:
+    resolved_plan_id = plan_id
+    if plan_id and not str(plan_id).startswith("plan_"):
+        plan_from_incident = db["patchy_plans"].find_one(
+            {
+                "subject.incidentId": plan_id,
+                "status": {"$ne": "completed"},
+            },
+            sort=[("updated_at", -1), ("created_at", -1)],
+        )
+        if not plan_from_incident:
+            raise PatchyProposalError(
+                f"No active plan found for incident: {plan_id}. Run investigate {plan_id} or plan verify ... first."
+            )
+        resolved_plan_id = plan_from_incident["_id"]
+
     try:
-        plan = get_plan(db, plan_id) if plan_id else get_latest_active_plan(db, actor)
+        plan = get_plan(db, resolved_plan_id) if resolved_plan_id else get_latest_active_plan(db, actor)
         step = next_step(plan)
     except PatchyPlanError as exc:
         raise PatchyProposalError(str(exc)) from exc

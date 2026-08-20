@@ -34,7 +34,7 @@ COMMAND_HELP = (
     ("plan verify [bty|saapp] stability", "Create a deterministic multi-step plan"),
     ("investigate [incident-id]", "Create an investigation or request an incident to investigate"),
     ("next [plan-id]", "Run the next pending step for a plan"),
-    ("guide [plan-id]", "Propose the next plan step for approval (no manual next typing)"),
+    ("guide [plan-id|incident-id]", "Propose the next plan step for approval (no manual next typing)"),
     ("explain <incident-id>", "Show structured incident details and analysis"),
     ("summarize <incident-id>", "Use the LLM to synthesize supplied incident evidence"),
     ("confirm deployed <incident-id>", "Record operator-confirmed production deployment"),
@@ -264,7 +264,7 @@ async def execute_patchy_command(
 
     if command == "guide":
         if len(args) > 1:
-            raise PatchyCommandError("Usage: guide [plan-id]")
+            raise PatchyCommandError("Usage: guide [plan-id|incident-id]")
         try:
             proposal = create_plan_step_proposal(db, actor, args[0] if args else None)
         except (PatchyPlanError, ValueError) as exc:

@@ -1,3 +1,4 @@
+import asyncio
 import ast
 import os
 import re
@@ -75,15 +76,25 @@ async def generate_regression_test(incident_id: str, db, github: GitHubOpsServic
     if not api_key:
         raise PatchyGeneratedTestError("GOOGLE_API_KEY is not configured for test generation")
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
-        contents=PATCHY_REGRESSION_TEST_PROMPT.format(evidence=evidence),
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=PatchyGeneratedTest,
-            temperature=0.1,
-        ),
-    )
+    llm_timeout_seconds = int(os.getenv("PATCHY_LLM_TIMEOUT_SECONDS", "60"))
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                client.models.generate_content,
+                model=os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
+                contents=PATCHY_REGRESSION_TEST_PROMPT.format(evidence=evidence),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=PatchyGeneratedTest,
+                    temperature=0.1,
+                ),
+            ),
+            timeout=llm_timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        raise PatchyGeneratedTestError(
+            f"Patchy test generation timed out after {llm_timeout_seconds}s"
+        ) from exc
     generated = response.parsed
     if not isinstance(generated, PatchyGeneratedTest):
         raise PatchyGeneratedTestError("Patchy returned no valid generated test")
