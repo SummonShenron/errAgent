@@ -15,7 +15,7 @@ _ADAPTERS = {
 }
 
 
-def get_synthetic_adapter(alias: str, allow_production: bool = False) -> dict[str, str]:
+def get_synthetic_adapter(alias: str, allow_production: bool = False) -> dict[str, Any]:
     normalized = alias.lower()
     adapter = _ADAPTERS.get(normalized)
     if not adapter:
@@ -37,7 +37,17 @@ def get_synthetic_adapter(alias: str, allow_production: bool = False) -> dict[st
         raise SyntheticAdapterError(f"{adapter['label']} synthetic adapter must target staging or explicitly enabled production.")
     if not url.startswith("https://"):
         raise SyntheticAdapterError("Synthetic adapter URL must use HTTPS.")
-    return {"alias": normalized, "label": adapter["label"], "url": url, "environment": environment}
+    headers = {"Accept": "application/json"}
+    bearer_token = os.getenv("ERRAGENT_SONIC_SYNTHETIC_BEARER_TOKEN", "").strip()
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    return {
+        "alias": normalized,
+        "label": adapter["label"],
+        "url": url,
+        "environment": environment,
+        "headers": headers,
+    }
 
 
 def create_question_proposal(alias: str, question: str, actor: str, db, allow_production: bool = False) -> dict[str, Any]:

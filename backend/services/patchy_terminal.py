@@ -29,7 +29,7 @@ COMMAND_HELP = (
     ("diagnostics", "Run health, incident, and log checks together"),
     ("probe [bty|saapp]", "Propose a read-only HTTP probe for approval"),
         ("synthetic [bty|saapp]", "Propose a registered synthetic HTTP assertion"),
-        ("synthetic ask sonic <question>", "Propose a staging Sonic Assistant question"),
+        ("synthetic ask sonic <question> [--production-read-only]", "Propose a Sonic Assistant question (staging by default)"),
     ("verify [bty|saapp]", "Run a two-step HITL stability verification"),
     ("plan verify [bty|saapp] stability", "Create a deterministic multi-step plan"),
     ("investigate [incident-id]", "Create an investigation or request an incident to investigate"),

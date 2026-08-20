@@ -323,6 +323,7 @@ async def _approve_and_execute_synthetic_question(db, proposal: dict[str, Any], 
             requests.post,
             adapter["url"],
             json={"question": action["question"]},
+            headers=adapter.get("headers"),
             timeout=min(int(action.get("timeoutSeconds", 30)), 30),
         )
         try:
@@ -337,6 +338,14 @@ async def _approve_and_execute_synthetic_question(db, proposal: dict[str, Any], 
             "answer": answer,
             "hasAnswer": bool(str(answer or "").strip()),
         }
+        if not (200 <= response.status_code < 300):
+            detail = None
+            if isinstance(body, dict):
+                detail = body.get("detail") or body.get("error") or body.get("message")
+            elif isinstance(body, str):
+                detail = body.strip()[:500]
+            if detail:
+                result["error"] = f"HTTP {response.status_code}: {detail}"
         final_status = "succeeded" if 200 <= response.status_code < 300 and result["hasAnswer"] else "failed"
     except Exception as exc:
         result = {"error": str(exc)}

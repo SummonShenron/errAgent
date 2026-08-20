@@ -185,6 +185,7 @@ The first staging assistant adapter uses:
 ```env
 ERRAGENT_SONIC_SYNTHETIC_URL=https://<sonic-staging-host>/<question-route>
 ERRAGENT_SONIC_SYNTHETIC_ENV=staging
+ERRAGENT_SONIC_SYNTHETIC_BEARER_TOKEN=<optional-service-bearer-token>
 ```
 
 Once Sonic exposes a staging question endpoint accepting `{"question": "..."}` and returning an answer field, use:
@@ -201,6 +202,7 @@ If staging is unavailable and the endpoint is explicitly safe for production rea
 ERRAGENT_ALLOW_PRODUCTION_SYNTHETICS=true
 ERRAGENT_SONIC_SYNTHETIC_ENV=production
 ERRAGENT_SONIC_SYNTHETIC_URL=https://<sonic-production-host>/<read-only-question-route>
+ERRAGENT_SONIC_SYNTHETIC_BEARER_TOKEN=<optional-service-bearer-token>
 ```
 
 Then the command must include the explicit flag:
@@ -209,7 +211,7 @@ Then the command must include the explicit flag:
 synthetic ask sonic "What is my balance?" --production-read-only
 ```
 
-Both the environment flag and command flag are required. The proposal displays `production_read_only` risk and still requires approval. The endpoint must be read-only, HTTPS, side-effect-free, bounded by timeout and response limits, and must not expose credentials or perform account mutations. Leave `ERRAGENT_ALLOW_PRODUCTION_SYNTHETICS` unset unless this production route has been reviewed.
+Both the environment flag and command flag are required. The proposal displays `production_read_only` risk and still requires approval. The endpoint must be read-only, HTTPS, side-effect-free, bounded by timeout and response limits, and must not expose credentials or perform account mutations. Leave `ERRAGENT_ALLOW_PRODUCTION_SYNTHETICS` unset unless this production route has been reviewed. If the Sonic endpoint requires authentication, set `ERRAGENT_SONIC_SYNTHETIC_BEARER_TOKEN`; Patchy forwards it as an outbound `Authorization: Bearer ...` header.
 
 BTY is a normal website, not a conversational assistant. Its current synthetic coverage is limited to registered health checks. Website workflows such as signing in, filling a form, submitting a request, and asserting the resulting page require a separate staging-only Playwright adapter. That adapter should be added only after the staging URL, test account strategy, selectors, and expected assertions are defined.
 
