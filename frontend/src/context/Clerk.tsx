@@ -37,7 +37,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({ children
         principal: localStorage.getItem('principal'),
         isReady,
         isSignedIn: Boolean(user),
-        getToken: () => getClerkToken({ skipCache: true }),
+        getToken: () => getClerkToken(),
       }}
     >
       {isReady ? children : <div style={{ padding: '20px' }}>Loading session...</div>}

@@ -41,6 +41,9 @@ class GitHubOpsService:
     async def fetch_branch_diff(self, repo: str, base: str, head: str) -> dict:
         """Fetches commit and file diff context between two branches."""
         self._require_token()
+        for branch in (base, head):
+            if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch) or branch.startswith(("/", "-")) or ".." in branch:
+                raise HTTPException(status_code=400, detail="Invalid GitHub branch format.")
         url = f"{self.api_base}/repos/{repo}/compare/{base}...{head}"
         
         async with httpx.AsyncClient() as client:
@@ -55,6 +58,102 @@ class GitHubOpsService:
                 "commit_count": len(commits),
                 "commits": commits[:10],
                 "files_changed": files[:15]
+            }
+
+    @github_network_retry
+    async def fetch_repository_context(self, repo: str, branch: str = "main") -> dict:
+        """Fetch a bounded read-only repository tree and source snippets for test planning."""
+        self._require_token()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            raise HTTPException(status_code=400, detail="Invalid GitHub repository format.")
+        if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch) or branch.startswith(("/", "-")) or ".." in branch:
+            raise HTTPException(status_code=400, detail="Invalid GitHub branch format.")
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            tree_res = await client.get(
+                f"{self.api_base}/repos/{repo}/git/trees/{branch}",
+                headers=self.headers,
+                params={"recursive": "1"},
+            )
+            tree_res.raise_for_status()
+            tree = tree_res.json().get("tree", [])
+            test_files = [
+                item["path"] for item in tree
+                if item.get("type") == "blob"
+                and (item.get("path", "").startswith(("test", "tests/", "backend/tests/"))
+                     or item.get("path", "").endswith(("_test.py", ".test.py", ".spec.ts", ".test.ts")))
+            ][:80]
+            return {"branch": branch, "testFiles": test_files}
+
+    @github_network_retry
+    async def fetch_repository_files(self, repo: str, branch: str, paths: list[str]) -> dict[str, str]:
+        """Fetch bounded text content for selected repository files without writing to GitHub."""
+        self._require_token()
+        if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch) or branch.startswith(("/", "-")) or ".." in branch or len(paths) > 8:
+            raise HTTPException(status_code=400, detail="Invalid test-plan file request.")
+        contents: dict[str, str] = {}
+        async with httpx.AsyncClient(timeout=15) as client:
+            for path in paths:
+                if not isinstance(path, str) or path.startswith("/") or ".." in path:
+                    continue
+                response = await client.get(
+                    f"{self.api_base}/repos/{repo}/contents/{path}",
+                    headers=self.headers,
+                    params={"ref": branch},
+                )
+                if response.status_code != 200:
+                    continue
+                payload = response.json()
+                encoded = payload.get("content", "")
+                if isinstance(encoded, str):
+                    contents[path] = base64.b64decode(encoded.encode("utf-8"), validate=False).decode("utf-8", errors="replace")[:30000]
+        return contents
+
+    @github_network_retry
+    async def dispatch_test_workflow(self, repo: str, workflow: str, branch: str, test_commands: list[str]) -> dict:
+        """Dispatch a repository-owned CI workflow for an approved, validated test plan."""
+        self._require_token()
+        if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", repo) or not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch):
+            raise HTTPException(status_code=400, detail="Invalid GitHub workflow target.")
+        if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", workflow) or len(test_commands) > 5:
+            raise HTTPException(status_code=400, detail="Invalid GitHub workflow request.")
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                f"{self.api_base}/repos/{repo}/actions/workflows/{workflow}/dispatches",
+                headers=self.headers,
+                json={"ref": branch, "inputs": {"test_commands": "\n".join(test_commands)}},
+            )
+            if response.status_code not in {201, 204}:
+                return {"status_code": response.status_code, "data": response.json()}
+            return {"status_code": response.status_code, "data": {"workflow": workflow, "ref": branch}}
+
+    @github_network_retry
+    async def find_latest_test_workflow_run(self, repo: str, workflow: str, branch: str) -> dict:
+        """Read the latest workflow-dispatch run for a branch."""
+        self._require_token()
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                f"{self.api_base}/repos/{repo}/actions/workflows/{workflow}/runs",
+                headers=self.headers,
+                params={"branch": branch, "event": "workflow_dispatch", "per_page": 1},
+            )
+            if response.status_code != 200:
+                return {"status_code": response.status_code, "data": response.json()}
+            runs = response.json().get("workflow_runs", [])
+            if not runs:
+                return {"status_code": 404, "data": {"message": "No workflow run found yet."}}
+            run = runs[0]
+            return {
+                "status_code": 200,
+                "data": {
+                    "id": run.get("id"),
+                    "status": run.get("status"),
+                    "conclusion": run.get("conclusion"),
+                    "html_url": run.get("html_url"),
+                    "head_sha": run.get("head_sha"),
+                    "created_at": run.get("created_at"),
+                    "updated_at": run.get("updated_at"),
+                },
             }
 
     @github_network_retry
