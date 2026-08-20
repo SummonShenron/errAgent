@@ -151,6 +151,7 @@ async def approve_and_execute_probe(
     proposal_id: str,
     actor: str,
     broker=None,
+    outbound_bearer_token: str | None = None,
 ) -> dict[str, Any]:
     proposal = get_proposal(db, proposal_id)
     if proposal.get("status") != "awaiting_approval":
@@ -158,7 +159,12 @@ async def approve_and_execute_probe(
             f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}"
         )
     if proposal.get("kind") == "synthetic_question":
-        return await _approve_and_execute_synthetic_question(db, proposal, actor)
+        return await _approve_and_execute_synthetic_question(
+            db,
+            proposal,
+            actor,
+            outbound_bearer_token=outbound_bearer_token,
+        )
     if proposal.get("kind") not in {"http_probe", "latency_probe", "synthetic_http"} or proposal.get("risk") not in {"read_only", "registered_read_only"}:
         raise PatchyProposalError("Only registered read-only probes and synthetic checks are supported")
 
@@ -296,7 +302,12 @@ async def approve_and_execute_probe(
     return completed
 
 
-async def _approve_and_execute_synthetic_question(db, proposal: dict[str, Any], actor: str) -> dict[str, Any]:
+async def _approve_and_execute_synthetic_question(
+    db,
+    proposal: dict[str, Any],
+    actor: str,
+    outbound_bearer_token: str | None = None,
+) -> dict[str, Any]:
     action = proposal.get("action") or {}
     try:
         adapter = get_synthetic_adapter(
@@ -319,11 +330,14 @@ async def _approve_and_execute_synthetic_question(db, proposal: dict[str, Any], 
     if claimed.modified_count != 1:
         raise PatchyProposalError("Proposal was already claimed")
     try:
+        request_headers = dict(adapter.get("headers") or {})
+        if outbound_bearer_token and "Authorization" not in request_headers:
+            request_headers["Authorization"] = f"Bearer {outbound_bearer_token}"
         response = await asyncio.to_thread(
             requests.post,
             adapter["url"],
             json={"question": action["question"]},
-            headers=adapter.get("headers"),
+            headers=request_headers or None,
             timeout=min(int(action.get("timeoutSeconds", 30)), 30),
         )
         try:

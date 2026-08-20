@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 from datetime import datetime, timezone, timedelta, time
 from bson import ObjectId
 import requests
-from fastapi import Body, FastAPI, HTTPException, Depends, status, BackgroundTasks, Header, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Depends, Request, status, BackgroundTasks, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -332,19 +332,30 @@ async def get_patchy_proposals(current_user: dict = Depends(get_current_user)):
 @app.post("/api/v1/patchy/proposals/{proposal_id}/approve", tags=["Patchy"])
 async def approve_patchy_proposal(
     proposal_id: str,
+    request: Request,
     current_user: dict = Depends(get_current_user),
 ):
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     actor = current_user.get("username") or current_user.get("sub") or "operator"
+    outbound_bearer_token: str | None = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        outbound_bearer_token = auth_header.split(" ", 1)[1].strip() or None
     try:
         proposal = db["patchy_proposals"].find_one({"_id": proposal_id})
         if proposal and proposal.get("kind") == "github_test_workflow":
             return await approve_and_dispatch_test_plan(db, proposal_id, actor, github_service)
         if proposal and proposal.get("kind") == "generated_test_commit":
             return await approve_and_commit_generated_test(db, proposal_id, actor, github_service)
-        return await approve_and_execute_probe(db, proposal_id, actor, broker=log_broker)
+        return await approve_and_execute_probe(
+            db,
+            proposal_id,
+            actor,
+            broker=log_broker,
+            outbound_bearer_token=outbound_bearer_token,
+        )
     except (PatchyProposalError, PatchyTestExecutionError, PatchyGeneratedTestError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
