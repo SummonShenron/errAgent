@@ -6,6 +6,7 @@ import { useDynamicFavicon } from './hooks/useDynamicFavicon';
 import { PatchyEmptyState } from './components/PatchyEmptyState';
 import { LiveConsole } from './components/LiveConsole';
 import { ReplayConsole } from './components/ReplayConsole';
+import { PatchyTerminal } from './components/PatchyTerminal';
 
 const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL =
@@ -157,6 +158,7 @@ function PatchyBrandMark({ activeIncidentsCount }: { activeIncidentsCount: numbe
 export default function App() {
   const { principal, getToken, isSignedIn } = useAppUser();
   const getTokenRef = useRef(getToken);
+  const selectedIncidentIdRef = useRef<string | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<IncidentDetailResponse | null>(null);
@@ -172,6 +174,7 @@ export default function App() {
   const [incidentTab, setIncidentTab] = useState<'open' | 'resolved'>('open');
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
+  const [patchyTerminalOpen, setPatchyTerminalOpen] = useState(false);
   const visibleIncidents = incidents.filter((incident) => {
     const status = (incident.status || 'open').toLowerCase();
     const isResolved = ['resolved', 'closed'].includes(status);
@@ -191,6 +194,10 @@ export default function App() {
   useEffect(() => {
     getTokenRef.current = getToken;
   }, [getToken]);
+
+  useEffect(() => {
+    selectedIncidentIdRef.current = selectedIncidentId;
+  }, [selectedIncidentId]);
 
   // --- DATA FETCHING & POLLING ---
   const fetchServices = useCallback(async () => {
@@ -301,31 +308,28 @@ export default function App() {
     }
 
     fetchIncidents();
-    if (selectedIncidentId) {
-      fetchIncidentDetail(selectedIncidentId);
-    }
 
     const source = new EventSource(`${API_BASE_URL}/events`);
 
     const refreshIncidents = () => {
       fetchIncidents();
-      if (selectedIncidentId) {
-        fetchIncidentDetail(selectedIncidentId);
+      const incidentId = selectedIncidentIdRef.current;
+      if (incidentId) {
+        fetchIncidentDetail(incidentId);
       }
     };
 
-    source.onmessage = refreshIncidents;
-    source.addEventListener('ping', refreshIncidents);
+    source.addEventListener('incidents', refreshIncidents);
 
     source.onerror = () => {
-      source.close();
+      console.warn('Incident event stream disconnected; browser will retry.');
     };
 
     return () => {
-      source.removeEventListener('ping', refreshIncidents);
+      source.removeEventListener('incidents', refreshIncidents);
       source.close();
     };
-  }, [fetchIncidents, fetchIncidentDetail, selectedIncidentId, isSignedIn]);
+  }, [fetchIncidents, fetchIncidentDetail, isSignedIn]);
 
   useEffect(() => {
     if (selectedIncidentId) {
@@ -508,7 +512,11 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
-          <button type="button" className="console-launch" onClick={() => setReplayOpen(true)}>Replay Workflow</button>
+          <button type="button" className="console-launch" onClick={() => setPatchyTerminalOpen(true)}>
+            <span aria-hidden="true">$</span>
+            Patchy
+          </button>
+          <button type="button" className="console-launch" onClick={() => setReplayOpen(true)}># Replay Workflow</button>
           <button type="button" className="console-launch" onClick={() => setConsoleOpen(true)}>
             <span aria-hidden="true">&gt;_</span>
             Console
@@ -523,6 +531,12 @@ export default function App() {
           </div>
         </div>
       </header>
+      <PatchyTerminal
+        open={patchyTerminalOpen}
+        onClose={() => setPatchyTerminalOpen(false)}
+        apiBaseUrl={API_BASE_URL}
+        getToken={getToken}
+      />
       <ReplayConsole
         open={replayOpen}
         onClose={() => setReplayOpen(false)}

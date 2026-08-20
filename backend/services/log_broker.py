@@ -98,6 +98,23 @@ class LogBroker:
         async with self._lock:
             self._subscribers.pop(queue, None)
 
+    async def get_history(
+        self,
+        service: str | None = None,
+        level: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        async with self._lock:
+            if service:
+                history = list(self._buffers.get(service, ()))
+            else:
+                history = [entry for buffer in self._buffers.values() for entry in buffer]
+
+        if level:
+            history = [entry for entry in history if entry["level"] == level]
+        history.sort(key=lambda entry: entry["timestamp"])
+        return history[-max(1, min(limit, 200)):]
+
     async def clear(self) -> None:
         async with self._lock:
             self._buffers.clear()

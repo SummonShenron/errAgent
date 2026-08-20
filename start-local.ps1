@@ -4,7 +4,7 @@ $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
 
 Write-Host "Starting ErrAgent backend on http://127.0.0.1:8006"
 Start-Process powershell `
-  -ArgumentList "-NoExit", "-Command", "cd '$repoRoot'; & '$venvPython' -m uvicorn backend.app.app:app --host 127.0.0.1 --port 8006" `
+  -ArgumentList "-NoExit", "-Command", "cd '$repoRoot'; & '$venvPython' -m uvicorn backend.app.app:app --host 127.0.0.1 --port 8006 --reload" `
   -WorkingDirectory $repoRoot
 
 Write-Host "Starting ErrAgent frontend on http://127.0.0.1:8086"
