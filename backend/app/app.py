@@ -33,6 +33,10 @@ from backend.utils.app_utils import (
 from backend.utils.isolation_auth import decode_access_token, get_current_user
 from backend.services.github_service import GitHubOpsService
 from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
+from backend.services.patchy_terminal import PatchyCommandError, execute_patchy_command
+from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, list_proposals
+from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan
+from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
 from backend.middleware.rbac import require_role
 
 logging.basicConfig(level=logging.INFO)
@@ -100,6 +104,10 @@ def send_discord_alert(report: dict) -> bool:
 
 class ReanalyzeRequest(BaseModel):
     instructions: str = ""
+
+
+class PatchyCommandRequest(BaseModel):
+    command: str
 
 # Enable CORS for Frontend development
 app.add_middleware(
@@ -252,16 +260,93 @@ def list_services():
 
 @app.get("/api/v1/events")
 async def incident_events():
+    def incident_signature() -> str:
+        db = get_db()
+        if db is None:
+            return "database-unavailable"
+
+        latest = db["incidents"].find_one(
+            {},
+            {"_id": 1, "status": 1, "updated_at": 1, "created_at": 1},
+            sort=[("updated_at", -1), ("created_at", -1)],
+        ) or {}
+        return json.dumps(
+            {
+                "count": db["incidents"].count_documents({}),
+                "id": str(latest.get("_id", "")),
+                "status": latest.get("status", ""),
+                "updated": str(latest.get("updated_at") or latest.get("created_at") or ""),
+            },
+            sort_keys=True,
+        )
+
     async def event_stream():
+        previous_signature = await asyncio.to_thread(incident_signature)
+        heartbeat_elapsed = 0
+        yield ": connected\n\n"
+
         while True:
             try:
-                yield "event: ping\ndata: {\"ts\": \"%s\"}\n\n" % datetime.now(timezone.utc).isoformat()
+                await asyncio.sleep(2)
+                heartbeat_elapsed += 2
+                current_signature = await asyncio.to_thread(incident_signature)
+
+                if current_signature != previous_signature:
+                    previous_signature = current_signature
+                    yield "event: incidents\ndata: %s\n\n" % current_signature
+
+                if heartbeat_elapsed >= 15:
+                    heartbeat_elapsed = 0
+                    yield ": keep-alive\n\n"
             except asyncio.CancelledError:
                 logger.info("Event stream closed")
                 break
-            await asyncio.sleep(15)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/v1/patchy/command", tags=["Patchy"])
+async def run_patchy_command(
+    payload: PatchyCommandRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    try:
+        actor = current_user.get("username") or current_user.get("sub") or "operator"
+        return await execute_patchy_command(payload.command, db, log_broker, actor=actor)
+    except PatchyCommandError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/patchy/proposals", tags=["Patchy"])
+async def get_patchy_proposals(current_user: dict = Depends(get_current_user)):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    return {"proposals": list_proposals(db)}
+
+
+@app.post("/api/v1/patchy/proposals/{proposal_id}/approve", tags=["Patchy"])
+async def approve_patchy_proposal(
+    proposal_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    try:
+        proposal = db["patchy_proposals"].find_one({"_id": proposal_id})
+        if proposal and proposal.get("kind") == "github_test_workflow":
+            return await approve_and_dispatch_test_plan(db, proposal_id, actor, github_service)
+        if proposal and proposal.get("kind") == "generated_test_commit":
+            return await approve_and_commit_generated_test(db, proposal_id, actor, github_service)
+        return await approve_and_execute_probe(db, proposal_id, actor, broker=log_broker)
+    except (PatchyProposalError, PatchyTestExecutionError, PatchyGeneratedTestError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/logs", status_code=status.HTTP_202_ACCEPTED, tags=["Logs"])
@@ -414,6 +499,17 @@ async def replay_workflow(
         "timeline": timeline
     }
 
+# --- SAAPP Integration Endpoints ---
+@app.get("/ops/context")
+async def get_ops_context():
+    return {
+        "incidents": [],
+        "health": [],
+        "warmingEvents": [],
+        "latency": [],
+        "deploys": [],
+        "riskScore": 0.0
+    }
 
 @app.get("/api/v1/replay", tags=["Replay"])
 async def get_replay(
@@ -807,6 +903,15 @@ async def merge_hotfix_pr(
         )
     if not remediation:
         raise HTTPException(status_code=404, detail="No remediation found for this incident.")
+
+    test_plan_id = remediation.get("test_plan_id")
+    if test_plan_id:
+        test_plan = db["patchy_test_plans"].find_one({"_id": test_plan_id})
+        if not test_plan or test_plan.get("status") != "passed":
+            raise HTTPException(
+                status_code=409,
+                detail="Test plan must complete successfully before the hotfix can be merged.",
+            )
 
     pr_number = remediation.get("pr_number")
     pr_url = remediation.get("pr_url")

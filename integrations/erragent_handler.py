@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
 import os
 import queue
+import sys
 import threading
 import urllib.request
 from typing import Any
@@ -12,6 +14,10 @@ _LEVELS = {
     logging.ERROR: "error",
     logging.CRITICAL: "error",
 }
+
+_HOOK_LOCK = threading.Lock()
+_HOOKED_LOGGERS: set[int] = set()
+_HOOKED_LOOPS: set[int] = set()
 
 
 def _json_fallback(value: Any) -> Any:
@@ -114,6 +120,81 @@ class ErrAgentHandler(logging.Handler):
         pass
 
 
+def _install_exception_hooks(target_logger: logging.Logger) -> None:
+    logger_key = id(target_logger)
+    with _HOOK_LOCK:
+        if logger_key not in _HOOKED_LOGGERS:
+            previous_sys_hook = sys.excepthook
+            previous_thread_hook = threading.excepthook
+
+            def capture_uncaught_exception(exc_type, exc_value, exc_traceback) -> None:
+                if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
+                    previous_sys_hook(exc_type, exc_value, exc_traceback)
+                    return
+                target_logger.error(
+                    "Unhandled process exception",
+                    exc_info=(exc_type, exc_value, exc_traceback),
+                    extra={"erragent_context": {"source": "sys.excepthook"}},
+                )
+                previous_sys_hook(exc_type, exc_value, exc_traceback)
+
+            def capture_thread_exception(args: threading.ExceptHookArgs) -> None:
+                if issubclass(args.exc_type, (KeyboardInterrupt, SystemExit)):
+                    previous_thread_hook(args)
+                    return
+                target_logger.error(
+                    "Unhandled thread exception in %s",
+                    args.thread.name if args.thread else "unknown-thread",
+                    exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+                    extra={"erragent_context": {"source": "threading.excepthook"}},
+                )
+                previous_thread_hook(args)
+
+            sys.excepthook = capture_uncaught_exception
+            threading.excepthook = capture_thread_exception
+            logging.captureWarnings(True)
+
+            warning_logger = logging.getLogger("py.warnings")
+            erragent_handler = next(
+                (handler for handler in target_logger.handlers if isinstance(handler, ErrAgentHandler)),
+                None,
+            )
+            if erragent_handler is not None and erragent_handler not in warning_logger.handlers:
+                warning_logger.addHandler(erragent_handler)
+            warning_logger.setLevel(logging.WARNING)
+            _HOOKED_LOGGERS.add(logger_key)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and id(loop) not in _HOOKED_LOOPS:
+            previous_asyncio_handler = loop.get_exception_handler()
+
+            def capture_asyncio_exception(event_loop, context) -> None:
+                exception = context.get("exception")
+                if isinstance(exception, asyncio.CancelledError):
+                    return
+                target_logger.error(
+                    "Unhandled asyncio exception: %s",
+                    context.get("message", "Unknown async task failure"),
+                    exc_info=(
+                        type(exception),
+                        exception,
+                        exception.__traceback__,
+                    ) if exception else None,
+                    extra={"erragent_context": {"source": "asyncio.exception_handler"}},
+                )
+                if previous_asyncio_handler:
+                    previous_asyncio_handler(event_loop, context)
+                else:
+                    event_loop.default_exception_handler(context)
+
+            loop.set_exception_handler(capture_asyncio_exception)
+            _HOOKED_LOOPS.add(id(loop))
+
+
 def install_erragent_logging(logger: logging.Logger | None = None) -> bool:
     erragent_url = os.getenv("ERRAGENT_URL")
     ingest_secret = os.getenv("ERRAGENT_INGEST_SECRET")
@@ -123,17 +204,16 @@ def install_erragent_logging(logger: logging.Logger | None = None) -> bool:
         return False
 
     target_logger = logger or logging.getLogger()
-    if any(isinstance(handler, ErrAgentHandler) for handler in target_logger.handlers):
-        return True
-
-    target_logger.addHandler(
-        ErrAgentHandler(
-            erragent_url=erragent_url,
-            ingest_secret=ingest_secret,
-            service=service,
-            timeout_seconds=timeout_seconds,
+    if not any(isinstance(handler, ErrAgentHandler) for handler in target_logger.handlers):
+        target_logger.addHandler(
+            ErrAgentHandler(
+                erragent_url=erragent_url,
+                ingest_secret=ingest_secret,
+                service=service,
+                timeout_seconds=timeout_seconds,
+            )
         )
-    )
     if target_logger.level == logging.NOTSET or target_logger.level > logging.INFO:
         target_logger.setLevel(logging.INFO)
+    _install_exception_hooks(target_logger)
     return True
