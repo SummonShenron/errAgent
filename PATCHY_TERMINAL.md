@@ -245,7 +245,7 @@ This guided mode keeps the current commands intact but auto-selects the next saf
 
 When a pending approval already exists, `test guide` resumes that approval card instead of creating duplicate work.
 
-To avoid long-running generation hangs, guided test generation/planning uses a bounded timeout controlled by `PATCHY_LLM_TIMEOUT_SECONDS` (default `60`). Long-running commands (`guide`, `test guide`, `test generate`, `test plan`, `test status`, `summarize`) and chained approvals (`generated_test_commit`, `github_test_workflow`) execute as background jobs: the API returns immediately with a `jobId` and the terminal polls `GET /api/v1/patchy/jobs/{jobId}` until the work completes, so no single request holds an LLM call open. Jobs live in memory for one hour and are not shared across workers.
+To avoid long-running generation hangs, guided test generation/planning uses a bounded timeout controlled by `PATCHY_LLM_TIMEOUT_SECONDS` (default `60`).
 
 Model selection is tiered. `PATCHY_FAST_MODEL` (for example `gemini-3.5-flash-lite`) covers low-stakes structured tasks: incident evidence synthesis (`summarize`) and test-plan command selection (`test plan`). `PATCHY_CODE_MODEL` covers code-writing tasks: incident patch generation and regression test drafting (`test generate`). Both fall back to `PATCHY_REASONING_MODEL` (default `gemini-3.5-flash`) when unset. Using a lite model for the fast tier noticeably shortens the guided `test guide` chain, while code generation keeps the stronger model to avoid broken patches and wasted approval round-trips.
 

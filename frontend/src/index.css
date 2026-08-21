@@ -1571,6 +1571,7 @@ button {
 @keyframes patchy-working-spin {
 	to { transform: rotate(360deg); }
 }
+.patchy-approval-required {
 	align-items: end;
 	gap: 12px;
 	margin: 10px 0 2px 15px;

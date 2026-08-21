@@ -144,8 +144,6 @@ function FlowTracker({ flow }: { flow: GuidedFlow }) {
   );
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
-
 export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTerminalProps) {
   const [command, setCommand] = useState('');
   const [running, setRunning] = useState(false);
@@ -214,40 +212,6 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
     return tokenPromiseRef.current;
   };
 
-  const pollPatchyJob = async (jobId: string): Promise<any> => {
-    for (let attempt = 0; attempt < 180; attempt += 1) {
-      const token = await getOperatorToken();
-      if (!token) throw new Error('Operator session unavailable.');
-      const response = await fetch(`${apiBaseUrl}/patchy/jobs/${jobId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const body = await response.json().catch(() => ({}));
-      if (response.status === 401) {
-        tokenPromiseRef.current = null;
-        tokenExpiresAtRef.current = 0;
-      }
-      if (!response.ok) throw new Error(body.detail || `Job polling failed: ${response.status}`);
-      if (Array.isArray(body.progress) && body.progress.length) {
-        const latest = body.progress[body.progress.length - 1];
-        setEntries((current) => current.map((entry) => entry.status === 'running' ? {
-          ...entry,
-          lines: [latest.message || 'Patchy is working…'],
-        } : entry));
-      }
-      if (body.status === 'completed') {
-        if (body.result && typeof body.result === 'object') return body.result;
-        throw new Error('Job completed without a result.');
-      }
-      if (body.status === 'failed') {
-        const latest = Array.isArray(body.progress) && body.progress.length ? body.progress[body.progress.length - 1] : null;
-        const suffix = latest?.message ? ` (last step: ${latest.message})` : '';
-        throw new Error(`${body.error || 'Patchy job failed.'}${suffix}`);
-      }
-      await sleep(2000);
-    }
-    throw new Error('Timed out waiting for Patchy to finish.');
-  };
-
   const executeCommand = async (commandText: string) => {
     const nextCommand = commandText.trim();
     if (!nextCommand || running) return;
@@ -292,25 +256,21 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
         tokenExpiresAtRef.current = 0;
       }
       if (!response.ok) throw new Error(body.detail || `Command failed: ${response.status}`);
-      let resultBody = body;
-      if (resultBody.status === 'running' && resultBody.jobId) {
-        resultBody = await pollPatchyJob(resultBody.jobId);
-      }
 
       setEntries((current) => current.map((entry) => entry.id === entryId ? {
         ...entry,
-        status: resultBody.status || 'success',
-        title: resultBody.title || 'Command complete',
-        lines: Array.isArray(resultBody.lines) ? resultBody.lines : [],
-        timestamp: resultBody.timestamp || new Date().toISOString(),
-        proposal: resultBody.data?.proposal,
-        clarification: resultBody.data?.clarification,
-        generatedTest: resultBody.data?.generatedTest,
-        plan: Array.isArray(resultBody.data?.plan?.steps) ? resultBody.data.plan : undefined,
-        testPlan: resultBody.data?.plan?.recommendations ? resultBody.data.plan : undefined,
-        guidedFlow: resultBody.data?.guidedFlow,
+        status: body.status || 'success',
+        title: body.title || 'Command complete',
+        lines: Array.isArray(body.lines) ? body.lines : [],
+        timestamp: body.timestamp || new Date().toISOString(),
+        proposal: body.data?.proposal,
+        clarification: body.data?.clarification,
+        generatedTest: body.data?.generatedTest,
+        plan: Array.isArray(body.data?.plan?.steps) ? body.data.plan : undefined,
+        testPlan: body.data?.plan?.recommendations ? body.data.plan : undefined,
+        guidedFlow: body.data?.guidedFlow,
       } : entry));
-      if (resultBody.data?.guidedFlow) setGuidedFlow(resultBody.data.guidedFlow);
+      if (body.data?.guidedFlow) setGuidedFlow(body.data.guidedFlow);
     } catch (error) {
       setEntries((current) => current.map((entry) => entry.id === entryId ? {
         ...entry,
@@ -353,13 +313,6 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
         tokenExpiresAtRef.current = 0;
       }
       if (!response.ok) throw new Error(body.detail || `Approval failed: ${response.status}`);
-      if (body.status === 'running' && body.jobId) {
-        setEntries((current) => current.map((entry) => entry.id === entryId ? {
-          ...entry,
-          lines: [...entry.lines, 'Executing and auto-progressing the guided flow in the background…'],
-        } : entry));
-        body = await pollPatchyJob(body.jobId);
-      }
       const result = body.result || {};
       const resultLines = body.status === 'succeeded'
         ? result.question

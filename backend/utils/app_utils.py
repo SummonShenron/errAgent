@@ -51,6 +51,31 @@ SERVICES = [
     }
 ]
 
+# Canonical service names mapped from known aliases. Middleware payloads arrive
+# with inconsistent names ("BTY", "btyapp", etc.); collapsing them keeps
+# incident cards merged and lets the service_registry resolve the right repo.
+_SERVICE_NAME_ALIASES = {
+    "bty": "btyapp",
+    "bty-fitness": "btyapp",
+    "bty fitness": "btyapp",
+    "bty-fitness-app": "btyapp",
+    "saapp": "saapp-widget",
+    "saapp-widget": "saapp-widget",
+}
+
+
+def canonicalize_service_name(name: Any) -> str:
+    """Normalize a raw service name to a canonical registry key."""
+    if not isinstance(name, str):
+        return "unknown-service"
+    cleaned = " ".join(name.strip().split()).lower()
+    if not cleaned:
+        return "unknown-service"
+    canonical = _SERVICE_NAME_ALIASES.get(cleaned, cleaned)
+    logger.info("[ingest] service_name canonicalized: raw=%r -> canonical=%r", name, canonical)
+    return canonical
+
+
 def serialize_mongo_doc(value: Any) -> Any:
     if isinstance(value, ObjectId):
         return str(value)
@@ -293,13 +318,31 @@ def _lookup_repo_from_service_registry(db, service_name: str, app_id: str | None
     if not service_name:
         return None
 
-    # Prefer app-specific service mapping when app_id is present.
+    canonical = canonicalize_service_name(service_name)
+    candidates = list(dict.fromkeys([service_name.strip(), canonical, service_name.strip().lower()]))
+
     registry_entry = {}
-    if app_id:
-        registry_entry = db["service_registry"].find_one({"service_name": service_name, "app_id": app_id}) or {}
+    for candidate in candidates:
+        if app_id:
+            registry_entry = db["service_registry"].find_one(
+                {"service_name": candidate, "app_id": app_id}
+            ) or {}
+            if registry_entry:
+                break
+        if not registry_entry:
+            registry_entry = db["service_registry"].find_one({"service_name": candidate}) or {}
+        if registry_entry:
+            break
 
     if not registry_entry:
-        registry_entry = db["service_registry"].find_one({"service_name": service_name}) or {}
+        # Case-insensitive fallback across the whole registry.
+        import re as _re
+        for candidate in candidates:
+            registry_entry = db["service_registry"].find_one(
+                {"service_name": {"$regex": f"^{_re.escape(candidate)}$", "$options": "i"}}
+            ) or {}
+            if registry_entry:
+                break
 
     for key in ("target_repo", "repository", "repo"):
         value = registry_entry.get(key)
@@ -352,11 +395,10 @@ def ingest_machine_payload(
     app_default_repo: str | None = None,
 ) -> str:
     normalized_payload = dict(payload)
-    normalized_payload["service_name"] = (
+    normalized_payload["service_name"] = canonicalize_service_name(
         normalized_payload.get("service_name")
         or normalized_payload.get("project_name")
         or normalized_payload.get("logger")
-        or "unknown-service"
     )
     normalized_payload["repository"] = _resolve_target_repository(
         db,
