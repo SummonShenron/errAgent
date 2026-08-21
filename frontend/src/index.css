@@ -516,6 +516,63 @@ button {
 	}
 }
 
+@media (max-width: 560px) {
+	.landing-shell {
+		padding: 8px;
+	}
+
+	.landing-card {
+		padding: 14px;
+		border-radius: 12px;
+	}
+
+	.landing-card h1 {
+		font-size: 1.85rem;
+		margin-bottom: 8px;
+	}
+
+	.landing-card .eyebrow {
+		font-size: 0.66rem;
+		margin-bottom: 2px;
+	}
+
+	.landing-copy {
+		font-size: 0.88rem;
+		line-height: 1.38;
+		margin-bottom: 10px;
+	}
+
+	.landing-actions {
+		margin-bottom: 8px;
+	}
+
+	.landing-actions .primary-action {
+		width: 100%;
+		padding: 8px 12px;
+		font-size: 0.9rem;
+	}
+
+	.landing-note {
+		font-size: 0.76rem;
+		line-height: 1.3;
+	}
+}
+
+@media (max-width: 420px) {
+	.landing-shell {
+		padding: 6px;
+	}
+
+	.landing-card {
+		padding: 12px;
+		border-radius: 10px;
+	}
+
+	.landing-card h1 {
+		font-size: 1.7rem;
+	}
+}
+
 .retry-analysis-btn {
 	display: inline-flex !important;
 	align-items: center;
@@ -672,19 +729,49 @@ button {
 	}
 
 	.panel {
-		padding: 12px;
+		padding: 9px;
+		border-radius: 10px;
+	}
+
+	.incident-list,
+	.services-list {
+		gap: 7px;
 	}
 
 	.incident-card {
-		padding: 10px;
+		padding: 8px;
+		border-radius: 10px;
 	}
 
 	.incident-card-top {
 		align-items: flex-start;
+		margin-bottom: 4px;
 	}
 
 	.service-name {
-		font-size: 0.9rem;
+		font-size: 0.85rem;
+	}
+
+	.incident-error {
+		font-size: 0.8rem;
+	}
+
+	.service-item {
+		padding: 8px;
+		border-radius: 10px;
+	}
+
+	.service-info strong {
+		font-size: 0.86rem;
+	}
+
+	.service-url {
+		font-size: 0.68rem;
+	}
+
+	.service-status {
+		font-size: 0.62rem;
+		padding: 3px 7px;
 	}
 
 	.dismiss-btn {

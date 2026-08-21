@@ -34,7 +34,7 @@ COMMAND_HELP = (
     ("plan verify [bty|saapp] stability", "Create a deterministic multi-step plan"),
     ("investigate [incident-id]", "Create an investigation or request an incident to investigate"),
     ("next [plan-id]", "Run the next pending step for a plan"),
-    ("guide [plan-id|incident-id]", "Propose the next plan step for approval (no manual next typing)"),
+    ("guide [plan-id|incident-id]", "Run guided approvals for plan steps and incident test workflow"),
     ("explain <incident-id>", "Show structured incident details and analysis"),
     ("summarize <incident-id>", "Use the LLM to synthesize supplied incident evidence"),
     ("confirm deployed <incident-id>", "Record operator-confirmed production deployment"),
@@ -265,8 +265,49 @@ async def execute_patchy_command(
     if command == "guide":
         if len(args) > 1:
             raise PatchyCommandError("Usage: guide [plan-id|incident-id]")
+        target = args[0] if args else None
+        if target and not target.startswith("plan_"):
+            incident_id = target
+            active_plan = db["patchy_plans"].find_one(
+                {"subject.incidentId": incident_id, "status": {"$ne": "completed"}},
+                sort=[("updated_at", -1), ("created_at", -1)],
+            )
+            if not active_plan:
+                latest_plan = db["patchy_plans"].find_one(
+                    {"subject.incidentId": incident_id},
+                    sort=[("updated_at", -1), ("created_at", -1)],
+                )
+                if not latest_plan:
+                    bootstrap = await execute_patchy_command(f"investigate {incident_id}", db, broker, actor=actor)
+                    plan = (bootstrap.get("data") or {}).get("plan") or {}
+                    if not plan.get("_id"):
+                        raise PatchyCommandError(
+                            f"Could not start guided flow for incident: {incident_id}."
+                        )
+                    active_plan = db["patchy_plans"].find_one({"_id": plan["_id"]})
+                elif latest_plan.get("status") == "completed":
+                    guided_test = await execute_patchy_command(f"test guide {incident_id}", db, broker, actor=actor)
+                    return {
+                        **guided_test,
+                        "title": f"Guided incident workflow · {guided_test.get('title', 'step complete')}",
+                        "lines": [
+                            "Investigation plan is complete. Continuing with guided test workflow.",
+                            "",
+                            *(guided_test.get("lines") or []),
+                        ],
+                        "data": serialize_mongo_doc(
+                            {
+                                **(guided_test.get("data") or {}),
+                                "guidedIncidentId": incident_id,
+                                "guidedPhase": "test_workflow",
+                            }
+                        ),
+                    }
+                else:
+                    active_plan = latest_plan
+            target = active_plan["_id"]
         try:
-            proposal = create_plan_step_proposal(db, actor, args[0] if args else None)
+            proposal = create_plan_step_proposal(db, actor, target)
         except (PatchyPlanError, ValueError) as exc:
             raise PatchyCommandError(str(exc)) from exc
         action = proposal["action"]

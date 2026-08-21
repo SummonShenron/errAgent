@@ -385,3 +385,35 @@ def test_test_guide_selects_generate_when_no_generated_test_exists(monkeypatch):
         assert "Patchy selected next step: test generate inc_1" in result["lines"][0]
 
     asyncio.run(scenario())
+
+
+def test_guide_incident_hands_off_to_test_guide_after_plan_completion(monkeypatch):
+    monkeypatch.setattr(
+        terminal_module,
+        "run_service_health_checks",
+        lambda: [
+            {"service": "BTY Fitness", "status": "healthy", "latency_ms": 120, "http_status": 200, "details": {}},
+            {"service": "SAAPP Widget", "status": "healthy", "latency_ms": 130, "http_status": 200, "details": {}},
+        ],
+    )
+
+    async def scenario():
+        broker = LogBroker()
+        db = FakeDB()
+        await execute_patchy_command("investigate inc_resolved", db, broker, actor="operator")
+        monkeypatch.setattr(terminal_module, "generate_regression_test", lambda *_args, **_kwargs: {
+            "_id": "generated_test_123",
+            "repository": "SummonShenron/SAAPP",
+            "test_branch": "hotfix/test",
+            "test_file": "tests/test_regression.py",
+            "test_name": "test_regression_path",
+            "rationale": "Covers the failing path",
+            "content": "def test_regression_path():\n    assert True\n",
+        })
+        monkeypatch.setattr(terminal_module, "GitHubOpsService", lambda: object())
+
+        guided = await execute_patchy_command("guide inc_resolved", db, broker, actor="operator")
+        assert guided["title"].startswith("Guided incident workflow")
+        assert guided["data"]["guidedPhase"] == "test_workflow"
+
+    asyncio.run(scenario())

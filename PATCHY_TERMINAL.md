@@ -341,7 +341,7 @@ Or use guided approval mode:
 guide [plan-id|incident-id]
 ```
 
-`guide` proposes the next allowlisted plan step as an approval card. The operator can approve or disapprove without typing the next command manually. If you pass an incident ID, Patchy resolves it to the latest active plan for that incident.
+`guide` proposes the next allowlisted plan step as an approval card. The operator can approve or disapprove without typing the next command manually. If you pass an incident ID, Patchy resolves it to the latest active plan for that incident. Once that incident plan is complete, `guide <incident-id>` automatically pivots into `test guide <incident-id>` so the same command can carry the full incident-to-test flow.
 
 You can still target a specific plan with `next <plan-id>`.
 
