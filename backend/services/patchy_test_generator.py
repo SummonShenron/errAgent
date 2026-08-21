@@ -56,9 +56,12 @@ async def generate_regression_test(incident_id: str, db, github: GitHubOpsServic
         raise PatchyGeneratedTestError("A repository and hotfix branch are required before generating a regression test")
     base_branch = str(remediation.get("base_branch") or "main")
     try:
-        diff = await github.fetch_branch_diff(repo, base_branch, branch)
+        diff, repository_context = await asyncio.gather(
+            github.fetch_branch_diff(repo, base_branch, branch),
+            github.fetch_repository_context(repo, branch),
+        )
         source_files = [path for path in diff.get("files_changed", []) if path.endswith(".py")][:4]
-        test_files = [path for path in (await github.fetch_repository_context(repo, branch)).get("testFiles", [])][:4]
+        test_files = [path for path in repository_context.get("testFiles", [])][:4]
         files = await github.fetch_repository_files(repo, branch, list(dict.fromkeys(source_files + test_files))[:8])
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:

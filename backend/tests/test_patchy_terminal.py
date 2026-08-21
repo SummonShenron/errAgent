@@ -417,3 +417,38 @@ def test_guide_incident_hands_off_to_test_guide_after_plan_completion(monkeypatc
         assert guided["data"]["guidedPhase"] == "test_workflow"
 
     asyncio.run(scenario())
+
+
+def test_test_guide_stops_at_final_execution_hitl(monkeypatch):
+    async def scenario():
+        broker = LogBroker()
+        db = FakeDB()
+
+        db.collections["patchy_generated_tests"].documents.append({
+            "_id": "generated_test_final",
+            "incident_id": "inc_1",
+            "repository": "SummonShenron/SAAPP",
+            "test_branch": "hotfix/test",
+            "test_file": "tests/test_regression.py",
+            "test_name": "test_regression_path",
+            "rationale": "covers fail path",
+            "content": "def test_regression_path():\n    assert True\n",
+            "status": "committed",
+        })
+
+        db.collections["patchy_test_plans"].documents.append({
+            "_id": "testplan_final",
+            "incident_id": "inc_1",
+            "repository": "SummonShenron/SAAPP",
+            "test_branch": "hotfix/test",
+            "status": "ready_for_review",
+            "plan": {"recommendations": [{"command": "python -m pytest tests/test_regression.py"}]},
+            "updated_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(timezone.utc),
+        })
+
+        result = await execute_patchy_command("test guide inc_1", db, broker, actor="operator")
+        assert result["status"] == "approval_required"
+        assert result["data"]["proposal"]["kind"] == "github_test_workflow"
+
+    asyncio.run(scenario())

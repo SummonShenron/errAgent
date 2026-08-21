@@ -49,12 +49,14 @@ async def create_test_plan(incident_id: str, db, github: GitHubOpsService) -> di
     branch = str(remediation.get("head_branch") or remediation.get("base_file_branch") or "main")
     base_branch = str(remediation.get("base_branch") or "main")
     branch_source = "hotfix" if remediation.get("head_branch") else "base"
-    repository_context = await github.fetch_repository_context(repo, branch)
+    repository_context, diff_context = await asyncio.gather(
+        github.fetch_repository_context(repo, branch),
+        github.fetch_branch_diff(repo, base_branch, branch) if branch != base_branch else asyncio.sleep(0, result={"commit_count": 0, "commits": [], "files_changed": []}),
+    )
     test_files = repository_context.get("testFiles", [])
     if not test_files:
         raise PatchyTestPlanError("No repository test files were found on the configured base branch")
     file_contents = await github.fetch_repository_files(repo, branch, test_files[:8])
-    diff_context = await github.fetch_branch_diff(repo, base_branch, branch) if branch != base_branch else {"commit_count": 0, "commits": [], "files_changed": []}
 
     evidence = serialize_mongo_doc({
         "incident": incident,

@@ -288,19 +288,42 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
         timestamp: body.completed_at || new Date().toISOString(),
       } : entry));
 
+      if (Array.isArray(body.autoProgress) && body.autoProgress.length) {
+        const progressLines = body.autoProgress.flatMap((step: any, index: number) => [
+          `${index + 1}. ${step.title || 'Guided step'}`,
+          ...(Array.isArray(step.lines) ? step.lines.slice(0, 3).map((line: string) => `   ${line}`) : []),
+        ]);
+        setEntries((current) => [...current, {
+          id: crypto.randomUUID(),
+          status: 'success',
+          title: 'Patchy auto-progressed workflow',
+          lines: progressLines,
+          timestamp: new Date().toISOString(),
+        }]);
+      }
+
       if (body.nextProposal) {
         const next = body.nextProposal as PatchyProposal;
         setEntries((current) => [...current, {
           id: crypto.randomUUID(),
-          command: `${next.workflow?.goal || 'verification'} · step ${next.workflow?.step || 2}`,
+          command: next.workflow
+            ? `${next.workflow.goal || 'verification'} · step ${next.workflow.step || 2}`
+            : `guided next · ${next.summary}`,
           status: 'approval_required',
-          title: 'Next diagnostic step requires approval',
+          title: next.kind === 'github_test_workflow'
+            ? 'Final approval required to execute tests'
+            : 'Next diagnostic step requires approval',
           lines: [
             next.summary,
             `Method: ${next.action.method}`,
             `URL: ${next.action.url}`,
-            `Samples: ${next.action.samples || 1}`,
-            'Patchy selected this step from the previous health evidence.',
+            ...(next.action.samples ? [`Samples: ${next.action.samples}`] : []),
+            ...(next.kind === 'github_test_workflow'
+              ? [
+                  `Branch: ${next.action.branch || 'n/a'}`,
+                  'Patchy auto-completed prior steps and paused at final HITL execution gate.',
+                ]
+              : ['Patchy selected this step from the previous health evidence.']),
           ],
           timestamp: next.created_at || new Date().toISOString(),
           proposal: next,

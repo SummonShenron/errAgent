@@ -35,7 +35,7 @@ from backend.services.github_service import GitHubOpsService
 from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
 from backend.services.patchy_terminal import PatchyCommandError, execute_patchy_command
 from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_plan_step_proposal, list_proposals
-from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan
+from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
 from backend.middleware.rbac import require_role
 
@@ -329,6 +329,50 @@ async def get_patchy_proposals(current_user: dict = Depends(get_current_user)):
     return {"proposals": list_proposals(db)}
 
 
+async def _run_test_guide_until_handoff(db, actor: str, incident_id: str) -> dict[str, Any]:
+    progress: list[dict[str, Any]] = []
+    next_proposal = None
+
+    for _ in range(4):
+        step = await execute_patchy_command(f"test guide {incident_id}", db, log_broker, actor=actor)
+        progress.append(
+            {
+                "status": step.get("status", "success"),
+                "title": step.get("title", "Patchy guided step"),
+                "lines": step.get("lines", []),
+                "guidedCommand": (step.get("data") or {}).get("guidedCommand"),
+            }
+        )
+
+        if step.get("status") == "approval_required" and (step.get("data") or {}).get("proposal"):
+            next_proposal = (step.get("data") or {}).get("proposal")
+            break
+
+        if step.get("status") in {"error", "warning"}:
+            break
+
+        guided_command = str((step.get("data") or {}).get("guidedCommand") or "")
+        if not guided_command.startswith("test plan "):
+            break
+
+    return {"progress": progress, "nextProposal": next_proposal}
+
+
+def _build_test_status_report(result: dict[str, Any]) -> dict[str, Any]:
+    run = result.get("workflowRun", {})
+    status_text = result.get("status", "unknown")
+    status = "success" if status_text == "passed" else "warning" if status_text == "running" else "error"
+    return {
+        "status": status,
+        "title": "Patchy test execution status",
+        "lines": [
+            f"Status: {status_text}",
+            f"Workflow run: {run.get('status', 'queued')} / {run.get('conclusion', 'pending')}",
+            f"Run URL: {run.get('html_url', 'not available')}",
+        ],
+    }
+
+
 @app.post("/api/v1/patchy/proposals/{proposal_id}/approve", tags=["Patchy"])
 async def approve_patchy_proposal(
     proposal_id: str,
@@ -346,9 +390,25 @@ async def approve_patchy_proposal(
     try:
         proposal = db["patchy_proposals"].find_one({"_id": proposal_id})
         if proposal and proposal.get("kind") == "github_test_workflow":
-            return await approve_and_dispatch_test_plan(db, proposal_id, actor, github_service)
+            completed = await approve_and_dispatch_test_plan(db, proposal_id, actor, github_service)
+            if completed.get("status") == "succeeded" and proposal.get("testPlanId"):
+                try:
+                    status_result = await get_test_execution_status(proposal["testPlanId"], db, github_service)
+                    completed["workflowReport"] = _build_test_status_report(status_result)
+                except PatchyTestExecutionError:
+                    pass
+            return completed
         if proposal and proposal.get("kind") == "generated_test_commit":
-            return await approve_and_commit_generated_test(db, proposal_id, actor, github_service)
+            completed = await approve_and_commit_generated_test(db, proposal_id, actor, github_service)
+            if completed.get("status") == "succeeded":
+                generated = db["patchy_generated_tests"].find_one({"_id": proposal.get("generatedTestId")})
+                incident_id = generated.get("incident_id") if generated else None
+                if isinstance(incident_id, str) and incident_id:
+                    handoff = await _run_test_guide_until_handoff(db, actor, incident_id)
+                    completed["autoProgress"] = handoff.get("progress", [])
+                    if handoff.get("nextProposal"):
+                        completed["nextProposal"] = handoff["nextProposal"]
+            return completed
         return await approve_and_execute_probe(
             db,
             proposal_id,

@@ -3,6 +3,7 @@ import logging
 import base64
 import hashlib
 import re
+import time
 from pathlib import Path
 import httpx
 from dotenv import load_dotenv
@@ -29,6 +30,21 @@ class GitHubOpsService:
         if self.token:
             self.headers["Authorization"] = f"Bearer {self.token}"
         self.api_base = "https://api.github.com"
+        self._cache_ttl_seconds = 45
+        self._cache: dict[str, tuple[float, object]] = {}
+
+    def _cache_get(self, key: str):
+        hit = self._cache.get(key)
+        if not hit:
+            return None
+        expires_at, value = hit
+        if time.time() >= expires_at:
+            self._cache.pop(key, None)
+            return None
+        return value
+
+    def _cache_set(self, key: str, value: object) -> None:
+        self._cache[key] = (time.time() + self._cache_ttl_seconds, value)
 
     def _require_token(self) -> None:
         if not self.token or not self.token.strip():
@@ -45,6 +61,10 @@ class GitHubOpsService:
             if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch) or branch.startswith(("/", "-")) or ".." in branch:
                 raise HTTPException(status_code=400, detail="Invalid GitHub branch format.")
         url = f"{self.api_base}/repos/{repo}/compare/{base}...{head}"
+        cache_key = f"branch_diff:{repo}:{base}:{head}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
         
         async with httpx.AsyncClient() as client:
             res = await client.get(url, headers=self.headers)
@@ -54,11 +74,13 @@ class GitHubOpsService:
             commits = [c["commit"]["message"].strip() for c in data.get("commits", [])]
             files = [f["filename"] for f in data.get("files", [])]
             
-            return {
+            result = {
                 "commit_count": len(commits),
                 "commits": commits[:10],
                 "files_changed": files[:15]
             }
+            self._cache_set(cache_key, result)
+            return result
 
     @github_network_retry
     async def fetch_repository_context(self, repo: str, branch: str = "main") -> dict:
@@ -68,6 +90,11 @@ class GitHubOpsService:
             raise HTTPException(status_code=400, detail="Invalid GitHub repository format.")
         if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch) or branch.startswith(("/", "-")) or ".." in branch:
             raise HTTPException(status_code=400, detail="Invalid GitHub branch format.")
+
+        cache_key = f"repo_ctx:{repo}:{branch}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
 
         async with httpx.AsyncClient(timeout=15) as client:
             tree_res = await client.get(
@@ -83,7 +110,9 @@ class GitHubOpsService:
                 and (item.get("path", "").startswith(("test", "tests/", "backend/tests/"))
                      or item.get("path", "").endswith(("_test.py", ".test.py", ".spec.ts", ".test.ts")))
             ][:80]
-            return {"branch": branch, "testFiles": test_files}
+            result = {"branch": branch, "testFiles": test_files}
+            self._cache_set(cache_key, result)
+            return result
 
     @github_network_retry
     async def fetch_repository_files(self, repo: str, branch: str, paths: list[str]) -> dict[str, str]:
@@ -91,6 +120,11 @@ class GitHubOpsService:
         self._require_token()
         if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch) or branch.startswith(("/", "-")) or ".." in branch or len(paths) > 8:
             raise HTTPException(status_code=400, detail="Invalid test-plan file request.")
+        normalized_paths = tuple(sorted(path for path in paths if isinstance(path, str)))
+        cache_key = f"repo_files:{repo}:{branch}:{'|'.join(normalized_paths)}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
         contents: dict[str, str] = {}
         async with httpx.AsyncClient(timeout=15) as client:
             for path in paths:
@@ -107,6 +141,7 @@ class GitHubOpsService:
                 encoded = payload.get("content", "")
                 if isinstance(encoded, str):
                     contents[path] = base64.b64decode(encoded.encode("utf-8"), validate=False).decode("utf-8", errors="replace")[:30000]
+        self._cache_set(cache_key, contents)
         return contents
 
     @github_network_retry
