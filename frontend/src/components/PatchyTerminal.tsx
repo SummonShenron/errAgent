@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, Fragment, useEffect, useRef, useState } from 'react';
 import { PatchyTerminalMascot, type PatchyTerminalActivity } from './PatchyTerminalMascot';
 
 type PatchyTerminalProps = {
@@ -14,6 +14,15 @@ type PatchyClarification = {
   id: string;
   question: string;
   options: Array<{ label: string; value: string }>;
+};
+
+type GuidedFlowStep = { key: string; label: string; status: 'done' | 'active' | 'pending' };
+
+type GuidedFlow = {
+  kind: string;
+  incidentId?: string;
+  planId?: string;
+  steps: GuidedFlowStep[];
 };
 
 type PatchyTestPlan = {
@@ -73,6 +82,7 @@ type TerminalEntry = {
     test_branch: string;
   };
   testPlan?: PatchyTestPlan;
+  guidedFlow?: GuidedFlow;
   plan?: {
     _id: string;
     status: string;
@@ -92,9 +102,54 @@ type TerminalEntry = {
 
 const QUICK_COMMANDS = ['plan verify bty stability', 'verify bty', 'incidents', 'list incidents resolved', 'probe', 'render status all', 'ops status all', 'help'];
 
+const WORKING_HINTS: Array<[RegExp, string[]]> = [
+  [/^test generate/, ['Fetching hotfix branch diff from GitHub…', 'Reading existing test files…', 'Drafting regression test with the LLM (can take up to 60s)…']],
+  [/^test plan/, ['Fetching repository context from GitHub…', 'Reading candidate test files…', 'Drafting test plan with the LLM (can take up to 60s)…']],
+  [/^(test )?guide/, ['Reading workflow state…', 'Selecting the next step…', 'Running step — LLM-backed steps can take up to 60s…']],
+  [/^summarize/, ['Collecting incident evidence…', 'Synthesizing with the LLM…']],
+];
+
+function WorkingIndicator({ command }: { command?: string }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const hints = WORKING_HINTS.find(([pattern]) => pattern.test(command || ''))?.[1]
+    ?? ['Contacting services…', 'Waiting for the backend…'];
+  const hint = hints[Math.min(hints.length - 1, Math.floor(elapsed / 8))];
+  return (
+    <div className="patchy-working">
+      <span className="patchy-working-spinner" aria-hidden="true" />
+      <span>{hint}</span>
+      <time>{elapsed}s</time>
+    </div>
+  );
+}
+
+function FlowTracker({ flow }: { flow: GuidedFlow }) {
+  return (
+    <div className="patchy-flow-tracker" aria-label="Guided workflow progress">
+      {flow.steps.map((step, index) => (
+        <Fragment key={step.key}>
+          {index > 0 && <span className="patchy-flow-connector" aria-hidden="true" />}
+          <span className={`patchy-flow-step ${step.status}`}>
+            <i>{step.status === 'done' ? '✓' : index + 1}</i>
+            {step.label}
+          </span>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
 export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTerminalProps) {
   const [command, setCommand] = useState('');
   const [running, setRunning] = useState(false);
+  const [guidedFlow, setGuidedFlow] = useState<GuidedFlow | null>(null);
   const [entries, setEntries] = useState<TerminalEntry[]>([
     {
       id: 'welcome',
@@ -159,12 +214,36 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
     return tokenPromiseRef.current;
   };
 
+  const pollPatchyJob = async (jobId: string): Promise<any> => {
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      const token = await getOperatorToken();
+      if (!token) throw new Error('Operator session unavailable.');
+      const response = await fetch(`${apiBaseUrl}/patchy/jobs/${jobId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        tokenPromiseRef.current = null;
+        tokenExpiresAtRef.current = 0;
+      }
+      if (!response.ok) throw new Error(body.detail || `Job polling failed: ${response.status}`);
+      if (body.status === 'completed') {
+        if (body.result && typeof body.result === 'object') return body.result;
+        throw new Error('Job completed without a result.');
+      }
+      if (body.status === 'failed') throw new Error(body.error || 'Patchy job failed.');
+      await sleep(2000);
+    }
+    throw new Error('Timed out waiting for Patchy to finish.');
+  };
+
   const executeCommand = async (commandText: string) => {
     const nextCommand = commandText.trim();
     if (!nextCommand || running) return;
 
     if (nextCommand.toLowerCase() === 'clear') {
       setEntries([]);
+      setGuidedFlow(null);
       setCommand('');
       setHistory((current) => [...current, nextCommand]);
       setHistoryIndex(-1);
@@ -177,7 +256,7 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
       command: nextCommand,
       status: 'running',
       title: 'Running command',
-      lines: ['Patchy is checking the system...'],
+      lines: [],
       timestamp: new Date().toISOString(),
     }]);
     setHistory((current) => [...current, nextCommand]);
@@ -202,19 +281,25 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
         tokenExpiresAtRef.current = 0;
       }
       if (!response.ok) throw new Error(body.detail || `Command failed: ${response.status}`);
+      let resultBody = body;
+      if (resultBody.status === 'running' && resultBody.jobId) {
+        resultBody = await pollPatchyJob(resultBody.jobId);
+      }
 
       setEntries((current) => current.map((entry) => entry.id === entryId ? {
         ...entry,
-        status: body.status || 'success',
-        title: body.title || 'Command complete',
-        lines: Array.isArray(body.lines) ? body.lines : [],
-        timestamp: body.timestamp || new Date().toISOString(),
-        proposal: body.data?.proposal,
-        clarification: body.data?.clarification,
-        generatedTest: body.data?.generatedTest,
-        plan: Array.isArray(body.data?.plan?.steps) ? body.data.plan : undefined,
-        testPlan: body.data?.plan?.recommendations ? body.data.plan : undefined,
+        status: resultBody.status || 'success',
+        title: resultBody.title || 'Command complete',
+        lines: Array.isArray(resultBody.lines) ? resultBody.lines : [],
+        timestamp: resultBody.timestamp || new Date().toISOString(),
+        proposal: resultBody.data?.proposal,
+        clarification: resultBody.data?.clarification,
+        generatedTest: resultBody.data?.generatedTest,
+        plan: Array.isArray(resultBody.data?.plan?.steps) ? resultBody.data.plan : undefined,
+        testPlan: resultBody.data?.plan?.recommendations ? resultBody.data.plan : undefined,
+        guidedFlow: resultBody.data?.guidedFlow,
       } : entry));
+      if (resultBody.data?.guidedFlow) setGuidedFlow(resultBody.data.guidedFlow);
     } catch (error) {
       setEntries((current) => current.map((entry) => entry.id === entryId ? {
         ...entry,
@@ -251,12 +336,19 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
-      const body = await response.json().catch(() => ({}));
+      let body = await response.json().catch(() => ({}));
       if (response.status === 401) {
         tokenPromiseRef.current = null;
         tokenExpiresAtRef.current = 0;
       }
       if (!response.ok) throw new Error(body.detail || `Approval failed: ${response.status}`);
+      if (body.status === 'running' && body.jobId) {
+        setEntries((current) => current.map((entry) => entry.id === entryId ? {
+          ...entry,
+          lines: [...entry.lines, 'Executing and auto-progressing the guided flow in the background…'],
+        } : entry));
+        body = await pollPatchyJob(body.jobId);
+      }
       const result = body.result || {};
       const resultLines = body.status === 'succeeded'
         ? result.question
@@ -288,6 +380,9 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
         timestamp: body.completed_at || new Date().toISOString(),
       } : entry));
 
+      const flow = body.guidedFlow as GuidedFlow | undefined;
+      if (flow) setGuidedFlow(flow);
+
       if (Array.isArray(body.autoProgress) && body.autoProgress.length) {
         const progressLines = body.autoProgress.flatMap((step: any, index: number) => [
           `${index + 1}. ${step.title || 'Guided step'}`,
@@ -299,6 +394,7 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
           title: 'Patchy auto-progressed workflow',
           lines: progressLines,
           timestamp: new Date().toISOString(),
+          guidedFlow: flow,
         }]);
       }
 
@@ -327,6 +423,7 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
           ],
           timestamp: next.created_at || new Date().toISOString(),
           proposal: next,
+          guidedFlow: flow,
         }]);
       } else if (body.workflowReport) {
         setEntries((current) => [...current, {
@@ -335,6 +432,7 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
           title: body.workflowReport.title || 'Verification complete',
           lines: body.workflowReport.lines || [],
           timestamp: new Date().toISOString(),
+          guidedFlow: flow,
         }]);
       }
     } catch (error) {
@@ -419,6 +517,8 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
               ))}
             </div>
 
+            {guidedFlow && <FlowTracker flow={guidedFlow} />}
+
             <div className="patchy-terminal-output" ref={viewportRef} aria-live="polite">
               {entries.length === 0 && <div className="console-empty">Terminal cleared.</div>}
               {entries.map((entry) => (
@@ -429,6 +529,8 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
                     <strong>{entry.title}</strong>
                     <time>{new Date(entry.timestamp).toLocaleTimeString([], { hour12: false })}</time>
                   </div>
+                  {entry.status === 'running' && <WorkingIndicator command={entry.command} />}
+                  {entry.guidedFlow && entry.status !== 'running' && <FlowTracker flow={entry.guidedFlow} />}
                   {entry.lines.length > 0 && <pre>{entry.lines.join('\n')}</pre>}
                   {entry.status === 'clarification_required' && entry.clarification && (
                     <div className="patchy-clarification-panel">

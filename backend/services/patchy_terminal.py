@@ -4,8 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.services.log_broker import LogBroker
-from backend.services.patchy_hitl import create_probe_proposal, create_verification_workflow
-from backend.services.patchy_hitl import create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
+from backend.services.patchy_hitl import PatchyProposalError, create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
 from backend.services.patchy_planner import PatchyPlanError, build_plan_report, create_incident_investigation_plan, create_plan, next_step, record_adaptive_step_result, get_plan, get_latest_active_plan
 from backend.services.production_ops import collect_production_status, format_production_status
 from backend.services.patchy_reasoning import PatchyReasoningError, synthesize_incident
@@ -105,6 +104,75 @@ def _format_incident_lines(incidents: list[dict[str, Any]]) -> list[str]:
         f"{incident['_id']} | {incident.get('service_name', 'unknown')} | {incident.get('status', 'open')} | {incident.get('error_message', 'No message')}"
         for incident in incidents
     ]
+
+
+_TEST_FLOW_STEPS = [
+    ("generate", "Draft regression test"),
+    ("approve", "Approve test commit"),
+    ("plan", "Draft test plan"),
+    ("run", "Approve CI execution"),
+    ("status", "Check CI result"),
+]
+
+
+def _guided_test_flow(db, incident_id: str, current_key: str | None) -> dict[str, Any]:
+    """Compute done/active/pending state for each guided test-workflow step."""
+    completed_through = -1
+    generated = db["patchy_generated_tests"].find_one(
+        {"incident_id": incident_id},
+        sort=[("updated_at", -1), ("created_at", -1)],
+    )
+    if generated:
+        completed_through = 0
+        if str(generated.get("status") or "").lower() == "committed":
+            completed_through = 1
+    plan = db["patchy_test_plans"].find_one(
+        {"incident_id": incident_id},
+        sort=[("updated_at", -1), ("created_at", -1)],
+    )
+    if plan:
+        completed_through = max(completed_through, 2)
+        plan_status = str(plan.get("status") or "").lower()
+        if plan_status in {"running", "failed"}:
+            completed_through = 3
+        elif plan_status == "passed":
+            completed_through = len(_TEST_FLOW_STEPS) - 1
+            current_key = None
+    current_index = next(
+        (index for index, (key, _label) in enumerate(_TEST_FLOW_STEPS) if key == current_key),
+        None,
+    )
+    steps = []
+    for index, (key, label) in enumerate(_TEST_FLOW_STEPS):
+        if index <= completed_through:
+            step_status = "done"
+        elif current_index is not None and index == current_index:
+            step_status = "active"
+        elif current_index is None and index == completed_through + 1:
+            step_status = "active"
+        else:
+            step_status = "pending"
+        steps.append({"key": key, "label": label, "status": step_status})
+    return {"kind": "test_workflow", "incidentId": incident_id, "steps": steps}
+
+
+def _guided_investigation_flow(plan: dict[str, Any], current_step_index: int, incident_id: str | None) -> dict[str, Any]:
+    steps = []
+    for step in plan.get("steps", []):
+        index = int(step.get("index", 0))
+        if step.get("status") == "completed":
+            step_status = "done"
+        elif index == current_step_index:
+            step_status = "active"
+        else:
+            step_status = "pending"
+        steps.append({"key": f"step_{index}", "label": step.get("command", f"step {index + 1}"), "status": step_status})
+    return {
+        "kind": "investigation",
+        "incidentId": incident_id,
+        "planId": plan.get("_id"),
+        "steps": steps,
+    }
 
 
 async def _run_health(target: str) -> dict[str, Any]:
@@ -311,6 +379,12 @@ async def execute_patchy_command(
         except (PatchyPlanError, ValueError) as exc:
             raise PatchyCommandError(str(exc)) from exc
         action = proposal["action"]
+        plan_doc = db["patchy_plans"].find_one({"_id": proposal["planId"]}) or {}
+        guided_flow = _guided_investigation_flow(
+            plan_doc,
+            int(proposal["planStepIndex"]),
+            (plan_doc.get("subject") or {}).get("incidentId"),
+        )
         return _response(
             "approval_required",
             "Approval required for guided next step",
@@ -322,7 +396,7 @@ async def execute_patchy_command(
                 f"Reason: {action.get('reason', 'n/a')}",
                 "Risk: allowlisted Patchy command only.",
             ],
-            {"proposal": proposal},
+            {"proposal": proposal, "guidedFlow": guided_flow},
         )
 
     if command == "health":
@@ -477,7 +551,7 @@ async def execute_patchy_command(
                                 "Risk: new regression test on the hotfix branch only.",
                                 "Patchy resumed the existing pending step.",
                             ],
-                            {"proposal": proposal},
+                            {"proposal": proposal, "guidedFlow": _guided_test_flow(db, incident_id, "approve")},
                         )
                     selected_command = f"test approve {generated['_id']}"
                 elif generated_status == "committed":
@@ -509,7 +583,7 @@ async def execute_patchy_command(
                                         "Risk: repository CI only; no local shell execution.",
                                         "Patchy resumed the existing pending step.",
                                     ],
-                                    {"proposal": proposal},
+                                    {"proposal": proposal, "guidedFlow": _guided_test_flow(db, incident_id, "run")},
                                 )
                             selected_command = f"test run {plan['_id']}"
                         elif plan_status == "running":
@@ -523,7 +597,12 @@ async def execute_patchy_command(
                                     f"Test plan: {plan['_id']}",
                                     "Status: passed",
                                 ],
-                                {"incidentId": incident_id, "testPlanId": plan["_id"], "status": "passed"},
+                                {
+                                    "incidentId": incident_id,
+                                    "testPlanId": plan["_id"],
+                                    "status": "passed",
+                                    "guidedFlow": _guided_test_flow(db, incident_id, None),
+                                },
                             )
                         else:
                             selected_command = f"test status {plan['_id']}"
@@ -532,6 +611,7 @@ async def execute_patchy_command(
 
             guided = await execute_patchy_command(selected_command, db, broker, actor=actor)
             guided_lines = [f"Patchy selected next step: {selected_command}", "", *(guided.get("lines") or [])]
+            current_key = selected_command.split()[1] if selected_command.startswith("test ") else None
             return {
                 **guided,
                 "title": f"Guided test workflow · {guided.get('title', 'step complete')}",
@@ -540,6 +620,7 @@ async def execute_patchy_command(
                     {
                         **(guided.get("data") or {}),
                         "guidedCommand": selected_command,
+                        "guidedFlow": _guided_test_flow(db, incident_id, current_key),
                     }
                 ),
             }

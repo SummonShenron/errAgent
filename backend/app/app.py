@@ -33,8 +33,8 @@ from backend.utils.app_utils import (
 from backend.utils.isolation_auth import decode_access_token, get_current_user
 from backend.services.github_service import GitHubOpsService
 from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
-from backend.services.patchy_terminal import PatchyCommandError, execute_patchy_command
-from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_plan_step_proposal, list_proposals
+from backend.services.patchy_terminal import PatchyCommandError, _guided_test_flow, execute_patchy_command
+from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_plan_step_proposal, get_proposal, list_proposals
 from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
 from backend.middleware.rbac import require_role
@@ -48,6 +48,43 @@ internal_log_handler: InternalLogHandler | None = None
 
 github_service = GitHubOpsService()
 SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
+
+# In-memory async job store for long-running Patchy work. Entries expire after an hour.
+_patchy_jobs: dict[str, dict[str, Any]] = {}
+PATCHY_JOB_TTL_SECONDS = 3600
+_PATCHY_ASYNC_COMMANDS = (
+    "guide",
+    "test guide",
+    "test generate",
+    "test plan",
+    "test status",
+    "summarize",
+)
+
+
+def _patchy_job_is_async(command_text: str) -> bool:
+    lowered = command_text.strip().lower()
+    return any(lowered == prefix or lowered.startswith(f"{prefix} ") for prefix in _PATCHY_ASYNC_COMMANDS)
+
+
+def _patchy_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
+    snapshot = {"jobId": job["id"], "status": job["status"], "createdAt": job["created_at"].isoformat()}
+    if job.get("completed_at"):
+        snapshot["completedAt"] = job["completed_at"].isoformat()
+    for key in ("result", "error", "proposalId"):
+        if job.get(key) is not None:
+            snapshot[key] = job[key]
+    return snapshot
+
+
+def _store_patchy_job(job_id: str, **fields) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=PATCHY_JOB_TTL_SECONDS)
+    for stale_id in [key for key, value in _patchy_jobs.items() if value["created_at"] < cutoff]:
+        _patchy_jobs.pop(stale_id, None)
+    job = {"id": job_id, "status": "running", "created_at": now, **fields}
+    _patchy_jobs[job_id] = job
+    return job
 # Backward-compatible legacy shared secret for existing app-to-app clients.
 INGEST_WEBHOOK_SECRET = os.getenv("INGEST_WEBHOOK_SECRET") or os.getenv("ERRAGENT_INGEST_SECRET")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
@@ -308,17 +345,42 @@ async def incident_events():
 @app.post("/api/v1/patchy/command", tags=["Patchy"])
 async def run_patchy_command(
     payload: PatchyCommandRequest,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
 ):
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+
+    if _patchy_job_is_async(payload.command):
+        job = _store_patchy_job(f"patchy_job_{uuid4().hex}", command=payload.command)
+
+        async def run_command_job() -> None:
+            try:
+                result = await execute_patchy_command(payload.command, db, log_broker, actor=actor)
+                job.update({"status": "completed", "result": result, "completed_at": datetime.now(timezone.utc)})
+            except PatchyCommandError as exc:
+                job.update({"status": "failed", "error": str(exc), "completed_at": datetime.now(timezone.utc)})
+            except Exception as exc:
+                logger.exception("Patchy command job failed: %s", payload.command)
+                job.update({"status": "failed", "error": f"Unexpected error: {exc}", "completed_at": datetime.now(timezone.utc)})
+
+        background_tasks.add_task(run_command_job)
+        return {"status": "running", "jobId": job["id"], "title": "Patchy is working", "lines": []}
 
     try:
-        actor = current_user.get("username") or current_user.get("sub") or "operator"
         return await execute_patchy_command(payload.command, db, log_broker, actor=actor)
     except PatchyCommandError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/patchy/jobs/{job_id}", tags=["Patchy"])
+async def get_patchy_job(job_id: str, current_user: dict = Depends(get_current_user)):
+    job = _patchy_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired.")
+    return _patchy_job_snapshot(job)
 
 
 @app.get("/api/v1/patchy/proposals", tags=["Patchy"])
@@ -332,30 +394,75 @@ async def get_patchy_proposals(current_user: dict = Depends(get_current_user)):
 async def _run_test_guide_until_handoff(db, actor: str, incident_id: str) -> dict[str, Any]:
     progress: list[dict[str, Any]] = []
     next_proposal = None
+    guided_flow = None
 
     for _ in range(4):
         step = await execute_patchy_command(f"test guide {incident_id}", db, log_broker, actor=actor)
+        step_data = step.get("data") or {}
+        if step_data.get("guidedFlow"):
+            guided_flow = step_data["guidedFlow"]
         progress.append(
             {
                 "status": step.get("status", "success"),
                 "title": step.get("title", "Patchy guided step"),
                 "lines": step.get("lines", []),
-                "guidedCommand": (step.get("data") or {}).get("guidedCommand"),
+                "guidedCommand": step_data.get("guidedCommand"),
             }
         )
 
-        if step.get("status") == "approval_required" and (step.get("data") or {}).get("proposal"):
-            next_proposal = (step.get("data") or {}).get("proposal")
+        if step.get("status") == "approval_required" and step_data.get("proposal"):
+            next_proposal = step_data.get("proposal")
             break
 
         if step.get("status") in {"error", "warning"}:
             break
 
-        guided_command = str((step.get("data") or {}).get("guidedCommand") or "")
+        guided_command = str(step_data.get("guidedCommand") or "")
         if not guided_command.startswith("test plan "):
             break
 
-    return {"progress": progress, "nextProposal": next_proposal}
+    return {"progress": progress, "nextProposal": next_proposal, "guidedFlow": guided_flow}
+
+
+async def _execute_proposal_approval(
+    db,
+    proposal: dict[str, Any],
+    proposal_id: str,
+    actor: str,
+    outbound_bearer_token: str | None,
+) -> dict[str, Any]:
+    if proposal.get("kind") == "github_test_workflow":
+        completed = await approve_and_dispatch_test_plan(db, proposal_id, actor, github_service)
+        if completed.get("status") == "succeeded" and proposal.get("testPlanId"):
+            try:
+                status_result = await get_test_execution_status(proposal["testPlanId"], db, github_service)
+                completed["workflowReport"] = _build_test_status_report(status_result)
+            except PatchyTestExecutionError:
+                pass
+            test_plan = db["patchy_test_plans"].find_one({"_id": proposal["testPlanId"]}) or {}
+            if test_plan.get("incident_id"):
+                completed["guidedFlow"] = _guided_test_flow(db, test_plan["incident_id"], "status")
+        return completed
+    if proposal.get("kind") == "generated_test_commit":
+        completed = await approve_and_commit_generated_test(db, proposal_id, actor, github_service)
+        if completed.get("status") == "succeeded":
+            generated = db["patchy_generated_tests"].find_one({"_id": proposal.get("generatedTestId")})
+            incident_id = generated.get("incident_id") if generated else None
+            if isinstance(incident_id, str) and incident_id:
+                handoff = await _run_test_guide_until_handoff(db, actor, incident_id)
+                completed["autoProgress"] = handoff.get("progress", [])
+                if handoff.get("guidedFlow"):
+                    completed["guidedFlow"] = handoff["guidedFlow"]
+                if handoff.get("nextProposal"):
+                    completed["nextProposal"] = handoff["nextProposal"]
+        return completed
+    return await approve_and_execute_probe(
+        db,
+        proposal_id,
+        actor,
+        broker=log_broker,
+        outbound_bearer_token=outbound_bearer_token,
+    )
 
 
 def _build_test_status_report(result: dict[str, Any]) -> dict[str, Any]:
@@ -377,6 +484,7 @@ def _build_test_status_report(result: dict[str, Any]) -> dict[str, Any]:
 async def approve_patchy_proposal(
     proposal_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
 ):
     db = get_db()
@@ -387,35 +495,35 @@ async def approve_patchy_proposal(
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         outbound_bearer_token = auth_header.split(" ", 1)[1].strip() or None
+
+    proposal = db["patchy_proposals"].find_one({"_id": proposal_id})
+    if not proposal:
+        raise HTTPException(status_code=404, detail=f"Proposal not found: {proposal_id}")
+
+    kind = proposal.get("kind")
+    if kind in {"generated_test_commit", "github_test_workflow"}:
+        if proposal.get("status") != "awaiting_approval":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}",
+            )
+        job = _store_patchy_job(f"patchy_job_{uuid4().hex}", proposalId=proposal_id)
+
+        async def run_approval_job() -> None:
+            try:
+                result = await _execute_proposal_approval(db, proposal, proposal_id, actor, outbound_bearer_token)
+                job.update({"status": "completed", "result": result, "completed_at": datetime.now(timezone.utc)})
+            except (PatchyProposalError, PatchyTestExecutionError, PatchyGeneratedTestError) as exc:
+                job.update({"status": "failed", "error": str(exc), "completed_at": datetime.now(timezone.utc)})
+            except Exception as exc:
+                logger.exception("Patchy approval job failed: %s", proposal_id)
+                job.update({"status": "failed", "error": f"Unexpected error: {exc}", "completed_at": datetime.now(timezone.utc)})
+
+        background_tasks.add_task(run_approval_job)
+        return {"status": "running", "jobId": job["id"], "proposalId": proposal_id}
+
     try:
-        proposal = db["patchy_proposals"].find_one({"_id": proposal_id})
-        if proposal and proposal.get("kind") == "github_test_workflow":
-            completed = await approve_and_dispatch_test_plan(db, proposal_id, actor, github_service)
-            if completed.get("status") == "succeeded" and proposal.get("testPlanId"):
-                try:
-                    status_result = await get_test_execution_status(proposal["testPlanId"], db, github_service)
-                    completed["workflowReport"] = _build_test_status_report(status_result)
-                except PatchyTestExecutionError:
-                    pass
-            return completed
-        if proposal and proposal.get("kind") == "generated_test_commit":
-            completed = await approve_and_commit_generated_test(db, proposal_id, actor, github_service)
-            if completed.get("status") == "succeeded":
-                generated = db["patchy_generated_tests"].find_one({"_id": proposal.get("generatedTestId")})
-                incident_id = generated.get("incident_id") if generated else None
-                if isinstance(incident_id, str) and incident_id:
-                    handoff = await _run_test_guide_until_handoff(db, actor, incident_id)
-                    completed["autoProgress"] = handoff.get("progress", [])
-                    if handoff.get("nextProposal"):
-                        completed["nextProposal"] = handoff["nextProposal"]
-            return completed
-        return await approve_and_execute_probe(
-            db,
-            proposal_id,
-            actor,
-            broker=log_broker,
-            outbound_bearer_token=outbound_bearer_token,
-        )
+        return await _execute_proposal_approval(db, proposal, proposal_id, actor, outbound_bearer_token)
     except (PatchyProposalError, PatchyTestExecutionError, PatchyGeneratedTestError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

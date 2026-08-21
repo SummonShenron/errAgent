@@ -58,7 +58,7 @@ async def synthesize_incident(incident_id: str, db, broker: LogBroker) -> dict[s
     client = genai.Client(api_key=api_key)
     prompt = PATCHY_EVIDENCE_SYNTHESIS_PROMPT.format(evidence=evidence)
     response = client.models.generate_content(
-        model=os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
+        model=os.getenv("PATCHY_FAST_MODEL") or os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",

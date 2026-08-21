@@ -75,7 +75,7 @@ async def create_test_plan(incident_id: str, db, github: GitHubOpsService) -> di
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 client.models.generate_content,
-                model=os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
+                model=os.getenv("PATCHY_FAST_MODEL") or os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
                 contents=PATCHY_TEST_PLAN_PROMPT.format(evidence=evidence),
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",

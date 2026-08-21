@@ -847,7 +847,7 @@ CRITICAL RETRY RULES:
             prompt_to_use = prompt if attempt_index == 0 else f"{prompt}\n{retry_suffix}"
             logger.info("--> [errAgent AI] Starting generation attempt=%s for incident=%s", attempt_index + 1, incident_id)
             response = client.models.generate_content(
-                model="gemini-3.5-flash",
+                model=os.getenv("PATCHY_CODE_MODEL") or os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
                 contents=prompt_to_use,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",

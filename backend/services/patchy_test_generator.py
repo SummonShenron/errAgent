@@ -84,7 +84,7 @@ async def generate_regression_test(incident_id: str, db, github: GitHubOpsServic
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 client.models.generate_content,
-                model=os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
+                model=os.getenv("PATCHY_CODE_MODEL") or os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
                 contents=PATCHY_REGRESSION_TEST_PROMPT.format(evidence=evidence),
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",

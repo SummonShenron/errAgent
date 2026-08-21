@@ -1436,6 +1436,95 @@ button {
 .patchy-approval-panel {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.patchy-flow-tracker {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	margin: 6px 0 8px;
+}
+
+.patchy-flow-step {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 8px;
+	border: 1px solid #334155;
+	border-radius: 999px;
+	font-size: 11px;
+	color: #64748b;
+	background: rgba(15, 23, 42, 0.6);
+}
+
+.patchy-flow-step i {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 15px;
+	height: 15px;
+	border-radius: 50%;
+	font-style: normal;
+	font-size: 10px;
+	background: #1e293b;
+	color: #94a3b8;
+}
+
+.patchy-flow-step.done {
+	color: #4ade80;
+	border-color: rgba(74, 222, 128, 0.35);
+}
+
+.patchy-flow-step.done i {
+	background: rgba(74, 222, 128, 0.15);
+	color: #4ade80;
+}
+
+.patchy-flow-step.active {
+	color: #60a5fa;
+	border-color: rgba(96, 165, 250, 0.5);
+	animation: patchy-terminal-pulse 0.9s infinite alternate;
+}
+
+.patchy-flow-step.active i {
+	background: rgba(96, 165, 250, 0.18);
+	color: #60a5fa;
+}
+
+.patchy-flow-connector {
+	width: 10px;
+	height: 1px;
+	background: #334155;
+}
+
+.patchy-working {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 8px 0 0 15px;
+	color: #94a3b8;
+	font-size: 12px;
+}
+
+.patchy-working time {
+	margin-left: auto;
+	color: #64748b;
+	font-variant-numeric: tabular-nums;
+}
+
+.patchy-working-spinner {
+	width: 12px;
+	height: 12px;
+	border: 2px solid #334155;
+	border-top-color: #60a5fa;
+	border-radius: 50%;
+	animation: patchy-working-spin 0.8s linear infinite;
+}
+
+@keyframes patchy-working-spin {
+	to { transform: rotate(360deg); }
+}
 	align-items: end;
 	gap: 12px;
 	margin: 10px 0 2px 15px;
