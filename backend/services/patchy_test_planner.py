@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -16,6 +17,16 @@ from backend.utils.app_utils import serialize_mongo_doc
 
 class PatchyTestPlanError(ValueError):
     pass
+
+
+# Dedicated executor for blocking LLM calls so the shared default pool
+# (health checks, SSE, DB) can never starve test planning.
+_llm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="patchy-llm")
+
+
+async def _run_llm(callable_):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_llm_executor, callable_)
 
 
 _PYTEST_COMMAND = re.compile(r"^(?:pytest|python -m pytest) (?P<file>[^\s:]+)(?P<nodes>(::[A-Za-z_][A-Za-z0-9_]*)*)$")
@@ -73,8 +84,7 @@ async def create_test_plan(incident_id: str, db, github: GitHubOpsService) -> di
     llm_timeout_seconds = int(os.getenv("PATCHY_LLM_TIMEOUT_SECONDS", "60"))
     try:
         response = await asyncio.wait_for(
-            asyncio.to_thread(
-                client.models.generate_content,
+            _run_llm(lambda: client.models.generate_content(
                 model=os.getenv("PATCHY_FAST_MODEL") or os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
                 contents=PATCHY_TEST_PLAN_PROMPT.format(evidence=evidence),
                 config=types.GenerateContentConfig(
@@ -82,7 +92,7 @@ async def create_test_plan(incident_id: str, db, github: GitHubOpsService) -> di
                     response_schema=PatchyTestPlan,
                     temperature=0.1,
                 ),
-            ),
+            )),
             timeout=llm_timeout_seconds,
         )
     except asyncio.TimeoutError as exc:

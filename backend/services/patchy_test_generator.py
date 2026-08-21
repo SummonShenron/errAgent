@@ -2,6 +2,7 @@ import asyncio
 import ast
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -18,6 +19,16 @@ from backend.utils.app_utils import serialize_mongo_doc
 
 class PatchyGeneratedTestError(ValueError):
     pass
+
+
+# Dedicated executor for blocking LLM calls so the shared default pool
+# (health checks, SSE, DB) can never starve test generation.
+_llm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="patchy-llm")
+
+
+async def _run_llm(callable_):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_llm_executor, callable_)
 
 
 def _validate_generated_test(test: PatchyGeneratedTest) -> None:
@@ -82,8 +93,7 @@ async def generate_regression_test(incident_id: str, db, github: GitHubOpsServic
     llm_timeout_seconds = int(os.getenv("PATCHY_LLM_TIMEOUT_SECONDS", "60"))
     try:
         response = await asyncio.wait_for(
-            asyncio.to_thread(
-                client.models.generate_content,
+            _run_llm(lambda: client.models.generate_content(
                 model=os.getenv("PATCHY_CODE_MODEL") or os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
                 contents=PATCHY_REGRESSION_TEST_PROMPT.format(evidence=evidence),
                 config=types.GenerateContentConfig(
@@ -91,7 +101,7 @@ async def generate_regression_test(incident_id: str, db, github: GitHubOpsServic
                     response_schema=PatchyGeneratedTest,
                     temperature=0.1,
                 ),
-            ),
+            )),
             timeout=llm_timeout_seconds,
         )
     except asyncio.TimeoutError as exc:

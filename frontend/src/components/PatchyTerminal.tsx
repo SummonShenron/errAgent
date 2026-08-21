@@ -227,11 +227,22 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
         tokenExpiresAtRef.current = 0;
       }
       if (!response.ok) throw new Error(body.detail || `Job polling failed: ${response.status}`);
+      if (Array.isArray(body.progress) && body.progress.length) {
+        const latest = body.progress[body.progress.length - 1];
+        setEntries((current) => current.map((entry) => entry.status === 'running' ? {
+          ...entry,
+          lines: [latest.message || 'Patchy is working…'],
+        } : entry));
+      }
       if (body.status === 'completed') {
         if (body.result && typeof body.result === 'object') return body.result;
         throw new Error('Job completed without a result.');
       }
-      if (body.status === 'failed') throw new Error(body.error || 'Patchy job failed.');
+      if (body.status === 'failed') {
+        const latest = Array.isArray(body.progress) && body.progress.length ? body.progress[body.progress.length - 1] : null;
+        const suffix = latest?.message ? ` (last step: ${latest.message})` : '';
+        throw new Error(`${body.error || 'Patchy job failed.'}${suffix}`);
+      }
       await sleep(2000);
     }
     throw new Error('Timed out waiting for Patchy to finish.');

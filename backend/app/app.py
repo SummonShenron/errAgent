@@ -52,6 +52,7 @@ SENTRY_WEBHOOK_SECRET = os.getenv("SENTRY_WEBHOOK_SECRET")
 # In-memory async job store for long-running Patchy work. Entries expire after an hour.
 _patchy_jobs: dict[str, dict[str, Any]] = {}
 PATCHY_JOB_TTL_SECONDS = 3600
+PATCHY_JOB_TIMEOUT_SECONDS = int(os.getenv("PATCHY_JOB_TIMEOUT_SECONDS", "120"))
 _PATCHY_ASYNC_COMMANDS = (
     "guide",
     "test guide",
@@ -71,10 +72,22 @@ def _patchy_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
     snapshot = {"jobId": job["id"], "status": job["status"], "createdAt": job["created_at"].isoformat()}
     if job.get("completed_at"):
         snapshot["completedAt"] = job["completed_at"].isoformat()
+    if job.get("progress"):
+        snapshot["progress"] = list(job["progress"])
     for key in ("result", "error", "proposalId"):
         if job.get(key) is not None:
             snapshot[key] = job[key]
     return snapshot
+
+
+def _record_patchy_job_progress(job: dict[str, Any], message: str, **fields) -> None:
+    job.setdefault("progress", []).append(
+        {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "message": message,
+            **fields,
+        }
+    )
 
 
 def _store_patchy_job(job_id: str, **fields) -> dict[str, Any]:
@@ -82,7 +95,7 @@ def _store_patchy_job(job_id: str, **fields) -> dict[str, Any]:
     cutoff = now - timedelta(seconds=PATCHY_JOB_TTL_SECONDS)
     for stale_id in [key for key, value in _patchy_jobs.items() if value["created_at"] < cutoff]:
         _patchy_jobs.pop(stale_id, None)
-    job = {"id": job_id, "status": "running", "created_at": now, **fields}
+    job = {"id": job_id, "status": "running", "created_at": now, "progress": [], **fields}
     _patchy_jobs[job_id] = job
     return job
 # Backward-compatible legacy shared secret for existing app-to-app clients.
@@ -355,15 +368,29 @@ async def run_patchy_command(
 
     if _patchy_job_is_async(payload.command):
         job = _store_patchy_job(f"patchy_job_{uuid4().hex}", command=payload.command)
+        _record_patchy_job_progress(job, "Command accepted for background execution")
+        logger.info("Patchy job %s started for command: %s", job["id"], payload.command)
 
         async def run_command_job() -> None:
             try:
-                result = await execute_patchy_command(payload.command, db, log_broker, actor=actor)
+                _record_patchy_job_progress(job, "Executing command")
+                result = await asyncio.wait_for(
+                    execute_patchy_command(payload.command, db, log_broker, actor=actor),
+                    timeout=PATCHY_JOB_TIMEOUT_SECONDS,
+                )
+                _record_patchy_job_progress(job, "Command finished", resultStatus=result.get("status"))
                 job.update({"status": "completed", "result": result, "completed_at": datetime.now(timezone.utc)})
+            except asyncio.TimeoutError:
+                message = f"Patchy job timed out after {PATCHY_JOB_TIMEOUT_SECONDS}s"
+                logger.warning("Patchy job %s timed out: %s", job["id"], payload.command)
+                _record_patchy_job_progress(job, message)
+                job.update({"status": "failed", "error": message, "completed_at": datetime.now(timezone.utc)})
             except PatchyCommandError as exc:
+                _record_patchy_job_progress(job, "Command failed", error=str(exc))
                 job.update({"status": "failed", "error": str(exc), "completed_at": datetime.now(timezone.utc)})
             except Exception as exc:
                 logger.exception("Patchy command job failed: %s", payload.command)
+                _record_patchy_job_progress(job, "Unexpected failure", error=str(exc))
                 job.update({"status": "failed", "error": f"Unexpected error: {exc}", "completed_at": datetime.now(timezone.utc)})
 
         background_tasks.add_task(run_command_job)
@@ -391,12 +418,14 @@ async def get_patchy_proposals(current_user: dict = Depends(get_current_user)):
     return {"proposals": list_proposals(db)}
 
 
-async def _run_test_guide_until_handoff(db, actor: str, incident_id: str) -> dict[str, Any]:
+async def _run_test_guide_until_handoff(db, actor: str, incident_id: str, job: dict[str, Any] | None = None) -> dict[str, Any]:
     progress: list[dict[str, Any]] = []
     next_proposal = None
     guided_flow = None
 
     for _ in range(4):
+        if job is not None:
+            _record_patchy_job_progress(job, f"Running test guide for incident {incident_id}")
         step = await execute_patchy_command(f"test guide {incident_id}", db, log_broker, actor=actor)
         step_data = step.get("data") or {}
         if step_data.get("guidedFlow"):
@@ -409,6 +438,13 @@ async def _run_test_guide_until_handoff(db, actor: str, incident_id: str) -> dic
                 "guidedCommand": step_data.get("guidedCommand"),
             }
         )
+        if job is not None:
+            _record_patchy_job_progress(
+                job,
+                "Guided step finished",
+                guidedCommand=step_data.get("guidedCommand"),
+                status=step.get("status"),
+            )
 
         if step.get("status") == "approval_required" and step_data.get("proposal"):
             next_proposal = step_data.get("proposal")
@@ -430,7 +466,10 @@ async def _execute_proposal_approval(
     proposal_id: str,
     actor: str,
     outbound_bearer_token: str | None,
+    job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if job is not None:
+        _record_patchy_job_progress(job, "Executing proposal approval", proposalId=proposal_id, kind=proposal.get("kind"))
     if proposal.get("kind") == "github_test_workflow":
         completed = await approve_and_dispatch_test_plan(db, proposal_id, actor, github_service)
         if completed.get("status") == "succeeded" and proposal.get("testPlanId"):
@@ -449,7 +488,7 @@ async def _execute_proposal_approval(
             generated = db["patchy_generated_tests"].find_one({"_id": proposal.get("generatedTestId")})
             incident_id = generated.get("incident_id") if generated else None
             if isinstance(incident_id, str) and incident_id:
-                handoff = await _run_test_guide_until_handoff(db, actor, incident_id)
+                handoff = await _run_test_guide_until_handoff(db, actor, incident_id, job=job)
                 completed["autoProgress"] = handoff.get("progress", [])
                 if handoff.get("guidedFlow"):
                     completed["guidedFlow"] = handoff["guidedFlow"]
@@ -508,15 +547,29 @@ async def approve_patchy_proposal(
                 detail=f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}",
             )
         job = _store_patchy_job(f"patchy_job_{uuid4().hex}", proposalId=proposal_id)
+        _record_patchy_job_progress(job, "Approval accepted for background execution", proposalId=proposal_id, kind=kind)
+        logger.info("Patchy approval job %s started for proposal: %s", job["id"], proposal_id)
 
         async def run_approval_job() -> None:
             try:
-                result = await _execute_proposal_approval(db, proposal, proposal_id, actor, outbound_bearer_token)
+                _record_patchy_job_progress(job, "Executing approval")
+                result = await asyncio.wait_for(
+                    _execute_proposal_approval(db, proposal, proposal_id, actor, outbound_bearer_token, job=job),
+                    timeout=PATCHY_JOB_TIMEOUT_SECONDS,
+                )
+                _record_patchy_job_progress(job, "Approval finished", resultStatus=result.get("status"))
                 job.update({"status": "completed", "result": result, "completed_at": datetime.now(timezone.utc)})
+            except asyncio.TimeoutError:
+                message = f"Patchy approval timed out after {PATCHY_JOB_TIMEOUT_SECONDS}s"
+                logger.warning("Patchy approval job %s timed out: %s", job["id"], proposal_id)
+                _record_patchy_job_progress(job, message)
+                job.update({"status": "failed", "error": message, "completed_at": datetime.now(timezone.utc)})
             except (PatchyProposalError, PatchyTestExecutionError, PatchyGeneratedTestError) as exc:
+                _record_patchy_job_progress(job, "Approval failed", error=str(exc))
                 job.update({"status": "failed", "error": str(exc), "completed_at": datetime.now(timezone.utc)})
             except Exception as exc:
                 logger.exception("Patchy approval job failed: %s", proposal_id)
+                _record_patchy_job_progress(job, "Unexpected failure", error=str(exc))
                 job.update({"status": "failed", "error": f"Unexpected error: {exc}", "completed_at": datetime.now(timezone.utc)})
 
         background_tasks.add_task(run_approval_job)
