@@ -11,7 +11,7 @@ from bson import ObjectId
 import requests
 from fastapi import Body, FastAPI, HTTPException, Depends, Request, status, BackgroundTasks, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
 from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
@@ -20,6 +20,8 @@ from backend.utils.db_utils import get_db
 from backend.utils.app_utils import (
     SERVICES,
     build_health_report,
+    build_incident_fingerprint,
+    canonicalize_service_name,
     require_sentry_secret,
     resolve_commit_file_content,
     run_ai_analysis_pipeline,
@@ -37,6 +39,7 @@ from backend.services.patchy_terminal import PatchyCommandError, _guided_test_fl
 from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_plan_step_proposal, list_proposals
 from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
+from backend.services.patchy_flow_runner import execute_flow
 from backend.middleware.rbac import require_role
 
 logging.basicConfig(level=logging.INFO)
@@ -57,6 +60,122 @@ INCIDENT_DEDUPE_WINDOW_SECONDS = int(os.getenv("INCIDENT_DEDUPE_WINDOW_SECONDS",
 HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "300"))
 HEALTH_SNAPSHOT_RETENTION_DAYS = int(os.getenv("HEALTH_SNAPSHOT_RETENTION_DAYS", "14"))
 LAST_ALERTED_DOWN_SERVICES: set[str] = set()
+
+
+def _record_erragent_exception(
+    request: Request,
+    exc: Exception,
+    source: str = "erragent_self_monitor",
+    message_prefix: str = "Unhandled exception",
+) -> str | None:
+    """Persist an unhandled server error without re-entering the ingest pipeline."""
+    db = get_db()
+    if db is None:
+        return None
+
+    now = datetime.now(timezone.utc)
+    path = request.url.path
+    stack_trace = "".join(__import__("traceback").format_exception(type(exc), exc, exc.__traceback__))[-12000:]
+    payload = {
+        "service_name": "errAgent",
+        "environment": os.getenv("ENVIRONMENT", "production"),
+        "error_message": f"{message_prefix} on {request.method} {path}: {str(exc)[:1000]}",
+        "stack_trace": stack_trace,
+        "repository": os.getenv("DEFAULT_TARGET_REPO", ""),
+        "metadata": {
+            "source": source,
+            "request_method": request.method,
+            "request_path": path,
+            "exception_type": type(exc).__name__,
+        },
+    }
+    fingerprint = build_incident_fingerprint(payload)
+    recent_cutoff = now - timedelta(seconds=300)
+    existing = db["incidents"].find_one(
+        {"fingerprint": fingerprint, "created_at": {"$gte": recent_cutoff}},
+        sort=[("created_at", -1)],
+    )
+    if existing:
+        return str(existing.get("_id"))
+
+    incident_id = f"self_{int(now.timestamp() * 1000)}_{uuid4().hex[:8]}"
+    incident_doc = {
+        "_id": incident_id,
+        "service_name": canonicalize_service_name("errAgent"),
+        "environment": payload["environment"],
+        "error_message": payload["error_message"],
+        "stack_trace": stack_trace,
+        "repository": payload["repository"],
+        "fingerprint": fingerprint,
+        "status": "open",
+        "metadata": payload["metadata"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        db["incidents"].insert_one(incident_doc)
+        db["audit_logs"].insert_one({
+            "incident_id": incident_id,
+            "actor": "ERRAGENT_SELF_MONITOR",
+            "action": "SELF_ERROR_CAPTURED",
+            "details": {"path": path, "exception_type": type(exc).__name__},
+            "timestamp": now,
+        })
+        return incident_id
+    except Exception:
+        logger.exception("Failed to persist errAgent self-monitor incident")
+        return None
+
+
+@app.exception_handler(Exception)
+async def handle_unhandled_exception(request: Request, exc: Exception):
+    try:
+        incident_id = _record_erragent_exception(request, exc)
+    except Exception:
+        incident_id = None
+        logger.exception("errAgent self-monitor capture failed")
+    logger.exception(
+        "Unhandled errAgent exception captured path=%s incident_id=%s",
+        request.url.path,
+        incident_id,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error",
+            "incident_id": incident_id,
+        },
+    )
+
+
+def _is_patchy_operational_failure(exc: Exception) -> bool:
+    message = str(exc).lower()
+    operational_markers = (
+        "github",
+        "google_api_key",
+        "llm",
+        "timed out",
+        "timeout",
+        "database",
+        "mongodb",
+        "could not be reached",
+        "network error",
+    )
+    return any(marker in message for marker in operational_markers)
+
+
+def _record_patchy_failure(request: Request, exc: Exception) -> None:
+    if not _is_patchy_operational_failure(exc):
+        return
+    try:
+        _record_erragent_exception(
+            request,
+            exc,
+            source="patchy_self_monitor",
+            message_prefix="Patchy operational failure",
+        )
+    except Exception:
+        logger.exception("Failed to record Patchy self-monitor failure")
 
 
 def should_send_discord_alert(report: dict, already_alerted: bool = False) -> bool:
@@ -308,6 +427,7 @@ async def incident_events():
 @app.post("/api/v1/patchy/command", tags=["Patchy"])
 async def run_patchy_command(
     payload: PatchyCommandRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
 ):
     db = get_db()
@@ -319,6 +439,10 @@ async def run_patchy_command(
         return await execute_patchy_command(payload.command, db, log_broker, actor=actor)
     except PatchyCommandError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        _record_patchy_failure(request, exc)
+        logger.exception("Patchy command failed unexpectedly: %s", payload.command)
+        raise HTTPException(status_code=500, detail="Patchy command failed unexpectedly.") from exc
 
 
 @app.get("/api/v1/patchy/proposals", tags=["Patchy"])
@@ -369,6 +493,8 @@ async def _execute_proposal_approval(
     actor: str,
     outbound_bearer_token: str | None,
 ) -> dict[str, Any]:
+    if proposal.get("kind") == "synthetic_flow":
+        return await execute_flow(db, proposal_id, actor)
     if proposal.get("kind") == "github_test_workflow":
         completed = await approve_and_dispatch_test_plan(db, proposal_id, actor, github_service)
         if completed.get("status") == "succeeded" and proposal.get("testPlanId"):

@@ -215,6 +215,55 @@ Both the environment flag and command flag are required. The proposal displays `
 
 BTY is a normal website, not a conversational assistant. Its current synthetic coverage is limited to registered health checks. Website workflows such as signing in, filling a form, submitting a request, and asserting the resulting page require a separate staging-only Playwright adapter. That adapter should be added only after the staging URL, test account strategy, selectors, and expected assertions are defined.
 
+## Synthetic flow plans
+
+Reusable multi-step HTTP user journeys for any registered service — signup, login, contact form, page loads — defined once and re-runnable under HITL approval.
+
+```text
+flow define <bty|saapp> <name> <json-actions>
+flow list [bty|saapp]
+flow run <flow-id>
+```
+
+For simple flows, use the easier compact form instead of escaped JSON:
+
+```text
+flow define bty health simple GET /api/health ASSERT 200
+flow define bty admin-schedule simple GET /api/admin/schedule ASSERT 200
+flow define bty contact simple POST /api/contact BODY '{"name":"Patchy","email":"test@example.com"}' ASSERT 201
+```
+
+Compact syntax supports `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `ASSERT <status>`, and `BODY <json>`. Use the JSON form below when you need captures, custom headers, JSON assertions, or multiple fields that are awkward to type inline.
+
+Example — a signup flow with a captured value reused later:
+
+```text
+flow define bty signup "[{\"type\":\"GET\",\"url\":\"/signup\"},{\"type\":\"POST\",\"url\":\"/api/signup\",\"body\":{\"email\":\"test@example.com\",\"password\":\"123456\"},\"expect_status\":201,\"capture\":{\"uid\":\"json.userId\"}},{\"type\":\"GET\",\"url\":\"/api/users/{{uid}}\"},{\"type\":\"assert_json\",\"has\":\"email\"}]"
+```
+
+Step types:
+
+- `GET` / `POST` / `PUT` / `PATCH` / `DELETE` — site-relative `url` only (must start with `/`); optional `body` (JSON object), `headers`, `expect_status`, and `capture`
+- `assert_status` — `{ "equals": 200 }` checks the previous response
+- `assert_json` — `{ "has": "userId" }` or `{ "equals": {"field": "value"} }` (dot paths supported)
+- `assert_body` — `{ "contains": "text" }` checks the raw response body
+
+`capture` pulls a value from a response — `json.<field>`, `header.<name>`, or `cookie.<name>` — and later steps reuse it with `{{variable}}` templates in URLs, bodies, and headers. Execution stops at the first failed step and reports per-step status, HTTP code, and latency.
+
+Safety rules: steps are capped at 12, URLs can only be paths on the flow's registered base URL (no cross-site requests), bodies are size-limited, and every run requires an approval card showing the step count and base URL before anything executes. Flow plans are stored per service and can be re-run repeatedly (`flow run <flow-id>`) without redefining them.
+
+### Authenticated flows (Clerk admin routes)
+
+Services like BTY gate admin routes behind Clerk-issued JWTs verified via JWKS (`Authorization: Bearer <token>`). Flows support this with an auth block declared at define time:
+
+```text
+flow define bty admin-schedule "[{\"type\":\"GET\",\"url\":\"/api/admin/schedule\"},{\"type\":\"assert_json\",\"has\":\"status\"}]" --auth "{\"type\":\"env_bearer\",\"env\":\"ERRAGENT_BTY_ADMIN_TOKEN\"}"
+```
+
+The token itself never goes into the flow document or Mongo — only the env var name. At execution, Patchy reads `ERRAGENT_BTY_ADMIN_TOKEN` from the errAgent backend environment and injects it as `Authorization: Bearer ...` on every request step (per-step headers can still override it).
+
+Setup: create a synthetic admin user in BTY's Clerk dashboard, add its email to BTY's `ADMIN_EMAILS`, mint a long-lived session token for that user, and set it as `ERRAGENT_BTY_ADMIN_TOKEN` in errAgent's `.env`. Only `ERRAGENT_*` env vars are readable by flows, and the approval card shows which auth mode a flow uses before it runs. A `clerk_session_token` mode (minting tokens on demand via Clerk's Backend API) is reserved but intentionally disabled until a dedicated synthetic-user strategy is chosen.
+
 ## LLM evidence synthesis
 
 Use:

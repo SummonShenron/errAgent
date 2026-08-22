@@ -55,6 +55,8 @@ type PatchyProposal = {
     content?: string;
     question?: string;
     environment?: string;
+    stepCount?: number;
+    flowId?: string;
   };
   workflow?: {
     id: string;
@@ -314,8 +316,23 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
       }
       if (!response.ok) throw new Error(body.detail || `Approval failed: ${response.status}`);
       const result = body.result || {};
-      const resultLines = body.status === 'succeeded'
-        ? result.question
+      const isFlow = body.kind === 'synthetic_flow';
+      let resultLines: string[];
+      if (isFlow && Array.isArray(result.steps)) {
+        resultLines = [
+          `Flow: ${result.flowName || 'unnamed'} (${result.service || 'unknown service'})`,
+          `Steps passed: ${result.stepsPassed}/${result.stepsTotal}`,
+          '',
+          ...result.steps.map((step: any) => {
+            const mark = step.status === 'passed' ? '✓' : '✗';
+            const label = step.url ? `${step.type} ${step.url}` : step.type;
+            const extra = step.httpStatus ? ` → HTTP ${step.httpStatus} (${step.elapsedMs}ms)` : step.detail ? ` — ${step.detail}` : '';
+            return `${mark} ${label}${extra}`;
+          }),
+          ...(result.failure ? ['', `Failure: ${result.failure}`] : []),
+        ];
+      } else if (body.status === 'succeeded') {
+        resultLines = result.question
           ? [
               `HTTP ${result.httpStatus}`,
               `Answer: ${result.answer || result.body?.answer || JSON.stringify(result.body)}`,
@@ -331,14 +348,16 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
               `HTTP ${result.httpStatus}`,
               `Elapsed: ${result.elapsedMs}ms`,
               `Response: ${JSON.stringify(result.body)}`,
-            ]
-        : [`Execution failed: ${result.error || `HTTP ${result.httpStatus || 'unknown'}`}`];
+            ];
+      } else {
+        resultLines = [isFlow && result.failure ? `Flow failed: ${result.failure}` : `Execution failed: ${result.error || `HTTP ${result.httpStatus || 'unknown'}`}`];
+      }
       setEntries((current) => current.map((entry) => entry.id === entryId ? {
         ...entry,
         status: body.status === 'succeeded' ? 'success' : 'error',
         title: body.status === 'succeeded'
-          ? entry.proposal?.kind === 'synthetic_question' ? 'Synthetic question succeeded' : 'Approved probe succeeded'
-          : entry.proposal?.kind === 'synthetic_question' ? 'Synthetic question failed' : 'Approved probe failed',
+          ? isFlow ? 'Synthetic flow passed' : entry.proposal?.kind === 'synthetic_question' ? 'Synthetic question succeeded' : 'Approved probe succeeded'
+          : isFlow ? 'Synthetic flow failed' : entry.proposal?.kind === 'synthetic_question' ? 'Synthetic question failed' : 'Approved probe failed',
         lines: resultLines,
         proposal: { ...entry.proposal!, status: body.status },
         timestamp: body.completed_at || new Date().toISOString(),
@@ -562,6 +581,12 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
                         <div className="patchy-question-preview">
                           <strong>Question:</strong> {entry.proposal.action.question}
                           {entry.proposal.action.environment && <small>Environment: {entry.proposal.action.environment}</small>}
+                        </div>
+                      )}
+                      {entry.proposal.kind === 'synthetic_flow' && (
+                        <div className="patchy-question-preview">
+                          <strong>Flow steps:</strong> {entry.proposal.action.stepCount || 0}
+                          <small>Executes sequentially; stops at first failure.</small>
                         </div>
                       )}
                       <button

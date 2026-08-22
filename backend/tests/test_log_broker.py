@@ -9,6 +9,59 @@ from backend.services.log_broker import InternalLogHandler, LogBroker, LogEventI
 from backend.services.log_broker import log_broker
 
 
+def test_erragent_self_monitor_records_and_deduplicates(monkeypatch):
+    from starlette.requests import Request
+    import backend.app.app as app_module
+
+    class Collection:
+        def __init__(self):
+            self.documents = []
+
+        def find_one(self, query, **_kwargs):
+            for document in reversed(self.documents):
+                if all(document.get(key) == value for key, value in query.items() if not isinstance(value, dict)):
+                    cutoff = query.get("created_at", {}).get("$gte")
+                    if cutoff is None or document.get("created_at") >= cutoff:
+                        return document
+            return None
+
+        def insert_one(self, document):
+            self.documents.append(document)
+
+    class DB:
+        def __init__(self):
+            self.collections = {"incidents": Collection(), "audit_logs": Collection()}
+
+        def __getitem__(self, name):
+            return self.collections[name]
+
+    db = DB()
+    monkeypatch.setattr(app_module, "get_db", lambda: db)
+    request = Request({"type": "http", "method": "GET", "path": "/api/test", "headers": [], "query_string": b"", "server": ("test", 80)})
+
+    first = app_module._record_erragent_exception(request, RuntimeError("boom"))
+    second = app_module._record_erragent_exception(request, RuntimeError("boom"))
+
+    assert first == second
+    assert len(db["incidents"].documents) == 1
+    assert db["incidents"].documents[0]["service_name"] == "erragent"
+    assert db["incidents"].documents[0]["metadata"]["source"] == "erragent_self_monitor"
+
+
+def test_patchy_operational_failures_are_reported_but_user_errors_are_not(monkeypatch):
+    import backend.app.app as app_module
+
+    calls = []
+    monkeypatch.setattr(app_module, "_record_erragent_exception", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    app_module._record_patchy_failure(object(), RuntimeError("GitHub API timed out"))
+    app_module._record_patchy_failure(object(), ValueError("Usage: test plan <incident-id>"))
+
+    assert len(calls) == 1
+    assert calls[0][1]["source"] == "patchy_self_monitor"
+    assert calls[0][1]["message_prefix"] == "Patchy operational failure"
+
+
 def test_log_broker_retains_bounded_history_per_service():
     async def scenario():
         broker = LogBroker(max_entries_per_service=2)

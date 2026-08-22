@@ -1,4 +1,5 @@
 import asyncio
+import json
 import shlex
 from datetime import datetime, timezone
 from typing import Any
@@ -14,6 +15,7 @@ from backend.services.patchy_test_planner import PatchyTestPlanError, create_tes
 from backend.services.patchy_test_runner import PatchyTestExecutionError, create_test_execution_proposal, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, create_generated_test_proposal, generate_regression_test
 from backend.services.synthetic_adapters import SyntheticAdapterError, create_question_proposal
+from backend.services.patchy_flow_runner import PatchyFlowError, create_flow_plan, create_flow_proposal, list_flow_plans
 from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
 
 
@@ -42,6 +44,9 @@ COMMAND_HELP = (
     ("test run <test-plan-id>", "Propose approved CI execution for a test plan"),
     ("test status <test-plan-id>", "Read the latest GitHub Actions test result"),
     ("test generate <incident-id>", "Draft a regression test for operator review"),
+    ("flow define <bty|saapp> <name> <json-actions>", "Save a reusable HTTP flow plan"),
+    ("flow list [bty|saapp]", "List saved flow plans"),
+    ("flow run <flow-id>", "Propose a flow execution for approval"),
     ("clear", "Clear the terminal screen locally"),
 )
 
@@ -173,6 +178,45 @@ def _guided_investigation_flow(plan: dict[str, Any], current_step_index: int, in
         "planId": plan.get("_id"),
         "steps": steps,
     }
+
+
+def _parse_compact_flow_actions(tokens: list[str]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    request_types = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index].upper()
+        if token in request_types:
+            if index + 1 >= len(tokens):
+                raise PatchyCommandError(f"{token} requires a path")
+            actions.append({"type": token, "url": tokens[index + 1]})
+            index += 2
+        elif token in {"ASSERT", "ASSERT_STATUS"}:
+            if index + 1 >= len(tokens):
+                raise PatchyCommandError("ASSERT requires an HTTP status code")
+            try:
+                status_code = int(tokens[index + 1])
+            except ValueError as exc:
+                raise PatchyCommandError("ASSERT requires an HTTP status code") from exc
+            actions.append({"type": "assert_status", "equals": status_code})
+            index += 2
+        elif token == "BODY":
+            if not actions or actions[-1]["type"] == "GET":
+                raise PatchyCommandError("BODY must follow a non-GET request")
+            if index + 1 >= len(tokens):
+                raise PatchyCommandError("BODY requires a JSON object")
+            try:
+                actions[-1]["body"] = json.loads(tokens[index + 1])
+            except json.JSONDecodeError as exc:
+                raise PatchyCommandError(f"BODY must be valid JSON: {exc}") from exc
+            index += 2
+        else:
+            raise PatchyCommandError(
+                f"Unknown compact flow token: {tokens[index]}. Use GET/POST/PUT/PATCH/DELETE, ASSERT, or BODY."
+            )
+    if not actions:
+        raise PatchyCommandError("At least one compact flow action is required")
+    return actions
 
 
 async def _run_health(target: str) -> dict[str, Any]:
@@ -833,6 +877,89 @@ async def execute_patchy_command(
             ],
             {"proposal": proposal},
         )
+
+    if command == "flow":
+        if not args:
+            raise PatchyCommandError("Usage: flow define|list|run ...")
+        subcommand = args[0].lower()
+        if subcommand == "list":
+            alias = args[1].lower() if len(args) > 1 else None
+            try:
+                flows = list_flow_plans(db, alias)
+            except PatchyFlowError as exc:
+                raise PatchyCommandError(str(exc)) from exc
+            lines = [
+                f"{flow['_id']} | {flow['service']} | {flow['name']} | {flow['status']} | {len(flow['steps'])} steps"
+                for flow in flows
+            ]
+            return _response("success", f"Flow plans ({len(flows)})", lines or ["No flow plans saved yet."], flows)
+        if subcommand == "define":
+            if len(args) < 4:
+                raise PatchyCommandError(
+                    "Usage: flow define <bty|saapp> <name> simple <actions> | <json-actions> [--auth <json-auth>]"
+                )
+            alias = args[1].lower()
+            name = args[2]
+            action_parts = args[3:]
+            auth = None
+            if "--auth" in action_parts:
+                flag_index = action_parts.index("--auth")
+                auth_parts = action_parts[flag_index + 1:]
+                action_parts = action_parts[:flag_index]
+                if not auth_parts:
+                    raise PatchyCommandError("--auth requires a JSON object")
+                try:
+                    auth = json.loads(" ".join(auth_parts))
+                except json.JSONDecodeError as exc:
+                    raise PatchyCommandError(f"Auth must be valid JSON: {exc}") from exc
+            if not action_parts:
+                raise PatchyCommandError("Actions JSON is required.")
+            if action_parts[0].lower() == "simple":
+                try:
+                    actions = _parse_compact_flow_actions(action_parts[1:])
+                except PatchyCommandError:
+                    raise
+            else:
+                try:
+                    actions = json.loads(" ".join(action_parts))
+                except json.JSONDecodeError as exc:
+                    raise PatchyCommandError(f"Actions must be valid JSON, or use 'simple': {exc}") from exc
+            if not isinstance(actions, list):
+                raise PatchyCommandError("Actions JSON must be an array of step objects.")
+            try:
+                flow = create_flow_plan(alias, name, actions, actor, db, auth=auth)
+            except PatchyFlowError as exc:
+                raise PatchyCommandError(str(exc)) from exc
+            lines = [
+                f"Flow ID: {flow['_id']}",
+                f"Service: {flow['service']} ({flow['base_url']})",
+                f"Auth: {(flow.get('auth') or {}).get('type', 'none')}",
+                "Steps:",
+                *[f"{i + 1}. {step['type']}{' ' + step.get('url', '') if step.get('url') else ''}" for i, step in enumerate(flow["steps"])],
+                "",
+                f"Run: flow run {flow['_id']}",
+            ]
+            return _response("success", "Patchy saved a flow plan", lines, {"flow": flow})
+        if subcommand == "run":
+            if len(args) != 2:
+                raise PatchyCommandError("Usage: flow run <flow-id>")
+            try:
+                proposal = create_flow_proposal(args[1], actor, db)
+            except PatchyFlowError as exc:
+                raise PatchyCommandError(str(exc)) from exc
+            action = proposal["action"]
+            return _response(
+                "approval_required",
+                "Approval required for synthetic flow",
+                [
+                    proposal["summary"],
+                    f"Base URL: {action['url']}",
+                    f"Steps: {action['stepCount']}",
+                    "Risk: multi-step HTTP flow against a registered service; GET/POST only to site-relative paths.",
+                ],
+                {"proposal": proposal},
+            )
+        raise PatchyCommandError("Usage: flow define|list|run ...")
 
     if command == "clear":
         return _response("success", "Screen cleared", [])

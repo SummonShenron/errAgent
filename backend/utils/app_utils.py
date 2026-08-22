@@ -322,27 +322,33 @@ def _lookup_repo_from_service_registry(db, service_name: str, app_id: str | None
     candidates = list(dict.fromkeys([service_name.strip(), canonical, service_name.strip().lower()]))
 
     registry_entry = {}
-    for candidate in candidates:
-        if app_id:
-            registry_entry = db["service_registry"].find_one(
-                {"service_name": candidate, "app_id": app_id}
-            ) or {}
-            if registry_entry:
-                break
-        if not registry_entry:
-            registry_entry = db["service_registry"].find_one({"service_name": candidate}) or {}
-        if registry_entry:
-            break
-
-    if not registry_entry:
-        # Case-insensitive fallback across the whole registry.
-        import re as _re
+    try:
         for candidate in candidates:
-            registry_entry = db["service_registry"].find_one(
-                {"service_name": {"$regex": f"^{_re.escape(candidate)}$", "$options": "i"}}
-            ) or {}
+            if app_id:
+                registry_entry = db["service_registry"].find_one(
+                    {"service_name": candidate, "app_id": app_id}
+                )
+                registry_entry = registry_entry if isinstance(registry_entry, dict) else {}
+                if registry_entry:
+                    break
+            if not registry_entry:
+                registry_entry = db["service_registry"].find_one({"service_name": candidate})
+                registry_entry = registry_entry if isinstance(registry_entry, dict) else {}
             if registry_entry:
                 break
+
+        if not registry_entry:
+            # Case-insensitive fallback across the whole registry.
+            import re as _re
+            for candidate in candidates:
+                registry_entry = db["service_registry"].find_one(
+                    {"service_name": {"$regex": f"^{_re.escape(candidate)}$", "$options": "i"}}
+                )
+                registry_entry = registry_entry if isinstance(registry_entry, dict) else {}
+                if registry_entry:
+                    break
+    except (KeyError, TypeError, AttributeError):
+        return None
 
     for key in ("target_repo", "repository", "repo"):
         value = registry_entry.get(key)
