@@ -115,8 +115,11 @@ Use the `x-ingest-secret` header. Confirm that:
 Relevant backend surface:
 
 - [backend/app/app.py](backend/app/app.py): `/api/v1/logs` ingestion and incident promotion
+- [backend/app/app.py](backend/app/app.py): `/api/v1/client-errors` sanitized browser-error ingestion
 - [backend/utils/app_utils.py](backend/utils/app_utils.py): ingestion, payload normalization, and incident helpers
 - [backend/services/log_broker.py](backend/services/log_broker.py): live in-memory delivery
+
+For frontend-heavy applications, send browser errors to the target application's backend first. The backend should validate and sanitize the payload, then forward it to `/api/v1/client-errors` with `x-ingest-secret` and `x-app-id`. Never expose `ERRAGENT_INGEST_SECRET` in browser code. Include the route, frontend release, error source, sanitized stack, and a correlation ID when available.
 
 ## 4. Register the service for health monitoring
 

@@ -13,6 +13,7 @@ Target applications send structured logs and errors to errAgent. Error events be
 Supported ingestion surfaces include:
 
 - `POST /api/v1/logs` for structured application logs
+- `POST /api/v1/client-errors` for sanitized browser errors sent through a trusted app backend proxy
 - `POST /api/v1/webhooks/ingest` for machine-to-machine incident payloads
 - Sentry, Vercel, and Render webhook adapters
 - In-memory live log streaming through the console
@@ -133,6 +134,12 @@ Self-monitoring is loop-safe:
 - It deduplicates repeated failures for a short window.
 - It records request path, exception type, traceback, and source metadata.
 - Normal command validation errors, missing IDs, and declined proposals remain terminal responses rather than incidents.
+
+### Frontend error reporting
+
+For a frontend-heavy target such as BTY, the browser should report errors to the target app's own FastAPI backend. That backend sanitizes and forwards the event to `POST /api/v1/client-errors` using the existing `x-ingest-secret` and optional `x-app-id` headers. The browser must never receive errAgent ingestion secrets.
+
+Client error payloads can include the service, environment, release, route, error source, sanitized message, stack, and limited metadata. errAgent bounds payload sizes and redacts common credentials such as authorization values, cookies, passwords, secrets, tokens, and API keys before incident creation.
 
 ## Architecture
 
@@ -272,6 +279,7 @@ POST /api/v1/patchy/proposals/{proposal_id}/decline
 
 ```text
 POST /api/v1/logs
+POST /api/v1/client-errors
 POST /api/v1/webhooks/ingest
 POST /api/v1/webhooks/sentry
 POST /api/v1/webhooks/vercel
@@ -293,6 +301,8 @@ A target app generally needs no Patchy-specific application code beyond structur
 4. Register its health URL and Patchy alias in errAgent.
 5. Map its service name to its GitHub repository when using analysis or test workflows.
 6. Add a repository-owned `workflow_dispatch` test workflow when using Patchy CI execution.
+
+For browser observability, add a target-app backend proxy that accepts sanitized frontend errors and forwards them to `/api/v1/client-errors`. Never embed `ERRAGENT_INGEST_SECRET` in browser JavaScript.
 
 Keep credentials in the target app's environment or secret manager. Do not send credentials in log messages or metadata.
 

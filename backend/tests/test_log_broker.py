@@ -62,6 +62,44 @@ def test_patchy_operational_failures_are_reported_but_user_errors_are_not(monkey
     assert calls[0][1]["message_prefix"] == "Patchy operational failure"
 
 
+def test_client_error_ingest_redacts_sensitive_fields(monkeypatch):
+    import asyncio
+    import backend.app.app as app_module
+    from backend.app.app import ClientErrorRequest
+
+    captured = []
+    class FakeDB:
+        pass
+
+    monkeypatch.setattr(app_module, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(
+        app_module,
+        "authenticate_ingest_client",
+        lambda *_args: {"actor": "MACHINE_INGEST:bty", "app_id": "bty", "default_repo": "owner/bty"},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "ingest_machine_payload",
+        lambda _db, _tasks, payload, _actor, **_kwargs: captured.append(payload) or "client_incident_1",
+    )
+
+    response = asyncio.run(app_module.ingest_client_error(
+        ClientErrorRequest(
+            service="btyapp",
+            message="Request failed password=secret-value",
+            metadata={"token": "jwt-value", "route": "/booking"},
+        ),
+        object(),
+        "secret",
+        "bty",
+    ))
+
+    assert response == {"status": "accepted", "incident_id": "client_incident_1"}
+    assert captured[0]["error_message"] == "Request failed password=[REDACTED]"
+    assert captured[0]["metadata"]["token"] == "[REDACTED]"
+    assert captured[0]["metadata"]["source"] == "frontend"
+
+
 def test_log_broker_retains_bounded_history_per_service():
     async def scenario():
         broker = LogBroker(max_entries_per_service=2)

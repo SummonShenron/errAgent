@@ -4,6 +4,7 @@ import json
 import hashlib
 import logging
 import asyncio
+import re
 from uuid import uuid4
 from typing import List, Dict, Any
 from datetime import datetime, timezone, timedelta, time
@@ -12,7 +13,7 @@ import requests
 from fastapi import Body, FastAPI, HTTPException, Depends, Request, status, BackgroundTasks, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
 # Utility imports from your backend/utils directory
@@ -227,6 +228,36 @@ class ReanalyzeRequest(BaseModel):
 
 class PatchyCommandRequest(BaseModel):
     command: str
+
+
+class ClientErrorRequest(BaseModel):
+    service: str = Field(min_length=1, max_length=64)
+    environment: str = Field(default="production", min_length=1, max_length=32)
+    release: str | None = Field(default=None, max_length=128)
+    route: str | None = Field(default=None, max_length=512)
+    source: str = Field(default="frontend", max_length=64)
+    message: str = Field(min_length=1, max_length=4000)
+    stack: str | None = Field(default=None, max_length=12000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+_SENSITIVE_CLIENT_ERROR_PATTERN = re.compile(
+    r"(?i)(authorization|cookie|password|passwd|secret|token|api[_-]?key)\s*[:=]\s*([^,\s;]+)"
+)
+
+
+def _redact_client_error_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _SENSITIVE_CLIENT_ERROR_PATTERN.sub(r"\1=[REDACTED]", value)[:12000]
+    if isinstance(value, dict):
+        return {
+            str(key): "[REDACTED]" if re.search(r"(?i)(authorization|cookie|password|passwd|secret|token|api[_-]?key)", str(key))
+            else _redact_client_error_value(item)
+            for key, item in list(value.items())[:30]
+        }
+    if isinstance(value, list):
+        return [_redact_client_error_value(item) for item in value[:30]]
+    return value
 
 # Enable CORS for Frontend development
 app.add_middleware(
@@ -647,6 +678,45 @@ async def ingest_logs(
         "incidentCount": len(set(incident_ids)),
         "incidentIds": list(dict.fromkeys(incident_ids)),
     }
+
+
+@app.post("/api/v1/client-errors", status_code=status.HTTP_202_ACCEPTED, tags=["Logs"])
+async def ingest_client_error(
+    payload: ClientErrorRequest,
+    background_tasks: BackgroundTasks,
+    x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
+):
+    """Accept sanitized browser errors through a trusted target-app backend proxy."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    ingest_context = authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    safe_metadata = _redact_client_error_value(payload.metadata)
+    if not isinstance(safe_metadata, dict):
+        safe_metadata = {}
+    safe_metadata.update({
+        "source": "frontend",
+        "release": payload.release,
+        "route": payload.route,
+        "error_source": payload.source,
+    })
+    incident_payload = {
+        "service_name": payload.service,
+        "environment": payload.environment,
+        "error_message": _redact_client_error_value(payload.message),
+        "stack_trace": _redact_client_error_value(payload.stack or ""),
+        "metadata": safe_metadata,
+    }
+    incident_id = ingest_machine_payload(
+        db,
+        background_tasks,
+        incident_payload,
+        ingest_context["actor"],
+        app_id=ingest_context.get("app_id"),
+        app_default_repo=ingest_context.get("default_repo"),
+    )
+    return {"status": "accepted", "incident_id": incident_id}
 
 
 @app.websocket("/api/v1/live-logs")
