@@ -40,7 +40,7 @@ from backend.services.patchy_terminal import PatchyCommandError, _guided_test_fl
 from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_plan_step_proposal, list_proposals
 from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
-from backend.services.patchy_flow_runner import execute_flow
+from backend.services.patchy_flow_runner import execute_flow, execute_validation_audit
 from backend.middleware.rbac import require_role
 
 logging.basicConfig(level=logging.INFO)
@@ -524,6 +524,8 @@ async def _execute_proposal_approval(
     actor: str,
     outbound_bearer_token: str | None,
 ) -> dict[str, Any]:
+    if proposal.get("kind") == "validation_audit":
+        return await execute_validation_audit(db, proposal_id, actor)
     if proposal.get("kind") == "synthetic_flow":
         return await execute_flow(db, proposal_id, actor)
     if proposal.get("kind") == "github_test_workflow":

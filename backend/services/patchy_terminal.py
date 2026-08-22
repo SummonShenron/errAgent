@@ -15,7 +15,7 @@ from backend.services.patchy_test_planner import PatchyTestPlanError, create_tes
 from backend.services.patchy_test_runner import PatchyTestExecutionError, create_test_execution_proposal, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, create_generated_test_proposal, generate_regression_test
 from backend.services.synthetic_adapters import SyntheticAdapterError, create_question_proposal
-from backend.services.patchy_flow_runner import PatchyFlowError, create_flow_plan, create_flow_proposal, list_flow_plans
+from backend.services.patchy_flow_runner import PatchyFlowError, create_flow_plan, create_flow_proposal, create_validation_proposal, list_flow_plans
 from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
 
 
@@ -47,6 +47,7 @@ COMMAND_HELP = (
     ("flow define <bty|saapp> <name> <json-actions>", "Save a reusable HTTP flow plan"),
     ("flow list [bty|saapp]", "List saved flow plans"),
     ("flow run <flow-id>", "Propose a flow execution for approval"),
+    ("probe validation <bty|saapp>", "Propose a bounded validation audit"),
     ("clear", "Clear the terminal screen locally"),
 )
 
@@ -774,6 +775,23 @@ async def execute_patchy_command(
         return _response(status, "Patchy diagnostics", lines, {"health": health_result.get("data"), "incidents": incidents, "errorLogs": error_logs})
 
     if command == "probe":
+        if len(args) == 2 and args[0].lower() == "validation":
+            try:
+                proposal = create_validation_proposal(args[1], actor, db)
+            except PatchyFlowError as exc:
+                raise PatchyCommandError(str(exc)) from exc
+            return _response(
+                "approval_required",
+                "Approval required for validation audit",
+                [
+                    proposal["summary"],
+                    f"Service: {proposal['service']}",
+                    f"Endpoint: {proposal['action']['url']}",
+                    f"Fuzz flows: {proposal['action']['flowCount']}",
+                    "Risk: bounded staging-only invalid-input probes; stops on first unexpected success or server error.",
+                ],
+                {"proposal": proposal},
+            )
         if not args:
             return _response(
                 "clarification_required",

@@ -75,7 +75,7 @@ def test_client_error_ingest_redacts_sensitive_fields(monkeypatch):
     monkeypatch.setattr(
         app_module,
         "authenticate_ingest_client",
-        lambda *_args: {"actor": "MACHINE_INGEST:bty", "app_id": "bty", "default_repo": "owner/bty"},
+        lambda *_args: {"actor": "MACHINE_INGEST:bty", "app_id": "btyapp", "default_repo": "owner/bty"},
     )
     monkeypatch.setattr(
         app_module,

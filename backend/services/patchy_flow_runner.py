@@ -32,13 +32,29 @@ _SERVICE_ALIASES = {
     "saapp": "SAAPP Widget",
 }
 
-_ACTION_TYPES = {"GET", "POST", "PUT", "PATCH", "DELETE", "assert_status", "assert_json", "assert_body"}
+_ACTION_TYPES = {"GET", "POST", "PUT", "PATCH", "DELETE", "fuzz", "assert_status", "assert_json", "assert_body"}
 _TEMPLATE_PATTERN = re.compile(r"\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}")
 _MAX_STEPS = 12
 _MAX_BODY_BYTES = 4000
 _MAX_FLOWS_PER_SERVICE = 25
 
 _AUTH_TYPES = {"none", "env_bearer", "clerk_session_token"}
+_SYNTHETIC_MODES = {"read_only", "production_safe_mutation"}
+_MAX_FUZZ_CASES = 8
+_FUZZ_CATALOGS = {
+    "email": [
+        "not-an-email",
+        "test@",
+        "@domain.com",
+        "test@@domain.com",
+        "test@domain",
+        "test@domain..com",
+        "",
+        "a" * 256 + "@example.com",
+    ],
+    "required": ["", " ", "null", "undefined"],
+    "text": ["", " ", "a" * 256, "<script>alert(1)</script>", "' OR '1'='1"],
+}
 
 
 def _validate_auth(auth: Any) -> dict[str, Any]:
@@ -96,6 +112,38 @@ def _validate_step(step: dict[str, Any], index: int) -> dict[str, Any]:
         raise PatchyFlowError(f"Step {index + 1} has unsupported type: {step_type or 'missing'}")
 
     validated: dict[str, Any] = {"type": step_type}
+
+    if step_type == "fuzz":
+        method = str(step.get("method") or "POST").upper()
+        if method != "POST":
+            raise PatchyFlowError(f"Step {index + 1} fuzz only supports POST")
+        url = str(step.get("url") or "").strip()
+        if not url.startswith("/") or url.startswith("//") or ".." in url:
+            raise PatchyFlowError(f"Step {index + 1} URL must be a site-relative path like /api/contact")
+        field = str(step.get("field") or "").strip()
+        if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_.-]*", field):
+            raise PatchyFlowError(f"Step {index + 1} fuzz requires a valid field name")
+        body = step.get("body")
+        if not isinstance(body, dict) or "{{fuzz_value}}" not in str(body):
+            raise PatchyFlowError(f"Step {index + 1} fuzz body must contain {{fuzz_value}}")
+        expect_status = step.get("expect_status", 400)
+        if not isinstance(expect_status, int) or expect_status not in {400, 401, 403, 404, 409, 422}:
+            raise PatchyFlowError(f"Step {index + 1} fuzz expect_status must be a validation status (400/401/403/404/409/422)")
+        catalog = str(step.get("catalog") or "text").lower()
+        values = step.get("inputs") or _FUZZ_CATALOGS.get(catalog)
+        if not isinstance(values, list) or not values or len(values) > _MAX_FUZZ_CASES:
+            raise PatchyFlowError(f"Step {index + 1} fuzz has at most {_MAX_FUZZ_CASES} inputs")
+        if not all(isinstance(value, (str, int, float, bool)) for value in values):
+            raise PatchyFlowError(f"Step {index + 1} fuzz inputs must be primitive values")
+        return {
+            "type": "fuzz",
+            "method": method,
+            "url": url,
+            "field": field,
+            "body": body,
+            "expect_status": expect_status,
+            "inputs": values,
+        }
 
     if step_type in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
         url = str(step.get("url") or "").strip()
@@ -193,7 +241,22 @@ def create_flow_plan(alias: str, name: str, actions: list[dict[str, Any]], actor
 
     validated_steps = [_validate_step(step, index) for index, step in enumerate(actions)]
     validated_auth = _validate_auth(auth)
-    has_request = any(step["type"] in {"GET", "POST", "PUT", "PATCH", "DELETE"} for step in validated_steps)
+    has_fuzz = any(step["type"] == "fuzz" for step in validated_steps)
+    synthetic_mode = "read_only"
+    if has_fuzz:
+        synthetic_mode = "production_safe_mutation"
+        environment_name = f"ERRAGENT_{alias.upper()}_SYNTHETIC_ENV"
+        safety_flag = f"ERRAGENT_{alias.upper()}_SYNTHETIC_MUTATIONS_SAFE"
+        if (
+            os.getenv(environment_name, "").strip().lower() != "staging"
+            and os.getenv(safety_flag, "").strip().lower() not in {"1", "true", "yes", "on"}
+        ):
+            raise PatchyFlowError(
+                f"Fuzz flows require staging or an explicit production safety contract. "
+                f"Set {environment_name}=staging, or set {safety_flag}=true only after the target app "
+                "honors synthetic mutation headers and suppresses real side effects."
+            )
+    has_request = any(step["type"] in {"GET", "POST", "PUT", "PATCH", "DELETE", "fuzz"} for step in validated_steps)
     if not has_request:
         raise PatchyFlowError("A flow needs at least one HTTP request step")
 
@@ -210,6 +273,8 @@ def create_flow_plan(alias: str, name: str, actions: list[dict[str, Any]], actor
         "base_url": base_url,
         "steps": validated_steps,
         "auth": validated_auth,
+        "has_fuzz": has_fuzz,
+        "synthetic_mode": synthetic_mode,
         "status": "ready",
         "created_by": actor,
         "created_at": now,
@@ -246,10 +311,11 @@ def create_flow_proposal(flow_id: str, actor: str, db) -> dict[str, Any]:
     proposal_id = f"flow_run_{flow_id}_{int(now.timestamp())}"
     request_steps = [step for step in flow["steps"] if step["type"] in {"GET", "POST", "PUT", "PATCH", "DELETE"}]
     auth_label = (flow.get("auth") or {}).get("type", "none")
+    has_fuzz = bool(flow.get("has_fuzz") or any(step["type"] == "fuzz" for step in flow["steps"]))
     proposal = {
         "_id": proposal_id,
         "kind": "synthetic_flow",
-        "risk": "registered_service_flow",
+        "risk": "registered_service_flow_with_fuzz" if has_fuzz else "registered_service_flow",
         "status": "awaiting_approval",
         "summary": f"Run flow '{flow['name']}' ({len(request_steps)} request(s), auth: {auth_label}) against {flow['service']}",
         "action": {
@@ -275,6 +341,35 @@ def create_flow_proposal(flow_id: str, actor: str, db) -> dict[str, Any]:
         {"_id": flow_id},
         {"$set": {"status": "awaiting_approval", "proposal_id": proposal_id, "updated_at": now}},
     )
+    return serialize_mongo_doc(proposal)
+
+
+def create_validation_proposal(alias: str, actor: str, db) -> dict[str, Any]:
+    service_name, base_url = _service_base_url(alias)
+    flows = list(db["patchy_flow_plans"].find({"service": service_name, "has_fuzz": True}).limit(10))
+    if not flows:
+        raise PatchyFlowError(f"No validation fuzz flows are registered for {service_name}")
+    now = datetime.now(timezone.utc)
+    proposal = {
+        "_id": f"validation_{uuid4().hex}",
+        "kind": "validation_audit",
+        "risk": "bounded_synthetic_validation",
+        "status": "awaiting_approval",
+        "summary": f"Run validation audit for {service_name} ({len(flows)} fuzz flow(s))",
+        "action": {
+            "method": "AUDIT",
+            "url": base_url,
+            "service": service_name,
+            "flowCount": len(flows),
+            "flowIds": [flow["_id"] for flow in flows],
+        },
+        "service": service_name,
+        "flowIds": [flow["_id"] for flow in flows],
+        "created_by": actor,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db["patchy_proposals"].insert_one(proposal)
     return serialize_mongo_doc(proposal)
 
 
@@ -325,17 +420,89 @@ async def execute_flow(db, proposal_id: str, actor: str) -> dict[str, Any]:
     last_response: httpx.Response | None = None
     failure: str | None = None
     base_url = flow["base_url"]
+    run_id = f"flow_run_{uuid4().hex}"
 
     try:
         auth_headers = _resolve_auth_headers(flow.get("auth") or {"type": "none"})
+        synthetic_headers = {
+            "X-ErrAgent-Synthetic": "true",
+            "X-ErrAgent-Run-Id": run_id,
+            "X-ErrAgent-Flow-Id": flow["_id"],
+        }
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             for index, step in enumerate(flow["steps"]):
                 step_type = step["type"]
-                rendered = _render_template(step, variables)
+                if step_type == "fuzz":
+                    rendered = {
+                        **step,
+                        "url": _render_template(step["url"], variables),
+                        "field": _render_template(step["field"], variables),
+                        "inputs": _render_template(step["inputs"], variables),
+                    }
+                else:
+                    rendered = _render_template(step, variables)
 
-                if step_type in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                if step_type == "fuzz":
+                    fuzz_cases = []
+                    for case_index, fuzz_value in enumerate(rendered["inputs"]):
+                        fuzz_variables = {**variables, "fuzz_value": fuzz_value}
+                        fuzz_body = _render_template(rendered["body"], fuzz_variables)
+                        try:
+                            response = await client.request(
+                                "POST",
+                                f"{base_url}{rendered['url']}",
+                                json=fuzz_body,
+                                headers={**synthetic_headers, **auth_headers},
+                            )
+                            expected = rendered["expect_status"]
+                            case_status = "passed" if response.status_code == expected else "failed"
+                            detail = None
+                            if 200 <= response.status_code < 300:
+                                detail = "Unexpected success: invalid input was accepted"
+                            elif response.status_code >= 500:
+                                detail = "Server error while validating invalid input"
+                            elif response.status_code != expected:
+                                detail = f"Expected HTTP {expected}, got {response.status_code}"
+                            fuzz_cases.append({
+                                "case": case_index + 1,
+                                "field": rendered["field"],
+                                "input": fuzz_value,
+                                "status": case_status if not detail else "failed",
+                                "httpStatus": response.status_code,
+                                "elapsedMs": round(response.elapsed.total_seconds() * 1000),
+                                "detail": detail,
+                            })
+                            if detail:
+                                failure = f"Step {index + 1} (fuzz {rendered['url']}): {detail}"
+                                break
+                        except httpx.HTTPError as exc:
+                            fuzz_cases.append({
+                                "case": case_index + 1,
+                                "field": rendered["field"],
+                                "input": fuzz_value,
+                                "status": "failed",
+                                "detail": f"Network error: {exc}",
+                            })
+                            failure = f"Step {index + 1} (fuzz {rendered['url']}): network error"
+                            break
+                    step_results.append({
+                        "index": index,
+                        "type": step_type,
+                        "url": rendered["url"],
+                        "field": rendered["field"],
+                        "status": "passed" if not failure else "failed",
+                        "cases": fuzz_cases,
+                    })
+                    if failure:
+                        break
+
+                elif step_type in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
                     url = f"{base_url}{rendered['url']}"
-                    merged_headers = {**auth_headers, **(rendered.get("headers") or {})}
+                    merged_headers = {
+                        **synthetic_headers,
+                        **auth_headers,
+                        **(rendered.get("headers") or {}),
+                    }
                     response = await client.request(
                         step_type,
                         url,
@@ -435,6 +602,8 @@ async def execute_flow(db, proposal_id: str, actor: str) -> dict[str, Any]:
         "stepsPassed": len([s for s in step_results if s.get("status") == "passed"]),
         "stepsTotal": len(flow["steps"]),
         "failure": failure,
+        "runId": run_id,
+        "syntheticMode": flow.get("synthetic_mode", "read_only"),
     }
     db["patchy_proposals"].update_one(
         {"_id": proposal_id},
@@ -447,5 +616,62 @@ async def execute_flow(db, proposal_id: str, actor: str) -> dict[str, Any]:
             "last_run_at": completed_at,
             "updated_at": completed_at,
         }},
+    )
+    return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal_id}))
+
+
+async def execute_validation_audit(db, proposal_id: str, actor: str) -> dict[str, Any]:
+    proposal = db["patchy_proposals"].find_one({"_id": proposal_id})
+    if not proposal or proposal.get("kind") != "validation_audit":
+        raise PatchyFlowError("Validation proposal not found")
+    if proposal.get("status") != "awaiting_approval":
+        raise PatchyFlowError(f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}")
+
+    started_at = datetime.now(timezone.utc)
+    claimed = db["patchy_proposals"].update_one(
+        {"_id": proposal_id, "status": "awaiting_approval"},
+        {"$set": {"status": "running", "approved_by": actor, "approved_at": started_at, "updated_at": started_at}},
+    )
+    if claimed.modified_count != 1:
+        raise PatchyFlowError("Proposal was already claimed")
+
+    flows = [get_flow_plan(db, flow_id) for flow_id in proposal["flowIds"]]
+    health_result: dict[str, Any]
+    try:
+        service = next(item for item in SERVICES if item["name"] == proposal["service"])
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            health_response = await client.get(f"{service['url'].rstrip('/')}{service.get('health_path', '/')}")
+        health_result = {
+            "status": "passed" if 200 <= health_response.status_code < 400 else "failed",
+            "httpStatus": health_response.status_code,
+            "elapsedMs": round(health_response.elapsed.total_seconds() * 1000),
+        }
+    except (StopIteration, httpx.HTTPError) as exc:
+        health_result = {"status": "failed", "detail": f"Health check failed: {exc}"}
+
+    flow_results = []
+    for flow in flows:
+        child = create_flow_proposal(flow["_id"], actor, db)
+        child_result = await execute_flow(db, child["_id"], actor)
+        flow_results.append({
+            "flowId": flow["_id"],
+            "flowName": flow["name"],
+            "status": child_result.get("status"),
+            "result": child_result.get("result", {}),
+        })
+
+    failed_flows = [item for item in flow_results if item["status"] != "succeeded"]
+    final_status = "succeeded" if health_result["status"] == "passed" and not failed_flows else "failed"
+    completed_at = datetime.now(timezone.utc)
+    result_doc = {
+        "service": proposal["service"],
+        "health": health_result,
+        "flows": flow_results,
+        "status": "passed" if final_status == "succeeded" else "failed",
+        "summary": f"Health {'passed' if health_result['status'] == 'passed' else 'failed'}; {len(failed_flows)} validation flow(s) failed",
+    }
+    db["patchy_proposals"].update_one(
+        {"_id": proposal_id},
+        {"$set": {"status": final_status, "result": result_doc, "completed_at": completed_at, "updated_at": completed_at}},
     )
     return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal_id}))

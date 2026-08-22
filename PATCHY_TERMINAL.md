@@ -223,6 +223,7 @@ Reusable multi-step HTTP user journeys for any registered service — signup, lo
 flow define <bty|saapp> <name> <json-actions>
 flow list [bty|saapp]
 flow run <flow-id>
+probe validation <bty|saapp>
 ```
 
 For simple flows, use the easier compact form instead of escaped JSON:
@@ -234,6 +235,32 @@ flow define bty contact simple POST /api/contact BODY '{"name":"Patchy","email":
 ```
 
 Compact syntax supports `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `ASSERT <status>`, and `BODY <json>`. Use the JSON form below when you need captures, custom headers, JSON assertions, or multiple fields that are awkward to type inline.
+
+For bounded staging-only input validation probing, define a `fuzz` step in JSON form:
+
+```text
+flow define bty email-validation "[{\"type\":\"fuzz\",\"url\":\"/api/contact\",\"field\":\"email\",\"body\":{\"email\":\"{{fuzz_value}}\",\"message\":\"test\"},\"catalog\":\"email\",\"expect_status\":422}]"
+```
+
+Fuzz steps support up to eight bounded catalog values, only use `POST`, and require a validation status (`400`, `401`, `403`, `404`, `409`, or `422`). A `2xx` response is reported as an unexpected success; a `5xx` response is reported as a server error.
+
+By default, fuzz flows require `ERRAGENT_BTY_SYNTHETIC_ENV=staging`. For a production deployment with a verified synthetic safety contract, the target app must honor these headers on every request:
+
+```text
+X-ErrAgent-Synthetic: true
+X-ErrAgent-Run-Id: <unique-run-id>
+X-ErrAgent-Flow-Id: <flow-id>
+```
+
+The target app must prevent real side effects for synthetic requests: no real email delivery, appointment creation, calendar mutation, or lead persistence. After that behavior is deployed and reviewed, explicitly opt in from errAgent with `ERRAGENT_BTY_SYNTHETIC_MUTATIONS_SAFE=true`. Patchy then permits the bounded fuzz flow against the registered production base URL and records the run ID for correlation. This flag is a contract, not a bypass: without target-app enforcement, production fuzzing remains blocked.
+
+Run all saved validation flows for a service with one approval gate:
+
+```text
+probe validation bty
+```
+
+The audit runs a health check, then the registered fuzz flows, stops each flow at its first unexpected result, and returns per-case evidence. It does not automatically ask the LLM to modify code or create a PR; remediation remains a separate reviewed phase.
 
 Example — a signup flow with a captured value reused later:
 

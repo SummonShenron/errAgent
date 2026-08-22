@@ -8,6 +8,7 @@ from backend.services.patchy_flow_runner import (
     PatchyFlowError,
     create_flow_plan,
     create_flow_proposal,
+    create_validation_proposal,
     execute_flow,
     list_flow_plans,
 )
@@ -308,6 +309,65 @@ def test_flow_auth_validation():
         create_flow_plan("bty", "x", [{"type": "GET", "url": "/a"}], "op", db, auth={"type": "env_bearer", "env": "SECRET_KEY"})
     with pytest.raises(PatchyFlowError, match="not enabled yet"):
         create_flow_plan("bty", "x", [{"type": "GET", "url": "/a"}], "op", db, auth={"type": "clerk_session_token"})
+
+
+def test_fuzz_flow_requires_staging(monkeypatch):
+    db = FakeDB()
+    action = [{
+        "type": "fuzz",
+        "url": "/api/contact",
+        "field": "email",
+        "body": {"email": "{{fuzz_value}}"},
+        "catalog": "email",
+    }]
+    monkeypatch.delenv("ERRAGENT_BTY_SYNTHETIC_ENV", raising=False)
+    with pytest.raises(PatchyFlowError, match="staging-only"):
+        create_flow_plan("bty", "email validation", action, "op", db)
+
+    monkeypatch.setenv("ERRAGENT_BTY_SYNTHETIC_ENV", "staging")
+    flow = create_flow_plan("bty", "email validation", action, "op", db)
+    assert flow["has_fuzz"] is True
+    proposal = create_validation_proposal("bty", "op", db)
+    assert proposal["kind"] == "validation_audit"
+    assert proposal["action"]["flowCount"] == 1
+
+    monkeypatch.delenv("ERRAGENT_BTY_SYNTHETIC_ENV", raising=False)
+    monkeypatch.setenv("ERRAGENT_BTY_SYNTHETIC_MUTATIONS_SAFE", "true")
+    production_safe_flow = create_flow_plan("bty", "production-safe email validation", action, "op", db)
+    assert production_safe_flow["synthetic_mode"] == "production_safe_mutation"
+
+
+def test_fuzz_flow_stops_on_unexpected_success(monkeypatch):
+    monkeypatch.setenv("ERRAGENT_BTY_SYNTHETIC_ENV", "staging")
+    _patch_client(monkeypatch, [
+        FakeResponse(422, json_data={"detail": "invalid"}),
+        FakeResponse(200, json_data={"accepted": True}),
+        FakeResponse(422, json_data={"detail": "invalid"}),
+    ])
+
+    async def scenario():
+        db = FakeDB()
+        flow = create_flow_plan(
+            "bty",
+            "email validation",
+            [{
+                "type": "fuzz",
+                "url": "/api/contact",
+                "field": "email",
+                "body": {"email": "{{fuzz_value}}"},
+                "inputs": ["not-an-email", "test@", "@domain.com"],
+                "expect_status": 422,
+            }],
+            "op",
+            db,
+        )
+        proposal = create_flow_proposal(flow["_id"], "op", db)
+        completed = await execute_flow(db, proposal["_id"], "approver")
+        assert completed["status"] == "failed"
+        assert "Unexpected success" in completed["result"]["failure"]
+        assert len(completed["result"]["steps"][0]["cases"]) == 2
+
+    asyncio.run(scenario())
 
 
 def test_compact_flow_syntax():
