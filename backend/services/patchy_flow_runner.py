@@ -11,15 +11,31 @@ Flows that need authentication declare an auth block; tokens are resolved from
 errAgent environment variables at execution time and never stored in the flow document.
 """
 
+import asyncio
+import asyncio
+import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import httpx
+from dotenv import load_dotenv
 
-from backend.utils.app_utils import SERVICES, serialize_mongo_doc
+from backend.utils.app_utils import (
+    SERVICES,
+    build_incident_fingerprint,
+    canonicalize_service_name,
+    _resolve_target_repository,
+    serialize_mongo_doc,
+)
+
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=False)
+
+logger = logging.getLogger("Patchy Flow Runner")
 
 
 class PatchyFlowError(ValueError):
@@ -54,7 +70,111 @@ _FUZZ_CATALOGS = {
     ],
     "required": ["", " ", "null", "undefined"],
     "text": ["", " ", "a" * 256, "<script>alert(1)</script>", "' OR '1'='1"],
+    "database": ["'", '"', "')", '\")', "' OR '1'='1", '" OR "1"="1'],
 }
+_UNSAFE_REFLECTION_MARKERS = ("<script", "</script", "javascript:", "onerror=", "onload=")
+_DATABASE_LEAK_MARKERS = (
+    "mongodb",
+    "pymongo",
+    "mongoerror",
+    "mongoservererror",
+    "bson.errors",
+    "duplicatekeyerror",
+    "connectionstring",
+    "mongodb+srv://",
+    "collectionnotfound",
+)
+
+
+def _redact_finding_text(value: Any) -> str:
+    text = str(value or "")[:2000]
+    return re.sub(
+        r"(?i)(mongodb(?:\+srv)?://[^\s\"']+|authorization\s*[:=]\s*[^\s,;]+|(?:password|secret|token|api[_-]?key)\s*[:=]\s*[^\s,;]+)",
+        "[REDACTED]",
+        text,
+    )
+
+
+def _record_database_leak_incident(
+    db,
+    flow: dict[str, Any],
+    run_id: str,
+    endpoint: str,
+    input_value: Any,
+    response_text: str,
+    status_code: int,
+    category: str = "database_error_disclosure",
+    severity: str = "high",
+    finding: str = "database detail leakage",
+) -> str | None:
+    """Persist one redacted security finding; never attempts database discovery."""
+    excerpt = _redact_finding_text(response_text)
+    payload = {
+        "service_name": flow["service"],
+        "environment": "production",
+        "error_message": f"Validation probe detected {finding} on {endpoint}",
+        "stack_trace": excerpt,
+        "repository": _resolve_target_repository(
+            db,
+            {"service_name": flow["service"]},
+        ),
+        "metadata": {
+            "source": "patchy_security_probe",
+            "category": category,
+            "severity": severity,
+            "flow_id": flow["_id"],
+            "run_id": run_id,
+            "endpoint": endpoint,
+            "input": _redact_finding_text(input_value),
+            "response_excerpt": excerpt,
+            "http_status": status_code,
+        },
+    }
+    fingerprint = build_incident_fingerprint(payload)
+    now = datetime.now(timezone.utc)
+    existing = db["incidents"].find_one(
+        {"fingerprint": fingerprint, "created_at": {"$gte": now - timedelta(minutes=5)}},
+        sort=[("created_at", -1)],
+    )
+    if existing:
+        return str(existing.get("_id"))
+    incident_id = f"security_{int(now.timestamp() * 1000)}_{uuid4().hex[:8]}"
+    incident = {
+        "_id": incident_id,
+        "service_name": canonicalize_service_name(flow["service"]),
+        "environment": "production",
+        "error_message": payload["error_message"],
+        "stack_trace": excerpt,
+        "repository": payload["repository"],
+        "fingerprint": fingerprint,
+        "status": "open",
+        "metadata": payload["metadata"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        db["incidents"].insert_one(incident)
+        try:
+            db["audit_logs"].insert_one({
+                "incident_id": incident_id,
+                "actor": "PATCHY_SECURITY_PROBE",
+                "action": "SECURITY_VALIDATION_FINDING",
+                "details": payload["metadata"],
+                "timestamp": now,
+            })
+        except Exception:
+            logger.exception("Could not write audit record for security incident %s", incident_id)
+        # Security findings enter the same analysis pipeline as ingested errors,
+        # but are queued directly to avoid a recursive HTTP ingest loop.
+        from backend.utils.app_utils import run_ai_analysis_pipeline
+        try:
+            asyncio.create_task(asyncio.to_thread(run_ai_analysis_pipeline, incident_id, payload))
+        except Exception:
+            logger.exception("Could not queue analysis for security incident %s", incident_id)
+        return incident_id
+    except Exception:
+        logger.exception("Could not persist security incident for flow %s", flow.get("_id"))
+        return None
 
 
 def _validate_auth(auth: Any) -> dict[str, Any]:
@@ -143,6 +263,7 @@ def _validate_step(step: dict[str, Any], index: int) -> dict[str, Any]:
             "body": body,
             "expect_status": expect_status,
             "inputs": values,
+            "assert_sanitized": bool(step.get("assert_sanitized", True)),
         }
 
     if step_type in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
@@ -304,12 +425,22 @@ def get_flow_plan(db, flow_id: str) -> dict[str, Any]:
 
 def create_flow_proposal(flow_id: str, actor: str, db) -> dict[str, Any]:
     flow = get_flow_plan(db, flow_id)
+    if flow.get("status") == "awaiting_approval":
+        pending_id = flow.get("proposal_id")
+        pending = db["patchy_proposals"].find_one({"_id": pending_id}) if pending_id else None
+        if pending and pending.get("status") == "awaiting_approval":
+            return serialize_mongo_doc(pending)
+        db["patchy_flow_plans"].update_one(
+            {"_id": flow_id},
+            {"$set": {"status": "ready", "proposal_id": None, "updated_at": datetime.now(timezone.utc)}},
+        )
+        flow["status"] = "ready"
     if flow.get("status") not in {"ready", "passed", "failed"}:
         raise PatchyFlowError(f"Flow cannot run from status: {flow.get('status', 'unknown')}")
 
     now = datetime.now(timezone.utc)
     proposal_id = f"flow_run_{flow_id}_{int(now.timestamp())}"
-    request_steps = [step for step in flow["steps"] if step["type"] in {"GET", "POST", "PUT", "PATCH", "DELETE"}]
+    request_steps = [step for step in flow["steps"] if step["type"] in {"GET", "POST", "PUT", "PATCH", "DELETE", "fuzz"}]
     auth_label = (flow.get("auth") or {}).get("type", "none")
     has_fuzz = bool(flow.get("has_fuzz") or any(step["type"] == "fuzz" for step in flow["steps"]))
     proposal = {
@@ -373,6 +504,106 @@ def create_validation_proposal(alias: str, actor: str, db) -> dict[str, Any]:
     return serialize_mongo_doc(proposal)
 
 
+def create_email_validation_proposal(
+    alias: str,
+    endpoint: str,
+    actor: str,
+    db,
+    expected_status: int = 422,
+) -> dict[str, Any]:
+    """Create the common email-validation flow without requiring JSON authoring."""
+    flow_name = f"email-validation-{endpoint.strip('/').replace('/', '-') or 'root'}"
+    existing = db["patchy_flow_plans"].find_one({"service": _service_base_url(alias)[0], "name": flow_name})
+    if existing:
+        flow_id = existing["_id"]
+    else:
+        is_consultation = endpoint.rstrip("/") in {"/api/consultation", "/api/consultations"}
+        request_body = (
+            {
+                "full_name": "Patchy Validation Probe",
+                "email": "{{fuzz_value}}",
+                "coaching_preference": "General Consultation",
+                "primary_goal": "Synthetic validation probe",
+            }
+            if is_consultation
+            else {
+                "name": "Patchy Validation Probe",
+                "email": "{{fuzz_value}}",
+                "phone": "",
+                "session_type": "consultation",
+                "preferred_time": "morning",
+                "timezone": "America/Chicago",
+                "notes": "Synthetic validation probe",
+            }
+        )
+        flow = create_flow_plan(
+            alias,
+            flow_name,
+            [{
+                "type": "fuzz",
+                "url": endpoint,
+                "field": "email",
+                "body": request_body,
+                "catalog": "email",
+                "expect_status": expected_status,
+            }],
+            actor,
+            db,
+        )
+        flow_id = flow["_id"]
+    return create_flow_proposal(flow_id, actor, db)
+
+
+def create_leakage_validation_proposal(
+    alias: str,
+    endpoint: str,
+    actor: str,
+    db,
+    expected_status: int = 422,
+) -> dict[str, Any]:
+    """Create a bounded response-leakage probe without enumerating database data."""
+    flow_name = f"database-leakage-{endpoint.strip('/').replace('/', '-') or 'root'}"
+    service_name = _service_base_url(alias)[0]
+    existing = db["patchy_flow_plans"].find_one({"service": service_name, "name": flow_name})
+    if existing:
+        return create_flow_proposal(existing["_id"], actor, db)
+
+    is_consultation = endpoint.rstrip("/") in {"/api/consultation", "/api/consultations"}
+    request_body = (
+        {
+            "full_name": "Patchy Leakage Probe",
+            "email": "{{fuzz_value}}@example.com",
+            "coaching_preference": "General Consultation",
+            "primary_goal": "Synthetic leakage probe",
+        }
+        if is_consultation
+        else {
+            "name": "Patchy Leakage Probe",
+            "email": "probe@example.com",
+            "phone": "",
+            "session_type": "consultation",
+            "preferred_time": "morning",
+            "timezone": "America/Chicago",
+            "notes": "{{fuzz_value}}",
+        }
+    )
+    flow = create_flow_plan(
+        alias,
+        flow_name,
+        [{
+            "type": "fuzz",
+            "url": endpoint,
+            "field": "email" if is_consultation else "notes",
+            "body": request_body,
+            "inputs": _FUZZ_CATALOGS["database"],
+            "expect_status": expected_status,
+        }],
+        actor,
+        db,
+    )
+    return create_flow_proposal(flow["_id"], actor, db)
+
+
 def _extract_capture(source: str, response: httpx.Response) -> Any:
     kind, _, key = source.partition(".")
     if kind == "json":
@@ -427,6 +658,7 @@ async def execute_flow(db, proposal_id: str, actor: str) -> dict[str, Any]:
         synthetic_headers = {
             "X-ErrAgent-Synthetic": "true",
             "X-ErrAgent-Run-Id": run_id,
+            "X-ErrAgent-Correlation-Id": run_id,
             "X-ErrAgent-Flow-Id": flow["_id"],
         }
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
@@ -463,6 +695,39 @@ async def execute_flow(db, proposal_id: str, actor: str) -> dict[str, Any]:
                                 detail = "Server error while validating invalid input"
                             elif response.status_code != expected:
                                 detail = f"Expected HTTP {expected}, got {response.status_code}"
+                            response_text = response.text.lower()
+                            sanitized = not any(marker in response_text for marker in _UNSAFE_REFLECTION_MARKERS)
+                            database_marker = next(
+                                (marker for marker in _DATABASE_LEAK_MARKERS if marker in response_text),
+                                None,
+                            )
+                            database_incident_id = None
+                            if database_marker:
+                                database_incident_id = _record_database_leak_incident(
+                                    db,
+                                    flow,
+                                    run_id,
+                                    rendered["url"],
+                                    fuzz_value,
+                                    response.text,
+                                    response.status_code,
+                                )
+                                detail = "Database implementation detail was leaked in the response"
+                            elif 200 <= response.status_code < 300:
+                                database_incident_id = _record_database_leak_incident(
+                                    db,
+                                    flow,
+                                    run_id,
+                                    rendered["url"],
+                                    fuzz_value,
+                                    response.text,
+                                    response.status_code,
+                                    category="input_validation_bypass",
+                                    severity="high",
+                                    finding="malformed input acceptance",
+                                )
+                            if rendered.get("assert_sanitized", True) and not sanitized:
+                                detail = "Unsafe markup was reflected in the response"
                             fuzz_cases.append({
                                 "case": case_index + 1,
                                 "field": rendered["field"],
@@ -470,6 +735,11 @@ async def execute_flow(db, proposal_id: str, actor: str) -> dict[str, Any]:
                                 "status": case_status if not detail else "failed",
                                 "httpStatus": response.status_code,
                                 "elapsedMs": round(response.elapsed.total_seconds() * 1000),
+                                "sanitized": sanitized,
+                                "databaseLeak": database_marker is not None,
+                                "databaseLeakMarker": database_marker,
+                                "securityIncidentId": database_incident_id,
+                                "responseExcerpt": _redact_finding_text(response.text),
                                 "detail": detail,
                             })
                             if detail:

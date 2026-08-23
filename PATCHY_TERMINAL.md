@@ -224,6 +224,7 @@ flow define <bty|saapp> <name> <json-actions>
 flow list [bty|saapp]
 flow run <flow-id>
 probe validation <bty|saapp>
+validate email <bty|saapp> <path>
 ```
 
 For simple flows, use the easier compact form instead of escaped JSON:
@@ -242,7 +243,7 @@ For bounded staging-only input validation probing, define a `fuzz` step in JSON 
 flow define bty email-validation "[{\"type\":\"fuzz\",\"url\":\"/api/contact\",\"field\":\"email\",\"body\":{\"email\":\"{{fuzz_value}}\",\"message\":\"test\"},\"catalog\":\"email\",\"expect_status\":422}]"
 ```
 
-Fuzz steps support up to eight bounded catalog values, only use `POST`, and require a validation status (`400`, `401`, `403`, `404`, `409`, or `422`). A `2xx` response is reported as an unexpected success; a `5xx` response is reported as a server error.
+Fuzz steps support up to eight bounded catalog values, only use `POST`, and require a validation status (`400`, `401`, `403`, `404`, `409`, or `422`). They also check response text for raw `<script>`, `javascript:`, `onerror=`, and `onload=` reflection by default. Set `"assert_sanitized": false` only when a flow has a documented reason to inspect a response without that check. A `2xx` response is reported as an unexpected success; a `5xx` response is reported as a server error; unsafe reflected markup is reported separately as a sanitization failure.
 
 By default, fuzz flows require `ERRAGENT_BTY_SYNTHETIC_ENV=staging`. For a production deployment with a verified synthetic safety contract, the target app must honor these headers on every request:
 
@@ -260,7 +261,37 @@ Run all saved validation flows for a service with one approval gate:
 probe validation bty
 ```
 
-The audit runs a health check, then the registered fuzz flows, stops each flow at its first unexpected result, and returns per-case evidence. It does not automatically ask the LLM to modify code or create a PR; remediation remains a separate reviewed phase.
+The audit runs a health check, then the registered fuzz flows, stops each flow at its first unexpected result, and returns per-case evidence. If malformed input receives a `2xx` response, Patchy automatically creates a deduplicated high-severity `input_validation_bypass` incident with the endpoint, status, run ID, submitted canary, and redacted response excerpt. If the response leaks MongoDB or driver details, it creates a high-severity `database_error_disclosure` incident instead. Patchy does not enumerate data or execute database expressions.
+
+It does not automatically ask the LLM to modify code or create a PR; remediation remains a separate reviewed phase. Open the created incident to review the evidence, then use the normal analysis and HITL patch workflow.
+
+For the common BTY booking email-validation check, no JSON is needed. Patchy supplies the other valid `AppointmentBooking` fields and varies only `email`, so a `422` specifically tests email validation:
+
+```text
+validate email bty /api/consultations
+```
+
+For the booking page, use:
+
+```text
+validate email bty /api/bookings
+```
+
+Synthetic booking requests include `X-ErrAgent-Synthetic: true`, `X-ErrAgent-Correlation-Id`, and `X-ErrAgent-Flow-Id`. BTY's existing synthetic dependency validates the complete request first, then suppresses booking persistence and notification email when the request is synthetic.
+
+For the Home page consultation form, use the same shortcut with its actual endpoint:
+
+```text
+validate email bty /api/consultation
+```
+
+Patchy supplies BTY's required `full_name`, `coaching_preference`, and `primary_goal` fields and varies only `email`. This tests the Home form's `ConsultationLead.email` validation without creating a lead or sending a notification email.
+
+This creates or reuses a bounded email-validation flow, then presents the normal approval card. The equivalent long form is also available:
+
+```text
+probe validation email bty /api/consultations
+```
 
 Example — a signup flow with a captured value reused later:
 

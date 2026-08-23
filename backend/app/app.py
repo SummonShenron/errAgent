@@ -1259,6 +1259,38 @@ async def merge_hotfix_pr(
 
     return {"status": "success", "message": "Pull request successfully merged into main!"}
 
+@app.post("/api/v1/incidents/{incident_id}/analyze", tags=["Incidents"])
+async def analyze_incident(
+    incident_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """Run the first analysis for an open incident."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database unavailable.")
+
+    incident = db["incidents"].find_one({"_id": incident_id})
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found.")
+    if incident.get("status") != "open":
+        raise HTTPException(status_code=409, detail="Only open incidents can receive first analysis.")
+
+    original_payload = dict(incident.get("raw_payload") or {})
+    if not original_payload:
+        original_payload = {
+            "service_name": incident.get("service_name", "errAgent"),
+            "environment": incident.get("environment", "production"),
+            "error_message": incident.get("error_message", "Unhandled exception"),
+            "stack_trace": incident.get("stack_trace", ""),
+            "repository": incident.get("repository", ""),
+            "metadata": dict(incident.get("metadata") or {}),
+        }
+
+    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, original_payload)
+    return {"status": "accepted", "message": "Initial incident analysis triggered."}
+
+
 @app.post("/api/v1/incidents/{incident_id}/reanalyze", tags=["Incidents"])
 async def reanalyze_incident(
     incident_id: str,
@@ -1276,12 +1308,20 @@ async def reanalyze_incident(
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found.")
     
-    # Optional: ensure status is appropriate for re-analysis
     if incident.get("status") not in ["fix_proposed", "analysis_failed"]:
          raise HTTPException(status_code=400, detail="Incident cannot be re-analyzed in current state.")
 
     # 2. Add optional 'instructions' to the original payload metadata
-    original_payload = incident.get("raw_payload", {}) # Assuming you saved this!
+    original_payload = dict(incident.get("raw_payload") or {})
+    if not original_payload:
+        original_payload = {
+            "service_name": incident.get("service_name", "errAgent"),
+            "environment": incident.get("environment", "production"),
+            "error_message": incident.get("error_message", "Unhandled exception"),
+            "stack_trace": incident.get("stack_trace", ""),
+            "repository": incident.get("repository", ""),
+            "metadata": dict(incident.get("metadata") or {}),
+        }
     if "metadata" not in original_payload:
         original_payload["metadata"] = {}
     

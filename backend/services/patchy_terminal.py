@@ -15,7 +15,7 @@ from backend.services.patchy_test_planner import PatchyTestPlanError, create_tes
 from backend.services.patchy_test_runner import PatchyTestExecutionError, create_test_execution_proposal, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, create_generated_test_proposal, generate_regression_test
 from backend.services.synthetic_adapters import SyntheticAdapterError, create_question_proposal
-from backend.services.patchy_flow_runner import PatchyFlowError, create_flow_plan, create_flow_proposal, create_validation_proposal, list_flow_plans
+from backend.services.patchy_flow_runner import PatchyFlowError, create_email_validation_proposal, create_flow_plan, create_flow_proposal, create_leakage_validation_proposal, create_validation_proposal, list_flow_plans
 from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
 
 
@@ -48,6 +48,8 @@ COMMAND_HELP = (
     ("flow list [bty|saapp]", "List saved flow plans"),
     ("flow run <flow-id>", "Propose a flow execution for approval"),
     ("probe validation <bty|saapp>", "Propose a bounded validation audit"),
+    ("validate email <bty|saapp> <path>", "Probe email validation without JSON"),
+    ("validate leakage <bty|saapp> <path>", "Probe for leaked database details"),
     ("clear", "Clear the terminal screen locally"),
 )
 
@@ -774,7 +776,59 @@ async def execute_patchy_command(
         ]
         return _response(status, "Patchy diagnostics", lines, {"health": health_result.get("data"), "incidents": incidents, "errorLogs": error_logs})
 
+    if command == "validate":
+        if len(args) == 3 and args[0].lower() == "leakage":
+            try:
+                proposal = create_leakage_validation_proposal(args[1], args[2], actor, db)
+            except PatchyFlowError as exc:
+                raise PatchyCommandError(str(exc)) from exc
+            return _response(
+                "approval_required",
+                "Approval required for response-leakage probe",
+                [
+                    proposal["summary"],
+                    f"Endpoint: {proposal['action']['url']}",
+                    "Patchy will send bounded inert syntax canaries only.",
+                    "It checks for database implementation details in the response and stores redacted evidence.",
+                    "Risk: staging only by default; no database enumeration or data access.",
+                ],
+                {"proposal": proposal},
+            )
+        if len(args) != 3 or args[0].lower() != "email":
+            raise PatchyCommandError("Usage: validate email <bty|saapp> <path>")
+        try:
+            proposal = create_email_validation_proposal(args[1], args[2], actor, db)
+        except PatchyFlowError as exc:
+            raise PatchyCommandError(str(exc)) from exc
+        return _response(
+            "approval_required",
+            "Approval required for email validation probe",
+            [
+                proposal["summary"],
+                f"Endpoint: {proposal['action']['url']}",
+                "Patchy will try bounded malformed email values and expect HTTP 422.",
+                "Risk: staging only by default; no real side effects are allowed.",
+            ],
+            {"proposal": proposal},
+        )
+
     if command == "probe":
+        if len(args) == 4 and args[0].lower() == "validation" and args[1].lower() == "email":
+            try:
+                proposal = create_email_validation_proposal(args[2], args[3], actor, db)
+            except PatchyFlowError as exc:
+                raise PatchyCommandError(str(exc)) from exc
+            return _response(
+                "approval_required",
+                "Approval required for email validation probe",
+                [
+                    proposal["summary"],
+                    f"Endpoint: {proposal['action']['url']}",
+                    "Patchy will try bounded malformed email values and expect HTTP 422.",
+                    "Risk: staging only by default; no real side effects are allowed.",
+                ],
+                {"proposal": proposal},
+            )
         if len(args) == 2 and args[0].lower() == "validation":
             try:
                 proposal = create_validation_proposal(args[1], actor, db)

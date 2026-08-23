@@ -25,6 +25,8 @@ class FakeCollection:
         self.documents = {doc["_id"]: deepcopy(doc) for doc in (documents or [])}
 
     def insert_one(self, document):
+        if "_id" not in document:
+            document = {**document, "_id": f"generated_{len(self.documents)}"}
         self.documents[document["_id"]] = deepcopy(document)
 
     def find_one(self, query, **_kwargs):
@@ -76,6 +78,8 @@ class FakeDB:
             "patchy_flow_plans": FakeCollection(),
             "patchy_flow_runs": FakeCollection(),
             "patchy_proposals": FakeCollection(),
+            "incidents": FakeCollection(),
+            "audit_logs": FakeCollection(),
         }
 
     def __getitem__(self, name):
@@ -254,6 +258,16 @@ def test_flow_requires_approval():
     asyncio.run(scenario())
 
 
+def test_flow_run_resumes_pending_approval():
+    db = FakeDB()
+    flow = create_flow_plan("bty", "pending flow", [{"type": "GET", "url": "/api/health"}], "op", db)
+    first = create_flow_proposal(flow["_id"], "op", db)
+    second = create_flow_proposal(flow["_id"], "op", db)
+
+    assert second["_id"] == first["_id"]
+    assert second["status"] == "awaiting_approval"
+
+
 def test_flow_env_bearer_auth_injects_header(monkeypatch):
     _patch_client(monkeypatch, [FakeResponse(200, json_data={"status": "ok"})])
     monkeypatch.setenv("ERRAGENT_BTY_ADMIN_TOKEN", "clerk-session-token-abc")
@@ -317,11 +331,17 @@ def test_fuzz_flow_requires_staging(monkeypatch):
         "type": "fuzz",
         "url": "/api/contact",
         "field": "email",
-        "body": {"email": "{{fuzz_value}}"},
+        "body": {
+            "name": "Patchy Validation Probe",
+            "email": "{{fuzz_value}}",
+            "session_type": "consultation",
+            "preferred_time": "morning",
+        },
         "catalog": "email",
     }]
     monkeypatch.delenv("ERRAGENT_BTY_SYNTHETIC_ENV", raising=False)
-    with pytest.raises(PatchyFlowError, match="staging-only"):
+    monkeypatch.delenv("ERRAGENT_BTY_SYNTHETIC_MUTATIONS_SAFE", raising=False)
+    with pytest.raises(PatchyFlowError, match="production safety contract"):
         create_flow_plan("bty", "email validation", action, "op", db)
 
     monkeypatch.setenv("ERRAGENT_BTY_SYNTHETIC_ENV", "staging")
@@ -366,6 +386,154 @@ def test_fuzz_flow_stops_on_unexpected_success(monkeypatch):
         assert completed["status"] == "failed"
         assert "Unexpected success" in completed["result"]["failure"]
         assert len(completed["result"]["steps"][0]["cases"]) == 2
+
+    asyncio.run(scenario())
+
+
+def test_fuzz_flow_creates_redacted_database_leak_incident(monkeypatch):
+    monkeypatch.setenv("ERRAGENT_BTY_SYNTHETIC_ENV", "staging")
+    _patch_client(monkeypatch, [
+        FakeResponse(422, text="pymongo.errors.ServerSelectionTimeoutError: mongodb+srv://user:secret@example/db"),
+    ])
+
+    async def scenario():
+        db = FakeDB()
+        flow = create_flow_plan(
+            "bty",
+            "database leakage",
+            [{
+                "type": "fuzz",
+                "url": "/api/consultations",
+                "field": "email",
+                "body": {
+                    "full_name": "Patchy",
+                    "email": "{{fuzz_value}}",
+                    "coaching_preference": "General Consultation",
+                    "primary_goal": "probe",
+                },
+                "inputs": ["'"],
+                "expect_status": 422,
+            }],
+            "op",
+            db,
+        )
+        proposal = create_flow_proposal(flow["_id"], "op", db)
+        completed = await execute_flow(db, proposal["_id"], "approver")
+
+        case = completed["result"]["steps"][0]["cases"][0]
+        assert case["databaseLeak"] is True
+        assert case["securityIncidentId"]
+        assert "[REDACTED]" in db["incidents"].documents[case["securityIncidentId"]]["stack_trace"]
+        assert "secret" not in db["incidents"].documents[case["securityIncidentId"]]["stack_trace"]
+        assert len(db["incidents"].documents) == 1
+
+    asyncio.run(scenario())
+
+
+def test_fuzz_flow_creates_incident_for_unexpected_success(monkeypatch):
+    monkeypatch.setenv("ERRAGENT_BTY_SYNTHETIC_ENV", "staging")
+    _patch_client(monkeypatch, [FakeResponse(201, json_data={"accepted": True})])
+
+    async def scenario():
+        db = FakeDB()
+        flow = create_flow_plan(
+            "bty",
+            "input validation bypass",
+            [{
+                "type": "fuzz",
+                "url": "/api/bookings",
+                "field": "email",
+                "body": {
+                    "name": "Patchy",
+                    "email": "{{fuzz_value}}",
+                    "session_type": "consultation",
+                },
+                "inputs": ["'"],
+                "expect_status": 422,
+            }],
+            "op",
+            db,
+        )
+        proposal = create_flow_proposal(flow["_id"], "op", db)
+        completed = await execute_flow(db, proposal["_id"], "approver")
+        case = completed["result"]["steps"][0]["cases"][0]
+
+        assert completed["status"] == "failed"
+        assert case["securityIncidentId"]
+        incident = db["incidents"].documents[case["securityIncidentId"]]
+        assert incident["metadata"]["category"] == "input_validation_bypass"
+        assert incident["metadata"]["severity"] == "high"
+        assert incident["metadata"]["http_status"] == 201
+
+    asyncio.run(scenario())
+
+
+def test_security_finding_queues_erragent_analysis(monkeypatch):
+    monkeypatch.setenv("ERRAGENT_BTY_SYNTHETIC_ENV", "staging")
+    _patch_client(monkeypatch, [FakeResponse(201, json_data={"accepted": True})])
+    queued = []
+
+    def fake_analysis(incident_id, payload):
+        queued.append((incident_id, payload))
+
+    import backend.utils.app_utils as app_utils
+    monkeypatch.setattr(app_utils, "run_ai_analysis_pipeline", fake_analysis)
+
+    async def scenario():
+        db = FakeDB()
+        flow = create_flow_plan(
+            "bty",
+            "analysis handoff",
+            [{
+                "type": "fuzz",
+                "url": "/api/bookings",
+                "field": "email",
+                "body": {"name": "Patchy", "email": "{{fuzz_value}}"},
+                "inputs": ["'"],
+                "expect_status": 422,
+            }],
+            "op",
+            db,
+        )
+        proposal = create_flow_proposal(flow["_id"], "op", db)
+        completed = await execute_flow(db, proposal["_id"], "approver")
+        await asyncio.sleep(0)
+        case = completed["result"]["steps"][0]["cases"][0]
+        assert case["securityIncidentId"]
+        assert queued
+        assert queued[0][0] == case["securityIncidentId"]
+        assert queued[0][1]["metadata"]["source"] == "patchy_security_probe"
+
+    asyncio.run(scenario())
+
+
+def test_fuzz_flow_detects_unsafe_reflection(monkeypatch):
+    monkeypatch.setenv("ERRAGENT_BTY_SYNTHETIC_ENV", "staging")
+    _patch_client(monkeypatch, [
+        FakeResponse(422, text="<script>alert(1)</script>"),
+    ])
+
+    async def scenario():
+        db = FakeDB()
+        flow = create_flow_plan(
+            "bty",
+            "sanitized email validation",
+            [{
+                "type": "fuzz",
+                "url": "/api/consultations",
+                "field": "email",
+                "body": {"email": "{{fuzz_value}}"},
+                "inputs": ["<script>alert(1)</script>@x.com"],
+                "expect_status": 422,
+            }],
+            "op",
+            db,
+        )
+        proposal = create_flow_proposal(flow["_id"], "op", db)
+        completed = await execute_flow(db, proposal["_id"], "approver")
+        assert completed["status"] == "failed"
+        assert "Unsafe markup" in completed["result"]["failure"]
+        assert completed["result"]["steps"][0]["cases"][0]["sanitized"] is False
 
     asyncio.run(scenario())
 

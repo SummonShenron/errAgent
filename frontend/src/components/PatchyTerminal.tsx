@@ -323,11 +323,29 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
           `Flow: ${result.flowName || 'unnamed'} (${result.service || 'unknown service'})`,
           `Steps passed: ${result.stepsPassed}/${result.stepsTotal}`,
           '',
-          ...result.steps.map((step: any) => {
+          ...result.steps.flatMap((step: any) => {
             const mark = step.status === 'passed' ? '✓' : '✗';
             const label = step.url ? `${step.type} ${step.url}` : step.type;
             const extra = step.httpStatus ? ` → HTTP ${step.httpStatus} (${step.elapsedMs}ms)` : step.detail ? ` — ${step.detail}` : '';
-            return `${mark} ${label}${extra}`;
+            const cases = Array.isArray(step.cases)
+              ? step.cases.flatMap((testCase: any) => [
+                  `   Case ${testCase.case}: ${JSON.stringify(testCase.input)}`,
+                  `     ${testCase.status === 'passed' ? '✓' : '✗'} HTTP ${testCase.httpStatus ?? 'error'}${testCase.elapsedMs != null ? ` (${testCase.elapsedMs}ms)` : ''}`,
+                  ...(testCase.sanitized === false ? ['     ✗ Unsafe response reflection detected'] : []),
+                  ...(testCase.databaseLeak ? [
+                    `     ✗ Database detail leakage detected (${testCase.databaseLeakMarker})`,
+                    ...(testCase.securityIncidentId ? [`     Incident created: ${testCase.securityIncidentId}`] : []),
+                    ...(testCase.responseExcerpt ? [`     Redacted evidence: ${testCase.responseExcerpt}`] : []),
+                  ] : []),
+                  ...(testCase.securityIncidentId && !testCase.databaseLeak ? [
+                    `     ✗ Security finding: malformed input accepted`,
+                    `     Incident created: ${testCase.securityIncidentId}`,
+                    ...(testCase.responseExcerpt ? [`     Redacted evidence: ${testCase.responseExcerpt}`] : []),
+                  ] : []),
+                  ...(testCase.detail ? [`     ${testCase.detail}`] : []),
+                ])
+              : [];
+            return [`${mark} ${label}${extra}`, ...cases];
           }),
           ...(result.failure ? ['', `Failure: ${result.failure}`] : []),
         ];

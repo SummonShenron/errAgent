@@ -426,6 +426,34 @@ export default function App() {
     await handleReanalyzeWithInstructions(incidentId, '');
   };
 
+  const handleAnalyze = async (incidentId: string) => {
+    setIsReanalyzing(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const response = await fetch(`${API_BASE_URL}/incidents/${incidentId}/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (response.ok) {
+        alert('Initial analysis triggered!');
+        await fetchIncidents();
+        await fetchIncidentDetail(incidentId);
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        alert(`Failed to analyze: ${errData.detail || response.statusText}`);
+      }
+    } catch (err) {
+      console.error('Error analyzing incident:', err);
+      alert('An error occurred during initial analysis.');
+    } finally {
+      setIsReanalyzing(false);
+    }
+  };
+
   const handleApproveHotfix = async (incidentId: string) => {
     setIsApproving(true);
     try {
@@ -735,6 +763,20 @@ export default function App() {
                               }}
                             >
                               Retry
+                            </button>
+                          )}
+                          {inc.status === 'open' && (
+                            <button
+                              type="button"
+                              className="retry-analysis-btn"
+                              title="Analyze Incident"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleAnalyze(inc._id);
+                              }}
+                              disabled={isReanalyzing}
+                            >
+                              {isReanalyzing ? 'Analyzing...' : 'Analyze'}
                             </button>
                           )}
                           <button
