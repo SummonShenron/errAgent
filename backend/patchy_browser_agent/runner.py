@@ -3,7 +3,7 @@
 from playwright.async_api import async_playwright
 import asyncio
 
-BTY_FRONTEND = "https://www.btyfitness.app/admin"
+BTY_FRONTEND = "https://btyapp.vercel.app/admin"
 TEST_ADMIN_EMAIL = "jackharper0517@gmail.com"
 TEST_ADMIN_PASSWORD = "R1$3ifyouwould!"
 
@@ -14,13 +14,18 @@ async def run_browser_and_get_token():
         browser = await pw.chromium.connect(BROWSERLESS_WS)
         page = await browser.new_page()
 
-        await page.goto(BTY_FRONTEND)
-        await page.wait_for_selector('input[type="email"]')
-        await page.fill('input[type="email"]', TEST_ADMIN_EMAIL)
+        # Use DEV frontend, not production
+        await page.goto("https://btyapp.vercel.app/admin")
+
+        # Clerk dev login selector
+        await page.wait_for_selector('input[name="identifier"]', timeout=30000)
+        await page.fill('input[name="identifier"]', TEST_ADMIN_EMAIL)
+
         await page.fill('input[type="password"]', TEST_ADMIN_PASSWORD)
         await page.click('button:has-text("Sign in")')
 
         await page.wait_for_load_state("networkidle")
+
         await page.wait_for_selector("text=Content", timeout=15000)
 
         token = await page.evaluate(
@@ -29,6 +34,7 @@ async def run_browser_and_get_token():
 
         await browser.close()
         return token
+
 
 
 if __name__ == "__main__":
