@@ -12,7 +12,23 @@ _ADAPTERS = {
         "url_env": "ERRAGENT_SONIC_SYNTHETIC_URL",
         "environment_env": "ERRAGENT_SONIC_SYNTHETIC_ENV",
     },
+
+    "consultations": {
+        "label": "BTY Synthetic Consultations",
+        "url_env": "ERRAGENT_CONSULTATIONS_SYNTHETIC_URL",
+        "environment_env": "ERRAGENT_CONSULTATIONS_SYNTHETIC_ENV",
+    },
+
+    "bookings": {
+        "label": "BTY Synthetic Bookings",
+        "url_env": "ERRAGENT_BOOKINGS_SYNTHETIC_URL",
+        "environment_env": "ERRAGENT_BOOKINGS_SYNTHETIC_ENV",
+    },
 }
+
+
+
+
 
 
 def get_synthetic_adapter(alias: str, allow_production: bool = False) -> dict[str, Any]:
@@ -38,7 +54,7 @@ def get_synthetic_adapter(alias: str, allow_production: bool = False) -> dict[st
     if not url.startswith("https://"):
         raise SyntheticAdapterError("Synthetic adapter URL must use HTTPS.")
     headers = {"Accept": "application/json"}
-    bearer_token = os.getenv("ERRAGENT_SONIC_SYNTHETIC_BEARER_TOKEN", "").strip()
+    bearer_token = os.getenv(adapter["url_env"].replace("_URL", "_BEARER_TOKEN"), "").strip()
     if bearer_token:
         headers["Authorization"] = f"Bearer {bearer_token}"
     return {

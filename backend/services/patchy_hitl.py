@@ -3,9 +3,10 @@ import statistics
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
-
+import logging
+import json
+import uuid
 import requests
-
 from backend.services.synthetic_adapters import SyntheticAdapterError, get_synthetic_adapter
 from backend.utils.app_utils import SERVICES, serialize_mongo_doc
 from backend.services.patchy_planner import (
@@ -16,7 +17,7 @@ from backend.services.patchy_planner import (
     record_adaptive_step_result,
 )
 
-
+logger = logging.getLogger("errAgent Logger")
 class PatchyProposalError(ValueError):
     pass
 
@@ -26,6 +27,10 @@ _SERVICE_ALIASES = {
     "saapp": "SAAPP Widget",
 }
 
+SYNTHETIC_ENDPOINT_MAP = {
+    "/api/consultations": "consultations",
+    "/api/bookings": "bookings",
+}
 
 def _service_by_alias(alias: str) -> dict[str, Any]:
     service_name = _SERVICE_ALIASES.get(alias.lower())
@@ -202,6 +207,188 @@ def create_plan_step_proposal(db, actor: str, plan_id: str | None = None) -> dic
     db["patchy_proposals"].replace_one({"_id": proposal_id}, proposal, upsert=True)
     return serialize_mongo_doc(proposal)
 
+BTY_BASE_URL = "https://btyapp.onrender.com"
+
+async def _send_synthetic_or_real_request(endpoint: dict, payload: dict) -> dict:
+    method = endpoint.get("method", "POST").upper()
+    url = endpoint.get("url")
+    synthetic = endpoint.get("synthetic", False)
+
+    if method not in {"POST", "PUT", "PATCH"}:
+        return {"status": 405, "body": "Method not allowed for pentest sweep"}
+
+    # Build BTY URL directly
+    full_url = BTY_BASE_URL.rstrip("/") + url
+
+    # Synthetic headers for BTY
+    headers = {
+        "x-erragent-synthetic": "true",
+        "x-erragent-correlation-id": str(uuid.uuid4()),
+        "x-erragent-synthetic-reason": "pentest_sweep",
+    }
+
+    start = datetime.now(timezone.utc)
+    response = await asyncio.to_thread(
+        requests.post,
+        full_url,
+        json=payload,
+        headers=headers,
+        timeout=15,
+    )
+    elapsed = (datetime.now(timezone.utc) - start).total_seconds() * 1000
+
+    try:
+        body = response.json()
+    except Exception:
+        body = response.text[:4000]
+
+    return {
+        "status": response.status_code,
+        "elapsedMs": round(elapsed),
+        "body": body,
+        "synthetic": synthetic,
+    }
+
+
+
+SERVICE_REPO_MAP = {
+    "BTY Fitness": "SummonShenron/BTYAPP",
+    "SAAPP Widget": "SummonShenron/SAAPP",
+}
+
+def resolve_repository(service_name: str) -> str:
+    return SERVICE_REPO_MAP.get(service_name, "SummonShenron/UnknownService")
+
+
+async def approve_and_execute_pentest_sweep(
+    db,
+    proposal,
+    actor: str,
+    broker=None,
+) -> dict[str, Any]:
+    # --- Safety checks -------------------------------------------------------
+    if proposal.get("status") != "awaiting_approval":
+        raise PatchyProposalError(
+            f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}"
+        )
+    if proposal.get("kind") != "pentest_sweep":
+        raise PatchyProposalError("Only pentest sweep proposals can be approved")
+
+    # --- Claim proposal ------------------------------------------------------
+    now = datetime.now(timezone.utc)
+    proposal_id = proposal["_id"]
+
+    claimed = db["patchy_proposals"].update_one(
+        {"_id": proposal_id, "status": "awaiting_approval"},
+        {
+            "$set": {
+                "status": "running",
+                "approved_by": actor,
+                "approved_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    if claimed.modified_count != 1:
+        raise PatchyProposalError("Proposal was already claimed")
+
+    # --- Endpoint + fuzz configuration --------------------------------------
+    endpoints = [
+        {"method": "POST", "url": "/api/consultations", "synthetic": True},
+        {"method": "POST", "url": "/api/bookings", "synthetic": True},
+        # {"method": "POST", "url": "/api/admin/schedule", "synthetic": False},
+        # {"method": "POST", "url": "/api/admin/leads", "synthetic": False},
+    ]
+
+    fuzz_payloads = [
+        {"email": "not-an-email"},
+        {"email": "<script>alert(1)</script>"},
+        {"email": "test@@domain.com"},
+        {"email": "test@domain"},
+        {"email": "test@domain..com"},
+    ]
+
+    vulnerabilities = []
+
+    # --- Pentest sweep loop --------------------------------------------------
+    for endpoint in endpoints:
+        for payload in fuzz_payloads:
+            response = await _send_synthetic_or_real_request(endpoint, payload)
+
+            status = response.get("status")
+            body = response.get("body")
+
+            # --- Vulnerability detection -------------------------------------
+            issue = None
+
+            if status >= 500:
+                issue = "server_error"
+
+            elif status >= 400:
+                issue = "validation_failure"
+
+            elif isinstance(body, dict):
+                text = json.dumps(body).lower()
+                if "syntaxerror" in text or "traceback" in text or "sql" in text:
+                    issue = "leakage"
+
+                if "<script>" in text or "alert(" in text:
+                    issue = "unsanitized_input"
+
+            if issue:
+                vuln = {
+                    "endpoint": endpoint["url"],
+                    "payload": payload,
+                    "issue": issue,
+                    "response": response,
+                }
+                vulnerabilities.append(vuln)
+
+                logger.info(
+                    f"[pentest] {issue} detected at {endpoint['url']} "
+                    f"with payload {payload}: {response}"
+                )
+
+                # --- Incident creation ---------------------------------------
+                incident_doc = {
+                    "_id": f"incident_{uuid4().hex}",
+                    "service_name": proposal["action"]["serviceName"],
+                    "repository": resolve_repository(proposal["action"]["serviceName"]),
+                    "status": "open",
+                    "error_message": f"Pentest sweep: {issue} at {endpoint['url']}",
+                    "created_at": datetime.now(timezone.utc),
+                    "details": vuln,
+                }
+                db["incidents"].insert_one(incident_doc)
+
+    # --- Final status + result ----------------------------------------------
+    completed_at = datetime.now(timezone.utc)
+
+    final_status = "warning" if vulnerabilities else "succeeded"
+
+    result = {
+        "serviceAlias": proposal["action"]["serviceAlias"],
+        "endpointsScanned": len(endpoints),
+        "vulnerabilitiesFound": len(vulnerabilities),
+        "vulnerabilities": vulnerabilities,
+    }
+
+    db["patchy_proposals"].update_one(
+        {"_id": proposal_id},
+        {
+            "$set": {
+                "status": final_status,
+                "result": result,
+                "completed_at": completed_at,
+                "updated_at": completed_at,
+            }
+        },
+    )
+
+    # --- Return final serialized proposal -----------------------------------
+    return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal_id}))
+
+
 
 def decline_plan_step_proposal(db, proposal_id: str, actor: str) -> dict[str, Any]:
     proposal = get_proposal(db, proposal_id)
@@ -238,6 +425,8 @@ async def approve_and_execute_probe(
         raise PatchyProposalError(
             f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}"
         )
+    if proposal.get("kind") == "pentest_sweep":
+        return await approve_and_execute_pentest_sweep(db, proposal, actor, broker)
     if proposal.get("kind") == "synthetic_question":
         return await _approve_and_execute_synthetic_question(
             db,
@@ -247,12 +436,16 @@ async def approve_and_execute_probe(
         )
     if proposal.get("kind") == "plan_step":
         return await _approve_and_execute_plan_step(db, proposal, actor, broker)
-    if proposal.get("kind") not in {"http_probe", "latency_probe", "synthetic_http"} or proposal.get("risk") not in {"read_only", "registered_read_only"}:
-        raise PatchyProposalError("Only registered read-only probes and synthetic checks are supported")
+    if proposal.get("kind") not in {"http_probe", "latency_probe", "synthetic_http", "pentest_sweep"} \
+        or proposal.get("risk") not in {"read_only", "registered_read_only"}:
+            raise PatchyProposalError("Only registered read-only probes and synthetic checks are supported")
+
+
 
     action = proposal.get("action") or {}
-    if action.get("method") != "GET":
+    if proposal.get("kind") != "pentest_sweep" and action.get("method") != "GET":
         raise PatchyProposalError("Policy rejected non-GET probe")
+
 
     registered_urls = {
         service["url"].rstrip("/") + service.get("health_path", "/")
@@ -291,6 +484,7 @@ async def approve_and_execute_probe(
 
         completed_at = datetime.now(timezone.utc)
         elapsed_values = [round(item.elapsed.total_seconds() * 1000) for item in responses]
+        
         if proposal["kind"] == "latency_probe":
             result = {
                 "samples": elapsed_values,
@@ -347,6 +541,9 @@ async def approve_and_execute_probe(
         completed["nextProposal"] = _create_latency_proposal(proposal, actor, db)
         completed["workflowStatus"] = "awaiting_approval"
         return completed
+
+    
+
 
     service_alias = workflow["serviceAlias"]
     service_name = _SERVICE_ALIASES[service_alias]
@@ -524,3 +721,34 @@ async def _approve_and_execute_plan_step(db, proposal: dict[str, Any], actor: st
         raise
 
     return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal["_id"]}))
+
+def create_pentest_sweep_proposal(alias: str, actor: str, db) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    proposal_id = f"pentest_{uuid4().hex}"
+    service = _service_by_alias(alias)
+
+    document = {
+        "_id": proposal_id,
+        "kind": "pentest_sweep",
+        "risk": "registered_read_only",
+        "status": "awaiting_approval",
+        "summary": f"Run a synthetic pentest sweep for {service['name']}",
+        "action": {
+            "method": "POST",
+            "url": service["url"].rstrip("/") + service.get("health_path", "/"),
+            "environment": "production",
+            "timeoutSeconds": 15,
+            "serviceAlias": alias.lower(),
+            "serviceName": service["name"],
+            "maxEndpoints": 50,
+            "maxFuzzPerEndpoint": 10,
+            "syntheticOnly": True,
+            "assertions": ["HTTP status is 2xx"],
+        },
+
+        "created_by": actor,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db["patchy_proposals"].insert_one(document)
+    return serialize_mongo_doc(document)

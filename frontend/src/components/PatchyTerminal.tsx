@@ -317,8 +317,19 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
       if (!response.ok) throw new Error(body.detail || `Approval failed: ${response.status}`);
       const result = body.result || {};
       const isFlow = body.kind === 'synthetic_flow';
+      const isPentest = body.kind === 'pentest_sweep';
       let resultLines: string[];
-      if (isFlow && Array.isArray(result.steps)) {
+
+      // Pentest sweep formatting
+      if (isPentest) {
+        resultLines = [
+          `Pentest sweep finished with status: ${body.status}`,
+          `Endpoints scanned: ${result.endpointsScanned}`,
+          `Vulnerabilities found: ${result.vulnerabilitiesFound}`,
+        ];
+      }
+      // Synthetic flow formatting
+      else if (isFlow && Array.isArray(result.steps)) {
         resultLines = [
           `Flow: ${result.flowName || 'unnamed'} (${result.service || 'unknown service'})`,
           `Steps passed: ${result.stepsPassed}/${result.stepsTotal}`,
@@ -326,60 +337,62 @@ export function PatchyTerminal({ open, onClose, apiBaseUrl, getToken }: PatchyTe
           ...result.steps.flatMap((step: any) => {
             const mark = step.status === 'passed' ? '✓' : '✗';
             const label = step.url ? `${step.type} ${step.url}` : step.type;
-            const extra = step.httpStatus ? ` → HTTP ${step.httpStatus} (${step.elapsedMs}ms)` : step.detail ? ` — ${step.detail}` : '';
-            const cases = Array.isArray(step.cases)
-              ? step.cases.flatMap((testCase: any) => [
-                  `   Case ${testCase.case}: ${JSON.stringify(testCase.input)}`,
-                  `     ${testCase.status === 'passed' ? '✓' : '✗'} HTTP ${testCase.httpStatus ?? 'error'}${testCase.elapsedMs != null ? ` (${testCase.elapsedMs}ms)` : ''}`,
-                  ...(testCase.sanitized === false ? ['     ✗ Unsafe response reflection detected'] : []),
-                  ...(testCase.databaseLeak ? [
-                    `     ✗ Database detail leakage detected (${testCase.databaseLeakMarker})`,
-                    ...(testCase.securityIncidentId ? [`     Incident created: ${testCase.securityIncidentId}`] : []),
-                    ...(testCase.responseExcerpt ? [`     Redacted evidence: ${testCase.responseExcerpt}`] : []),
-                  ] : []),
-                  ...(testCase.securityIncidentId && !testCase.databaseLeak ? [
-                    `     ✗ Security finding: malformed input accepted`,
-                    `     Incident created: ${testCase.securityIncidentId}`,
-                    ...(testCase.responseExcerpt ? [`     Redacted evidence: ${testCase.responseExcerpt}`] : []),
-                  ] : []),
-                  ...(testCase.detail ? [`     ${testCase.detail}`] : []),
-                ])
-              : [];
-            return [`${mark} ${label}${extra}`, ...cases];
+            const extra = step.httpStatus
+              ? ` → HTTP ${step.httpStatus} (${step.elapsedMs}ms)`
+              : step.detail
+              ? ` — ${step.detail}`
+              : '';
+            return [`${mark} ${label}${extra}`];
           }),
-          ...(result.failure ? ['', `Failure: ${result.failure}`] : []),
         ];
-      } else if (body.status === 'succeeded') {
-        resultLines = result.question
-          ? [
-              `HTTP ${result.httpStatus}`,
-              `Answer: ${result.answer || result.body?.answer || JSON.stringify(result.body)}`,
-              `Response: ${JSON.stringify(result.body)}`,
-            ]
-          : result.samples
-          ? [
-              `Samples: ${result.samples.join(', ')}ms`,
-              `Median: ${result.medianMs}ms`,
-              `Maximum: ${result.maxMs}ms`,
-            ]
-          : [
-              `HTTP ${result.httpStatus}`,
-              `Elapsed: ${result.elapsedMs}ms`,
-              `Response: ${JSON.stringify(result.body)}`,
-            ];
-      } else {
-        resultLines = [isFlow && result.failure ? `Flow failed: ${result.failure}` : `Execution failed: ${result.error || `HTTP ${result.httpStatus || 'unknown'}`}`];
       }
-      setEntries((current) => current.map((entry) => entry.id === entryId ? {
-        ...entry,
-        status: body.status === 'succeeded' ? 'success' : 'error',
-        title: body.status === 'succeeded'
-          ? isFlow ? 'Synthetic flow passed' : entry.proposal?.kind === 'synthetic_question' ? 'Synthetic question succeeded' : 'Approved probe succeeded'
-          : isFlow ? 'Synthetic flow failed' : entry.proposal?.kind === 'synthetic_question' ? 'Synthetic question failed' : 'Approved probe failed',
-        lines: resultLines,
-        proposal: { ...entry.proposal!, status: body.status },
-        timestamp: body.completed_at || new Date().toISOString(),
-      } : entry));
+      // Synthetic question / probe fallback
+      else {
+        resultLines = [
+          isFlow && result.failure
+            ? `Flow failed: ${result.failure}`
+            : `Execution failed: ${result.error || `HTTP ${result.httpStatus || 'unknown'}`}`,
+        ];
+      }
+
+      // Update terminal entry
+      setEntries((current) =>
+        current.map((entry) =>
+          entry.id === entryId
+            ? {
+                ...entry,
+                status:
+                  body.status === 'succeeded'
+                    ? 'success'
+                    : isPentest
+                    ? 'warning'
+                    : 'error',
+
+                title:
+                  body.status === 'succeeded'
+                    ? isFlow
+                      ? 'Synthetic flow passed'
+                      : entry.proposal?.kind === 'synthetic_question'
+                      ? 'Synthetic question succeeded'
+                      : isPentest
+                      ? 'Pentest sweep completed'
+                      : 'Approved probe succeeded'
+                    : isFlow
+                    ? 'Synthetic flow failed'
+                    : entry.proposal?.kind === 'synthetic_question'
+                    ? 'Synthetic question failed'
+                    : isPentest
+                    ? 'Pentest sweep completed with warnings'
+                    : 'Approved probe failed',
+
+                lines: resultLines,
+                proposal: { ...entry.proposal!, status: body.status },
+                timestamp: body.completed_at || new Date().toISOString(),
+              }
+            : entry
+        )
+      );
+
 
       const flow = body.guidedFlow as GuidedFlow | undefined;
       if (flow) setGuidedFlow(flow);

@@ -129,6 +129,7 @@ verify [bty|saapp]
 plan verify [bty|saapp] stability
 plan investigate incidents
 next [plan-id]
+pentest sweep [bty|saapp]
 clear
 ```
 
@@ -499,3 +500,10 @@ Animations are visual status cues only and do not affect execution state.
 2. Add a persistent task-history browser.
 3. Add declarative generated HTTP tests.
 4. Introduce generated scripts only in a separate sandboxed worker with no production secrets.
+
+## PenTest Sweep Commands
+
+```text
+pentest sweep bty|saapp
+
+Creates a pentest sweep that probes the app's endpoints for vulnerabilities

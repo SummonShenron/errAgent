@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.services.log_broker import LogBroker
-from backend.services.patchy_hitl import PatchyProposalError, create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
+from backend.services.patchy_hitl import PatchyProposalError, create_pentest_sweep_proposal, create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
 from backend.services.patchy_planner import PatchyPlanError, build_plan_report, create_incident_investigation_plan, create_plan, next_step, record_adaptive_step_result, get_plan, get_latest_active_plan
 from backend.services.production_ops import collect_production_status, format_production_status
 from backend.services.patchy_reasoning import PatchyReasoningError, synthesize_incident
@@ -50,6 +50,7 @@ COMMAND_HELP = (
     ("probe validation <bty|saapp>", "Propose a bounded validation audit"),
     ("validate email <bty|saapp> <path>", "Probe email validation without JSON"),
     ("validate leakage <bty|saapp> <path>", "Probe for leaked database details"),
+    ("pentest sweep <bty|saapp>", "Propose a synthetic pentest sweep for approval"),
     ("clear", "Clear the terminal screen locally"),
 )
 
@@ -1032,6 +1033,28 @@ async def execute_patchy_command(
                 {"proposal": proposal},
             )
         raise PatchyCommandError("Usage: flow define|list|run ...")
+
+    if command == "pentest":
+        if len(args) != 2 or args[0].lower() != "sweep":
+            raise PatchyCommandError("Usage: pentest sweep <bty|saapp>")
+        alias = args[1].lower()
+        try:
+            proposal = create_pentest_sweep_proposal(alias, actor, db)
+        except PatchyProposalError as exc:
+            raise PatchyCommandError(str(exc)) from exc
+        lines = [
+            proposal["summary"],
+            f"Service: {proposal['action']['serviceName']}",
+            f"Alias: {proposal['action']['serviceAlias']}",
+            "Risk: synthetic, registered read-only endpoints only.",
+            "Run: approve this proposal to start the sweep.",
+        ]
+        return _response(
+            "approval_required",
+            "Approval required for pentest sweep",
+            lines,
+            {"proposal": proposal},
+        )
 
     if command == "clear":
         return _response("success", "Screen cleared", [])
