@@ -16,7 +16,7 @@ async def run_browser_and_get_token():
         page = await context.new_page()
 
         # Load your dev frontend
-        await page.goto("https://btyapp.vercel.app/admin")
+        await page.goto("https://btyapp.vercel.app/sign-in")
 
         # Click "Sign in with Google"
         await page.wait_for_selector('button[data-provider="google"]', timeout=30000)
