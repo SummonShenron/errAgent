@@ -12,11 +12,13 @@ BROWSERLESS_WS = "wss://production-sfo.browserless.io/chromium/playwright?token=
 async def run_browser_and_get_token():
     async with async_playwright() as pw:
         browser = await pw.chromium.connect(BROWSERLESS_WS)
-        context = await browser.new_context()
+        context = await browser.new_context(
+            java_script_enabled=True,
+            viewport={"width": 1280, "height": 800}
+        )
         page = await context.new_page()
-
         # Load your dev frontend
-        await page.goto("https://btyapp.vercel.app/sign-in")
+        await page.goto("https://btyapp.vercel.app/sign-in", wait_until="networkidle")
 
         # Click "Sign in with Google"
         await page.wait_for_selector('button[data-provider="google"]', timeout=30000)
