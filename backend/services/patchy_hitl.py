@@ -386,7 +386,7 @@ async def approve_and_execute_pentest_sweep(
             logger.info("[pentest] Starting Browser Agent for Clerk-admin endpoints")
 
             # 1. Launch browser → sign in → extract JWT
-            admin_token = await asyncio.to_thread(run_browser_and_get_token)
+            admin_token = await run_browser_and_get_token()
 
             # 2. Build authenticated client
             admin_client = make_admin_client(admin_token)
