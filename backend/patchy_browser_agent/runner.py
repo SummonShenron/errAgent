@@ -22,7 +22,7 @@ async def run_browser_and_get_token():
         await page.fill('input[name="identifier"]', TEST_ADMIN_EMAIL)
 
         await page.fill('input[type="password"]', TEST_ADMIN_PASSWORD)
-        await page.click('button:has-text("Sign in")')
+        await page.click('[data-localization-key="formButtonPrimary"]')
 
         await page.wait_for_load_state("networkidle")
 
