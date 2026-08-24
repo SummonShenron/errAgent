@@ -50,7 +50,7 @@ COMMAND_HELP = (
     ("probe validation <bty|saapp>", "Propose a bounded validation audit"),
     ("validate email <bty|saapp> <path>", "Probe email validation without JSON"),
     ("validate leakage <bty|saapp> <path>", "Probe for leaked database details"),
-    ("pentest sweep <bty|saapp>", "Propose a synthetic pentest sweep for approval"),
+    ("pentest sweep <bty|saapp> [target]", "Propose a synthetic pentest sweep for approval"),
     ("clear", "Clear the terminal screen locally"),
 )
 
@@ -1035,26 +1035,34 @@ async def execute_patchy_command(
         raise PatchyCommandError("Usage: flow define|list|run ...")
 
     if command == "pentest":
-        if len(args) != 2 or args[0].lower() != "sweep":
-            raise PatchyCommandError("Usage: pentest sweep <bty|saapp>")
+        if len(args) < 2 or args[0].lower() != "sweep":
+            raise PatchyCommandError("Usage: pentest sweep <bty|saapp> [target]")
+
         alias = args[1].lower()
+        target = args[2].lower() if len(args) >= 3 else "full"
+
         try:
-            proposal = create_pentest_sweep_proposal(alias, actor, db)
+            proposal = create_pentest_sweep_proposal(alias, actor, db, target)
         except PatchyProposalError as exc:
             raise PatchyCommandError(str(exc)) from exc
+
         lines = [
             proposal["summary"],
             f"Service: {proposal['action']['serviceName']}",
             f"Alias: {proposal['action']['serviceAlias']}",
-            "Risk: synthetic, registered read-only endpoints only.",
+            f"Target: {proposal['action']['target']}",
+            "Risk: synthetic or authenticated admin endpoints depending on target.",
             "Run: approve this proposal to start the sweep.",
         ]
+
         return _response(
             "approval_required",
             "Approval required for pentest sweep",
             lines,
             {"proposal": proposal},
         )
+
+
 
     if command == "clear":
         return _response("success", "Screen cleared", [])

@@ -93,6 +93,40 @@ Available workflows include:
 
 Failures and rejections stop the relevant workflow. Patchy does not self-approve a proposal.
 
+### Pentest Sweep ###
+
+Patchy supports a safe, bounded pentest sweep workflow for registered applications.
+Sweeps are human-approved and operate within strict limits:
+
+Synthetic-only fuzzing for public endpoints
+
+Authenticated Browser Agent fuzzing for Clerk-protected admin endpoints
+
+No arbitrary scanning, crawling, or shell execution
+
+No destructive side effects
+
+All actions logged and reviewable
+
+Operators initiate sweeps through Patchy Terminal:
+
+text
+pentest sweep <alias> [target]
+Supported targets:
+
+public — synthetic fuzzing
+
+admin_leads — authenticated admin leads fuzzing
+
+admin_content — authenticated admin content fuzzing
+
+admin_all — both admin fuzzers
+
+full — public + admin fuzzers
+
+Sweeps create a proposal that must be explicitly approved.
+Findings are persisted as incidents with full context.
+
 ### Reusable synthetic flow plans
 
 Flow plans test structured HTTP journeys without UI automation or arbitrary shell execution. They work for registered services such as BTY and SAAPP and can be reused for future applications.

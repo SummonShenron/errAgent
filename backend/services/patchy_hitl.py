@@ -9,6 +9,7 @@ import uuid
 import requests
 from backend.services.synthetic_adapters import SyntheticAdapterError, get_synthetic_adapter
 from backend.utils.app_utils import SERVICES, serialize_mongo_doc
+from backend.patchy_browser_agent.attacks.admin_content import test_admin_content
 from backend.services.patchy_planner import (
     PatchyPlanError,
     get_latest_active_plan,
@@ -266,6 +267,19 @@ async def approve_and_execute_pentest_sweep(
     actor: str,
     broker=None,
 ) -> dict[str, Any]:
+    # --- Target selection ----------------------------------------------------
+    target = proposal["action"].get("target", "full")  # public | admin_leads | admin_content | admin_all | full
+    # --- Vulnerability whitelist --------------------------------------------
+    ALLOWED_VULN_TYPES = {
+        "server_error",
+        "validation_failure",
+        "leakage",
+        "unsanitized_input",
+        "auth_bypass",
+        "privilege_escalation",
+        "injection",
+        "broken_access_control",
+    }
     # --- Safety checks -------------------------------------------------------
     if proposal.get("status") != "awaiting_approval":
         raise PatchyProposalError(
@@ -292,12 +306,10 @@ async def approve_and_execute_pentest_sweep(
     if claimed.modified_count != 1:
         raise PatchyProposalError("Proposal was already claimed")
 
-    # --- Endpoint + fuzz configuration --------------------------------------
+    # --- Synthetic endpoint config ------------------------------------------
     endpoints = [
         {"method": "POST", "url": "/api/consultations", "synthetic": True},
         {"method": "POST", "url": "/api/bookings", "synthetic": True},
-        # {"method": "POST", "url": "/api/admin/schedule", "synthetic": False},
-        # {"method": "POST", "url": "/api/admin/leads", "synthetic": False},
     ]
 
     fuzz_payloads = [
@@ -310,64 +322,114 @@ async def approve_and_execute_pentest_sweep(
 
     vulnerabilities = []
 
-    # --- Pentest sweep loop --------------------------------------------------
-    for endpoint in endpoints:
-        for payload in fuzz_payloads:
-            response = await _send_synthetic_or_real_request(endpoint, payload)
+    # ========================================================================
+    # PHASE 1 — PUBLIC SYNTHETIC FUZZING
+    # ========================================================================
+    if target in ("public", "full"):
+        for endpoint in endpoints:
+            for payload in fuzz_payloads:
+                response = await _send_synthetic_or_real_request(endpoint, payload)
 
-            status = response.get("status")
-            body = response.get("body")
+                status = response.get("status")
+                body = response.get("body")
 
-            # --- Vulnerability detection -------------------------------------
-            issue = None
+                issue = None
 
-            if status >= 500:
-                issue = "server_error"
+                if status >= 500:
+                    issue = "server_error"
 
-            elif status >= 400:
-                issue = "validation_failure"
+                elif status >= 400:
+                    issue = "validation_failure"
 
-            elif isinstance(body, dict):
-                text = json.dumps(body).lower()
-                if "syntaxerror" in text or "traceback" in text or "sql" in text:
-                    issue = "leakage"
+                elif isinstance(body, dict):
+                    text = json.dumps(body).lower()
+                    if "syntaxerror" in text or "traceback" in text or "sql" in text:
+                        issue = "leakage"
+                    if "<script>" in text or "alert(" in text:
+                        issue = "unsanitized_input"
 
-                if "<script>" in text or "alert(" in text:
-                    issue = "unsanitized_input"
+                if issue in ALLOWED_VULN_TYPES:
+                    vuln = {
+                        "endpoint": endpoint["url"],
+                        "payload": payload,
+                        "issue": issue,
+                        "response": response,
+                    }
+                    vulnerabilities.append(vuln)
 
-            if issue:
-                vuln = {
-                    "endpoint": endpoint["url"],
-                    "payload": payload,
-                    "issue": issue,
-                    "response": response,
-                }
-                vulnerabilities.append(vuln)
+                    logger.info(
+                        f"[pentest] {issue} detected at {endpoint['url']} "
+                        f"with payload {payload}: {response}"
+                    )
 
-                logger.info(
-                    f"[pentest] {issue} detected at {endpoint['url']} "
-                    f"with payload {payload}: {response}"
-                )
+                    incident_doc = {
+                        "_id": f"incident_{uuid4().hex}",
+                        "service_name": proposal["action"]["serviceName"],
+                        "repository": resolve_repository(proposal["action"]["serviceName"]),
+                        "status": "open",
+                        "error_message": f"Pentest sweep: {issue} at {endpoint['url']}",
+                        "created_at": datetime.now(timezone.utc),
+                        "details": vuln,
+                    }
+                    db["incidents"].insert_one(incident_doc)
 
-                # --- Incident creation ---------------------------------------
+    # ========================================================================
+    # PHASE 2 — BROWSER AGENT (ADMIN ENDPOINTS)
+    # ========================================================================
+    if target in ("admin_leads", "admin_content", "admin_all", "full"):
+        try:
+            from backend.patchy_browser_agent.runner import run_browser_and_get_token
+            from backend.patchy_browser_agent.token_bridge import make_admin_client
+            from backend.patchy_browser_agent.attacks.admin_leads import test_admin_leads
+            from backend.patchy_browser_agent.attacks.admin_content import test_admin_content
+
+            logger.info("[pentest] Starting Browser Agent for Clerk-admin endpoints")
+
+            # 1. Launch browser → sign in → extract JWT
+            admin_token = await asyncio.to_thread(run_browser_and_get_token)
+
+            # 2. Build authenticated client
+            admin_client = make_admin_client(admin_token)
+
+            # 3. Run selected admin fuzzers
+            admin_vulns = []
+
+            if target in ("admin_leads", "admin_all", "full"):
+                admin_vulns.extend(await test_admin_leads(admin_client))
+
+            if target in ("admin_content", "admin_all", "full"):
+                admin_vulns.extend(await test_admin_content(admin_client))
+
+            # 4. Merge vulnerabilities
+            vulnerabilities.extend(admin_vulns)
+
+            # 5. Log findings + create incidents
+            for vuln in admin_vulns:
+                logger.info(f"[pentest] Admin vuln detected: {vuln}")
+
                 incident_doc = {
                     "_id": f"incident_{uuid4().hex}",
                     "service_name": proposal["action"]["serviceName"],
                     "repository": resolve_repository(proposal["action"]["serviceName"]),
                     "status": "open",
-                    "error_message": f"Pentest sweep: {issue} at {endpoint['url']}",
+                    "error_message": f"Pentest sweep (admin): {vuln['issue']} at {vuln['endpoint']}",
                     "created_at": datetime.now(timezone.utc),
                     "details": vuln,
                 }
                 db["incidents"].insert_one(incident_doc)
 
-    # --- Final status + result ----------------------------------------------
-    completed_at = datetime.now(timezone.utc)
+        except Exception as e:
+            logger.error(f"[pentest] Browser Agent failed: {e}")
 
+    # ========================================================================
+    # FINALIZE
+    # ========================================================================
+    completed_at = datetime.now(timezone.utc)
     final_status = "warning" if vulnerabilities else "succeeded"
 
     result = {
         "serviceAlias": proposal["action"]["serviceAlias"],
+        "target": target,
         "endpointsScanned": len(endpoints),
         "vulnerabilitiesFound": len(vulnerabilities),
         "vulnerabilities": vulnerabilities,
@@ -385,10 +447,7 @@ async def approve_and_execute_pentest_sweep(
         },
     )
 
-    # --- Return final serialized proposal -----------------------------------
     return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal_id}))
-
-
 
 def decline_plan_step_proposal(db, proposal_id: str, actor: str) -> dict[str, Any]:
     proposal = get_proposal(db, proposal_id)
@@ -722,33 +781,44 @@ async def _approve_and_execute_plan_step(db, proposal: dict[str, Any], actor: st
 
     return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal["_id"]}))
 
-def create_pentest_sweep_proposal(alias: str, actor: str, db) -> dict[str, Any]:
+def create_pentest_sweep_proposal(alias: str, actor: str, db, target: str = "full") -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     proposal_id = f"pentest_{uuid4().hex}"
     service = _service_by_alias(alias)
 
+    # Synthetic-only is TRUE only for public sweeps
+    synthetic_only = target in ("public",)
+
     document = {
         "_id": proposal_id,
         "kind": "pentest_sweep",
-        "risk": "registered_read_only",
+        "risk": "pentest",
         "status": "awaiting_approval",
-        "summary": f"Run a synthetic pentest sweep for {service['name']}",
+        "summary": f"Run a pentest sweep for {service['name']} (target={target})",
+
         "action": {
-            "method": "POST",
-            "url": service["url"].rstrip("/") + service.get("health_path", "/"),
-            "environment": "production",
-            "timeoutSeconds": 15,
             "serviceAlias": alias.lower(),
             "serviceName": service["name"],
+            "target": target,
+
+            # This is NOT a single HTTP action — it's a sweep
+            "method": "pentest",
+            "url": None,  # sweeps do not use a single URL
+            "environment": "production",
+
+            "syntheticOnly": synthetic_only,
             "maxEndpoints": 50,
             "maxFuzzPerEndpoint": 10,
-            "syntheticOnly": True,
-            "assertions": ["HTTP status is 2xx"],
+
+            # Assertions do not apply to sweeps
+            "assertions": [],
         },
 
         "created_by": actor,
         "created_at": now,
         "updated_at": now,
     }
+
     db["patchy_proposals"].insert_one(document)
     return serialize_mongo_doc(document)
+

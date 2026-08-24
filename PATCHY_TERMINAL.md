@@ -504,6 +504,68 @@ Animations are visual status cues only and do not affect execution state.
 ## PenTest Sweep Commands
 
 ```text
-pentest sweep bty|saapp
+pentest sweep <bty|saapp> [target]
+Creates a pentest sweep proposal. The operator must approve the proposal before any sweep runs.
 
-Creates a pentest sweep that probes the app's endpoints for vulnerabilities
+Targets
+Sweeps support multiple modes:
+
+Target	Description
+public	Synthetic-only fuzzing of public endpoints. No authentication. No UI automation.
+admin_leads	Authenticated Browser Agent sweep of Clerk-protected admin leads endpoints.
+admin_content	Authenticated Browser Agent sweep of Clerk-protected admin content endpoints.
+admin_all	Runs both admin_leads and admin_content fuzzers.
+full	Runs public synthetic fuzzing and all admin fuzzers.
+
+
+If no target is provided, Patchy defaults to:
+
+text
+full
+Example
+text
+pentest sweep bty admin_content
+Creates a proposal to run an authenticated sweep of BTY’s Clerk-protected admin content endpoints.
+
+Proposal Details
+A pentest sweep proposal includes:
+
+Service name and alias
+
+Selected target
+
+Synthetic-only flag (true only for public)
+
+Maximum endpoints and fuzz payloads
+
+Risk classification: pentest
+
+No single HTTP action — sweeps run multiple bounded requests
+
+Operator approval requirement
+
+Execution
+After approval:
+
+Public sweeps run synthetic fuzzing against registered endpoints.
+
+Admin sweeps launch a Browser Agent, sign in through Clerk, extract a session token, and run authenticated fuzzers.
+
+Vulnerabilities are recorded as incidents.
+
+Sweeps never modify application state, create real bookings, send real emails, or perform destructive actions.
+
+Output
+Patchy reports:
+
+Sweep status (succeeded, warning)
+
+Number of endpoints scanned
+
+Number of vulnerabilities found
+
+Vulnerability details (endpoint, payload, issue, response)
+
+Sweeps complete only after all selected targets have been processed.
+```
+
