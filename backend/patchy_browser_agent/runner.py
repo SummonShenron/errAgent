@@ -21,6 +21,16 @@ async def run_browser_and_get_token():
         await page.fill('input[type="email"]', TEST_ADMIN_EMAIL)
         await page.fill('input[type="password"]', TEST_ADMIN_PASSWORD)
         await page.click('button:has-text("Sign in")')
+        # FIX #1 — Wait for redirect + admin page load
+        await page.wait_for_load_state("networkidle")
+
+        # FIX #2 — Wait for something that ACTUALLY exists on admin dashboard
+        await page.wait_for_selector("text=Admin", timeout=15000)
+
+        # FIX #3 — Guard against missing token helper
+        token = await page.evaluate(
+            "window.__patchy_get_token && window.__patchy_get_token()"
+        )
 
         # 4. Wait for SignedIn → AdminDashboard to render
         await page.wait_for_selector('text=Content updated successfully.', timeout=15000)
