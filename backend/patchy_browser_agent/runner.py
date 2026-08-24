@@ -21,9 +21,9 @@ async def run_browser_and_get_token():
         await page.goto("https://btyapp.vercel.app/sign-in", wait_until="networkidle")
 
         # Click "Sign in with Google"
-        await page.wait_for_selector('button[data-provider="google"]', timeout=30000)
+        await page.wait_for_selector('div[role="button"][data-provider="google"]', timeout=30000)
         async with context.expect_page() as popup_info:
-            await page.click('button[data-provider="google"]')
+            await page.click('div[role="button"][data-provider="google"]')
         google = await popup_info.value
 
         # Fill Google email
