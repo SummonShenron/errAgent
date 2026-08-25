@@ -11,9 +11,13 @@ BROWSERLESS_WS = "wss://production-sfo.browserless.io/chromium/playwright?token=
 async def run_browser_and_get_token():
     async with async_playwright() as pw:
         browser = await pw.chromium.connect(BROWSERLESS_WS)
+        
+        # Inject realistic browser fingerprints to reduce Google anti-bot triggers
         context = await browser.new_context(
-            java_script_enabled=True,
-            viewport={"width": 1280, "height": 800}
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            locale="en-US",
+            timezone_id="America/Chicago",
         )
         page = await context.new_page()
 
@@ -38,20 +42,30 @@ async def run_browser_and_get_token():
                 await google_btn.click()
             auth_page = await popup_info.value
         except Exception:
-            # No popup opened within 5s; Clerk redirected the current page to Google
             pass
 
-        # 4. Fill Google email on the active auth page/tab
-        await auth_page.wait_for_selector('input[type="email"]', timeout=30000)
-        await auth_page.fill('input[type="email"]', TEST_ADMIN_EMAIL)
-        await auth_page.click('button:has-text("Next")')
+        # 4. Diagnostic URL check & Email fill
+        await auth_page.wait_for_load_state("domcontentloaded")
+        current_url = auth_page.url
+
+        try:
+            email_input = auth_page.locator('input[type="email"]')
+            await email_input.wait_for(state="visible", timeout=15000)
+            await email_input.fill(TEST_ADMIN_EMAIL)
+            await auth_page.click('button:has-text("Next")')
+        except Exception as err:
+            title = await auth_page.title()
+            raise RuntimeError(
+                f"Google blocked the automated login on page '{title}' (URL: {current_url}). "
+                "Google OAuth disallows headless automation on standard production logins."
+            ) from err
 
         # 5. Fill Google password
         await auth_page.wait_for_selector('input[type="password"]', timeout=30000)
         await auth_page.fill('input[type="password"]', TEST_ADMIN_PASSWORD)
         await auth_page.click('button:has-text("Next")')
 
-        # Handle optional security prompts
+        # Handle security prompts
         try:
             await auth_page.click('button:has-text("Yes")', timeout=5000)
         except Exception:
@@ -64,12 +78,11 @@ async def run_browser_and_get_token():
         except Exception:
             pass
 
-        # 6. Wait for redirect back to application and Clerk session hydration
+        # 6. Wait for redirect and Clerk session hydration
         await page.wait_for_load_state("networkidle")
         await page.wait_for_function("window.Clerk?.session?.id", timeout=20000)
         await page.wait_for_selector("text=Content", timeout=20000)
 
-        # Extract JWT
         token = await page.evaluate(
             "window.__patchy_get_token && window.__patchy_get_token()"
         )
