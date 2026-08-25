@@ -1,11 +1,13 @@
 import asyncio
 import os
+import pyotp
 from playwright.async_api import async_playwright
 
 BTY_FRONTEND = "https://btyapp.vercel.app/sign-in"
 TEST_ADMIN_EMAIL = "jackharper0517@gmail.com"
 TEST_ADMIN_PASSWORD = "R1$3ifyouwould!"
-TEST_BACKUP_CODE = os.getenv("CLERK_BACKUP_CODE", "tifdav-pehraz-5qatcE")
+TOTP_SECRET = os.getenv("CLERK_TOTP_SECRET", "")
+TEST_BACKUP_CODE = os.getenv("CLERK_BACKUP_CODE", "")
 
 BROWSERLESS_WS = "wss://production-sfo.browserless.io/chromium/playwright?token=2V8MYAQGdOa2zWT4cdb32601610399d98cfccd929eea9defb"
 
@@ -18,74 +20,76 @@ async def run_browser_and_get_token():
         )
         page = await context.new_page()
 
-        # 1. Load sign-in page
+        # 1. Load sign-in page & submit credentials
         await page.goto(BTY_FRONTEND, wait_until="domcontentloaded")
-
-        # 2. Fill Email
-        email_input = page.locator('input[name="identifier"], input[type="email"], input[id*="identifier"]').first
+        
+        email_input = page.locator('input[name="identifier"], input[type="email"]').first
         await email_input.wait_for(state="visible", timeout=15000)
         await email_input.fill(TEST_ADMIN_EMAIL)
+        await page.locator('button.cl-formButtonPrimary, button[type="submit"]').first.click()
 
-        continue_btn = page.locator('button.cl-formButtonPrimary, button[type="submit"]:has-text("Continue")').first
-        await continue_btn.click()
-
-        # 3. Fill Password
         pwd_input = page.locator('input[name="password"], input[type="password"]').first
         await pwd_input.wait_for(state="visible", timeout=15000)
         await pwd_input.fill(TEST_ADMIN_PASSWORD)
+        await page.locator('button.cl-formButtonPrimary, button[type="submit"]').first.click()
 
-        submit_btn = page.locator('button.cl-formButtonPrimary, button[type="submit"]:has-text("Continue")').first
-        await submit_btn.click()
-
-        # 4. Handle MFA via Backup Code
+        # 2. Handle MFA (TOTP or Backup Code)
         try:
-            # Wait briefly to see if an MFA screen appears
-            await page.wait_for_selector(
-                'input[name="code"], button:has-text("Use backup code"), button:has-text("Use a backup code"), .cl-alternativeMethodsBlockButton',
-                timeout=10000
-            )
-
-            # Click "Use backup code" if presented with an alternative method list or TOTP screen
-            backup_toggle = page.locator(
-                'button:has-text("Use backup code"), '
-                'button:has-text("Use a backup code"), '
-                'a:has-text("Use backup code"), '
-                'button:has-text("Use backup"), '
-                '.cl-alternativeMethodsBlockButton:has-text("backup")'
-            ).first
-
-            if await backup_toggle.is_visible():
-                await backup_toggle.click()
-
-            # Input backup code
             code_input = page.locator('input[name="code"], input[type="text"]').first
-            await code_input.wait_for(state="visible", timeout=10000)
-            await code_input.fill(TEST_BACKUP_CODE)
+            await code_input.wait_for(state="visible", timeout=8000)
 
-            # Submit MFA form
-            mfa_submit = page.locator('button.cl-formButtonPrimary, button[type="submit"]').first
-            await mfa_submit.click()
+            code_to_fill = pyotp.TOTP(TOTP_SECRET).now() if TOTP_SECRET else TEST_BACKUP_CODE
+            await code_input.fill(code_to_fill)
+            await page.locator('button.cl-formButtonPrimary, button[type="submit"]').first.click()
         except Exception:
-            # Bypasses cleanly if MFA is not requested
+            pass  # MFA skipped or already session-cached
+
+        # 3. Wait explicitly for navigation away from /sign-in
+        try:
+            await page.wait_for_url(lambda url: "sign-in" not in url, timeout=15000)
+        except Exception:
             pass
 
-        # 5. Wait for Clerk session hydration
-        await page.wait_for_function("window.Clerk?.session?.id", timeout=20000)
+        await page.wait_for_load_state("domcontentloaded")
 
-        # 6. Extract token
-        token = await page.evaluate("""
-            async () => {
-                if (window.__patchy_get_token) {
-                    return await window.__patchy_get_token();
+        # 4. Polling Token Extractor (SDK -> LocalStorage -> Cookies)
+        token = None
+        for _ in range(12):  # Retry polling up to 12s for full hydration
+            token = await page.evaluate("""
+                async () => {
+                    if (window.Clerk?.session) {
+                        return await window.Clerk.session.getToken();
+                    }
+                    if (window.__patchy_get_token) {
+                        return await window.__patchy_get_token();
+                    }
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        if (key.includes('clerk') || key.includes('session') || key.includes('jwt')) {
+                            const val = localStorage.getItem(key);
+                            if (val && val.startsWith('eyJ')) return val;
+                        }
+                    }
+                    return null;
                 }
-                if (window.Clerk?.session) {
-                    return await window.Clerk.session.getToken();
-                }
-                return null;
-            }
-        """)
+            """)
+            if token:
+                break
+            await asyncio.sleep(1)
+
+        # Fallback to browser context session cookies
+        if not token:
+            cookies = await context.cookies()
+            for c in cookies:
+                if c["name"] in ["__session", "__clerk_db_jwt"] or "clerk" in c["name"]:
+                    token = c["value"]
+                    break
 
         await browser.close()
+
+        if not token:
+            raise RuntimeError("Authentication succeeded, but failed to extract session token from window/cookies.")
+
         return token
 
 if __name__ == "__main__":
