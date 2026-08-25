@@ -25,7 +25,7 @@ def generate_mfa_code() -> str:
 
 async def run_browser_and_get_token() -> str:
     async with async_playwright() as pw:
-        logger.info("[pentest] Connecting to Browserless and navigating to /admin...")
+        logger.info("[pentest] Connecting to Browserless...")
         browser = await pw.chromium.connect(BROWSERLESS_WS)
         context = await browser.new_context(
             viewport={"width": 1280, "height": 800},
@@ -33,72 +33,113 @@ async def run_browser_and_get_token() -> str:
         )
         page = await context.new_page()
 
-        # 1. Load Admin / Sign-in route
-        await page.goto(BTY_FRONTEND, wait_until="domcontentloaded")
-        await page.wait_for_timeout(2000)
+        # Step 1: Initial Navigation
+        logger.info(f"[pentest] Navigating to target: {BTY_FRONTEND}")
+        await page.goto(BTY_FRONTEND, wait_until="networkidle")
+        logger.info(f"[pentest] Landed on URL: {page.url}")
 
-        # 2. Fill Email
-        email_input = page.locator('input[name="identifier"]:visible, input[type="email"]:visible').first
-        await email_input.wait_for(state="visible", timeout=15000)
-        await email_input.fill(TEST_ADMIN_EMAIL)
-        
-        # Click primary submit button explicitly
-        submit_btn = page.locator('button.cl-formButtonPrimary:visible, button[type="submit"]:visible').first
-        if await submit_btn.is_visible():
-            await submit_btn.click()
-        else:
-            await email_input.press("Enter")
-
-        # 3. Fill Password
-        pwd_input = page.locator('input[name="password"]:visible, input[type="password"]:visible').first
-        await pwd_input.wait_for(state="visible", timeout=15000)
-        await pwd_input.fill(TEST_ADMIN_PASSWORD)
-        
-        submit_pwd = page.locator('button.cl-formButtonPrimary:visible, button[type="submit"]:visible').first
-        if await submit_pwd.is_visible():
-            await submit_pwd.click()
-        else:
-            await pwd_input.press("Enter")
-
-        # 4. Handle MFA if prompted
+        # Step 2: Identifier Input (Email)
+        logger.info("[pentest] Locating email/identifier input field...")
+        email_selector = 'input[name="identifier"], input[name="emailAddress"], input[type="email"], input[type="text"]'
         try:
-            code_input = page.locator('input[name="code"]:visible, input[type="text"]:visible').first
-            await code_input.wait_for(state="visible", timeout=6000)
+            email_input = page.locator(email_selector).first
+            await email_input.wait_for(state="visible", timeout=12000)
+            await email_input.fill(TEST_ADMIN_EMAIL)
+            logger.info("[pentest] Filled email address.")
 
+            # Click primary submission button
+            submit_btn = page.locator('button.cl-formButtonPrimary, button[type="submit"], button:has-text("Continue"), button:has-text("Next")').first
+            if await submit_btn.is_visible():
+                await submit_btn.click()
+                logger.info("[pentest] Clicked email submit button.")
+            else:
+                await email_input.press("Enter")
+                logger.info("[pentest] Pressed Enter on email field.")
+        except Exception as e:
+            logger.error(f"[pentest] Failed during Email step: {e}")
+            await browser.close()
+            raise
+
+        # Step 3: Password Input
+        logger.info("[pentest] Waiting for password input field...")
+        pwd_selector = 'input[name="password"], input[type="password"]'
+        try:
+            pwd_input = page.locator(pwd_selector).first
+            await pwd_input.wait_for(state="visible", timeout=12000)
+            await pwd_input.fill(TEST_ADMIN_PASSWORD)
+            logger.info("[pentest] Filled password.")
+
+            submit_pwd = page.locator('button.cl-formButtonPrimary, button[type="submit"], button:has-text("Continue"), button:has-text("Sign in")').first
+            if await submit_pwd.is_visible():
+                await submit_pwd.click()
+                logger.info("[pentest] Clicked password submit button.")
+            else:
+                await pwd_input.press("Enter")
+                logger.info("[pentest] Pressed Enter on password field.")
+        except Exception as e:
+            logger.error(f"[pentest] Failed during Password step: {e}")
+            await browser.close()
+            raise
+
+        # Step 4: Handle Optional MFA Prompt
+        logger.info("[pentest] Checking for potential MFA step...")
+        try:
+            code_selector = 'input[name="code"], input[autocomplete="one-time-code"]'
+            code_input = page.locator(code_selector).first
+            await code_input.wait_for(state="visible", timeout=5000)
+            
+            logger.info("[pentest] MFA prompt detected. Generating TOTP/Backup Code...")
             code_to_fill = generate_mfa_code()
             if code_to_fill:
                 await code_input.fill(code_to_fill)
-                submit_mfa = page.locator('button.cl-formButtonPrimary:visible, button[type="submit"]:visible').first
+                submit_mfa = page.locator('button.cl-formButtonPrimary, button[type="submit"], button:has-text("Continue")').first
                 if await submit_mfa.is_visible():
                     await submit_mfa.click()
                 else:
                     await code_input.press("Enter")
+                logger.info("[pentest] Submitted MFA code.")
         except Exception:
-            pass
+            logger.info("[pentest] No MFA prompt appeared (or step skipped).")
 
-        # 5. Wait for Clerk Session Hydration
-        logger.info("[pentest] Waiting for active Clerk session hydration...")
+        # Step 5: Wait for Navigation/Auth Completion
+        logger.info("[pentest] Waiting for auth completion and session hydration...")
+        await page.wait_for_timeout(3000)
+        logger.info(f"[pentest] Current post-login URL: {page.url}")
+
+        # Step 6: Token Extraction Strategy
+        token = None
+
+        # Strategy A: Window Clerk Object
         try:
-            await page.wait_for_function("() => window.Clerk && window.Clerk.session !== null", timeout=15000)
-        except Exception:
-            logger.warning("[pentest] Timeout waiting for window.Clerk.session predicate.")
-
-        # 6. Extract Session JWT directly from hydrated Clerk object
-        token = await page.evaluate("""
-            async () => {
-                if (window.Clerk && window.Clerk.session) {
-                    return await window.Clerk.session.getToken();
+            token = await page.evaluate("""
+                async () => {
+                    if (window.Clerk && window.Clerk.session) {
+                        return await window.Clerk.session.getToken();
+                    }
+                    return null;
                 }
-                return null;
-            }
-        """)
+            """)
+            if token:
+                logger.info("[pentest] Successfully extracted JWT via window.Clerk.session!")
+        except Exception as ex:
+            logger.warning(f"[pentest] window.Clerk evaluation failed: {ex}")
+
+        # Strategy B: Context Session Cookies Fallback
+        if not token:
+            logger.info("[pentest] Checking browser context cookies for Clerk session...")
+            cookies = await context.cookies()
+            for c in cookies:
+                if c.get("name") in ["__session", "__clerk_db_jwt"]:
+                    token = c.get("value")
+                    logger.info(f"[pentest] Found valid token in cookie: {c.get('name')}")
+                    break
 
         await browser.close()
 
         if not token or not isinstance(token, str):
-            raise RuntimeError("Authentication failed: Clerk session did not return a valid JWT token.")
+            raise RuntimeError(f"Authentication failed. Post-login URL was '{page.url}', but no valid JWT token was captured.")
 
-        logger.info(f"[pentest] Successfully acquired Clerk JWT token (Length: {len(token)}).")
+        logger.info(f"[pentest] Token acquired successfully (Length: {len(token)}).")
         return token
 
 if __name__ == "__main__":
