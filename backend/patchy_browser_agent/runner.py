@@ -11,9 +11,6 @@ TEST_BACKUP_CODE = os.getenv("CLERK_BACKUP_CODE", "")
 
 BROWSERLESS_WS = "wss://production-sfo.browserless.io/chromium/playwright?token=2V8MYAQGdOa2zWT4cdb32601610399d98cfccd929eea9defb"
 
-# Selector targeting visible submit buttons only
-VISIBLE_SUBMIT_BTN = 'button.cl-formButtonPrimary:visible, button[type="submit"]:visible, button:has-text("Continue"):visible'
-
 async def run_browser_and_get_token():
     async with async_playwright() as pw:
         browser = await pw.chromium.connect(BROWSERLESS_WS)
@@ -23,21 +20,19 @@ async def run_browser_and_get_token():
         )
         page = await context.new_page()
 
-        # 1. Load sign-in page & submit email
+        # 1. Load sign-in page & submit email via Enter key
         await page.goto(BTY_FRONTEND, wait_until="domcontentloaded")
         
         email_input = page.locator('input[name="identifier"]:visible, input[type="email"]:visible').first
         await email_input.wait_for(state="visible", timeout=15000)
         await email_input.fill(TEST_ADMIN_EMAIL)
-        
-        await page.locator(VISIBLE_SUBMIT_BTN).first.click()
+        await email_input.press("Enter")
 
-        # 2. Fill password & submit
+        # 2. Fill password & submit via Enter key
         pwd_input = page.locator('input[name="password"]:visible, input[type="password"]:visible').first
         await pwd_input.wait_for(state="visible", timeout=15000)
         await pwd_input.fill(TEST_ADMIN_PASSWORD)
-        
-        await page.locator(VISIBLE_SUBMIT_BTN).first.click()
+        await pwd_input.press("Enter")
 
         # 3. Handle MFA (TOTP or Backup Code)
         try:
@@ -46,8 +41,7 @@ async def run_browser_and_get_token():
 
             code_to_fill = pyotp.TOTP(TOTP_SECRET).now() if TOTP_SECRET else TEST_BACKUP_CODE
             await code_input.fill(code_to_fill)
-            
-            await page.locator(VISIBLE_SUBMIT_BTN).first.click()
+            await code_input.press("Enter")
         except Exception:
             pass  # MFA skipped or cached
 
