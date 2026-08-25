@@ -32,7 +32,7 @@ async def run_browser_and_get_token() -> str:
         page = await context.new_page()
 
         # 1. Load sign-in page & fill email
-        await page.goto("https://btyapp.vercel.app/admindashboard", wait_until="networkidle")
+        await page.goto("https://btyapp.vercel.app/admin", wait_until="networkidle")
         
         email_input = page.locator('input[name="identifier"]:visible, input[type="email"]:visible').first
         await email_input.wait_for(state="visible", timeout=15000)
