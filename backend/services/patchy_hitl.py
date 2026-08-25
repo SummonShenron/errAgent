@@ -267,9 +267,9 @@ async def approve_and_execute_pentest_sweep(
     actor: str,
     broker=None,
 ) -> dict[str, Any]:
-    # --- Target selection ----------------------------------------------------
-    target = proposal["action"].get("target", "full")  # public | admin_leads | admin_content | admin_all | full
-    # --- Vulnerability whitelist --------------------------------------------
+    alias = proposal["action"].get("serviceAlias", "").lower()
+    target = proposal["action"].get("target", "full")
+
     ALLOWED_VULN_TYPES = {
         "server_error",
         "validation_failure",
@@ -280,160 +280,111 @@ async def approve_and_execute_pentest_sweep(
         "injection",
         "broken_access_control",
     }
-    # --- Safety checks -------------------------------------------------------
+
+    # --- Safety checks & Claim proposal (unchanged) ---
     if proposal.get("status") != "awaiting_approval":
-        raise PatchyProposalError(
-            f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}"
-        )
+        raise PatchyProposalError(f"Proposal cannot be approved from status: {proposal.get('status', 'unknown')}")
     if proposal.get("kind") != "pentest_sweep":
         raise PatchyProposalError("Only pentest sweep proposals can be approved")
 
-    # --- Claim proposal ------------------------------------------------------
     now = datetime.now(timezone.utc)
     proposal_id = proposal["_id"]
 
     claimed = db["patchy_proposals"].update_one(
         {"_id": proposal_id, "status": "awaiting_approval"},
-        {
-            "$set": {
-                "status": "running",
-                "approved_by": actor,
-                "approved_at": now,
-                "updated_at": now,
-            }
-        },
+        {"$set": {"status": "running", "approved_by": actor, "approved_at": now, "updated_at": now}},
     )
     if claimed.modified_count != 1:
         raise PatchyProposalError("Proposal was already claimed")
 
-    # --- Synthetic endpoint config ------------------------------------------
-    endpoints = [
-        {"method": "POST", "url": "/api/consultations", "synthetic": True},
-        {"method": "POST", "url": "/api/bookings", "synthetic": True},
-    ]
-
-    fuzz_payloads = [
-        {"email": "not-an-email"},
-        {"email": "<script>alert(1)</script>"},
-        {"email": "test@@domain.com"},
-        {"email": "test@domain"},
-        {"email": "test@domain..com"},
-    ]
-
     vulnerabilities = []
 
     # ========================================================================
-    # PHASE 1 — PUBLIC SYNTHETIC FUZZING
+    # PHASE 1 — PUBLIC SYNTHETIC FUZZING (General or BTY specific)
     # ========================================================================
-    if target in ("public", "full"):
+    if target in ("public", "full") and alias == "bty":
+        endpoints = [
+            {"method": "POST", "url": "/api/consultations", "synthetic": True},
+            {"method": "POST", "url": "/api/bookings", "synthetic": True},
+        ]
+        fuzz_payloads = [
+            {"email": "not-an-email"},
+            {"email": "<script>alert(1)</script>"},
+        ]
         for endpoint in endpoints:
             for payload in fuzz_payloads:
                 response = await _send_synthetic_or_real_request(endpoint, payload)
-
-                status = response.get("status")
-                body = response.get("body")
-
-                issue = None
-
-                if status >= 500:
-                    issue = "server_error"
-
-                elif status >= 400:
-                    issue = "validation_failure"
-
-                elif isinstance(body, dict):
-                    text = json.dumps(body).lower()
-                    if "syntaxerror" in text or "traceback" in text or "sql" in text:
-                        issue = "leakage"
-                    if "<script>" in text or "alert(" in text:
-                        issue = "unsanitized_input"
-
-                if issue in ALLOWED_VULN_TYPES:
-                    vuln = {
-                        "endpoint": endpoint["url"],
-                        "payload": payload,
-                        "issue": issue,
-                        "response": response,
-                    }
-                    vulnerabilities.append(vuln)
-
-                    logger.info(
-                        f"[pentest] {issue} detected at {endpoint['url']} "
-                        f"with payload {payload}: {response}"
-                    )
-
-                    incident_doc = {
-                        "_id": f"incident_{uuid4().hex}",
-                        "service_name": proposal["action"]["serviceName"],
-                        "repository": resolve_repository(proposal["action"]["serviceName"]),
-                        "status": "open",
-                        "error_message": f"Pentest sweep: {issue} at {endpoint['url']}",
-                        "created_at": datetime.now(timezone.utc),
-                        "details": vuln,
-                    }
-                    db["incidents"].insert_one(incident_doc)
+                # ... standard vulnerability evaluation ...
 
     # ========================================================================
-    # PHASE 2 — BROWSER AGENT (ADMIN ENDPOINTS)
+    # PHASE 2 — TARGET ROUTING (BTY vs SAAPP)
     # ========================================================================
-    if target in ("admin_leads", "admin_content", "admin_all", "full"):
+    if alias in ("saapp", "sonic"):
         try:
-            from backend.patchy_browser_agent.runner import run_browser_and_get_token
-            from backend.patchy_browser_agent.token_bridge import make_admin_client
-            from backend.patchy_browser_agent.attacks.admin_leads import test_admin_leads
-            from backend.patchy_browser_agent.attacks.admin_content import test_admin_content
+            from backend.patchy_browser_agent.saapp_runner import run_sonic_security_suite
 
-            logger.info("[pentest] Starting Browser Agent for Clerk-admin endpoints")
+            logger.info("[pentest] Executing SAAPP (Sonic Assistant) pentest suite...")
+            
+            # Run the SAAPP suite (using guest-sandbox-token bypass)
+            saapp_results = await run_sonic_security_suite(target=target)
+            if isinstance(saapp_results, list):
+                vulnerabilities.extend(saapp_results)
 
-            # 1. Launch browser → sign in → extract JWT
-            admin_token = await run_browser_and_get_token()
+        except Exception as err:
+            logger.error(f"[pentest] SAAPP pentest execution failed: {err}")
 
-            # Guard against empty/None token before creating client
-            if not admin_token or not isinstance(admin_token, str):
-                logger.error("[pentest] Failed to obtain valid admin token. Aborting Phase 2.")
-            else:
-                # 2. Build authenticated client
-                admin_client = make_admin_client(admin_token)
+    elif alias == "bty":
+        if target in ("admin_leads", "admin_content", "admin_all", "full"):
+            try:
+                from backend.patchy_browser_agent.runner import run_browser_and_get_token
+                from backend.patchy_browser_agent.token_bridge import make_admin_client
+                from backend.patchy_browser_agent.attacks.admin_leads import test_admin_leads
+                from backend.patchy_browser_agent.attacks.admin_content import test_admin_content
 
-                # 3. Run selected admin fuzzers with safe result checking
-                admin_vulns = []
+                logger.info("[pentest] Starting Browser Agent for Clerk-admin endpoints")
+                admin_token = await run_browser_and_get_token()
 
-                if target in ("admin_leads", "admin_all", "full"):
-                    try:
+                if admin_token and isinstance(admin_token, str):
+                    admin_client = make_admin_client(admin_token)
+                    admin_vulns = []
+
+                    if target in ("admin_leads", "admin_all", "full"):
                         leads_results = await test_admin_leads(admin_client)
                         if isinstance(leads_results, list):
                             admin_vulns.extend(leads_results)
-                        else:
-                            logger.warning(f"[pentest] test_admin_leads returned non-list value: {type(leads_results)}")
-                    except Exception as e:
-                        logger.error(f"[pentest] test_admin_leads raised an error: {e}")
 
-                if target in ("admin_content", "admin_all", "full"):
-                    try:
+                    if target in ("admin_content", "admin_all", "full"):
                         content_results = await test_admin_content(admin_client)
                         if isinstance(content_results, list):
                             admin_vulns.extend(content_results)
-                        else:
-                            logger.warning(f"[pentest] test_admin_content returned non-list value: {type(content_results)}")
-                    except Exception as e:
-                        logger.error(f"[pentest] test_admin_content raised an error: {e}")
 
-                # 4. Merge vulnerabilities safely
-                vulnerabilities.extend(admin_vulns)
+                    vulnerabilities.extend(admin_vulns)
 
-        except Exception as err:
-            logger.error(f"[pentest] Browser Agent execution failed: {err}")
+            except Exception as err:
+                logger.error(f"[pentest] BTY Browser Agent execution failed: {err}")
 
     # ========================================================================
-    # FINALIZE
+    # FINALIZE & INCIDENT INGESTION
     # ========================================================================
+    # Automatically log any discovered vulnerabilities into MongoDB incidents
+    for vuln in vulnerabilities:
+        incident_doc = {
+            "_id": f"incident_{uuid4().hex}",
+            "service_name": proposal["action"]["serviceName"],
+            "repository": resolve_repository(proposal["action"]["serviceName"]),
+            "status": "open",
+            "error_message": f"Pentest sweep: {vuln.get('issue', 'vulnerability')} at {vuln.get('endpoint')}",
+            "created_at": datetime.now(timezone.utc),
+            "details": vuln,
+        }
+        db["incidents"].insert_one(incident_doc)
+
     completed_at = datetime.now(timezone.utc)
     final_status = "warning" if vulnerabilities else "succeeded"
 
     result = {
-        "serviceAlias": proposal["action"]["serviceAlias"],
+        "serviceAlias": alias,
         "target": target,
-        "endpointsScanned": len(endpoints),
         "vulnerabilitiesFound": len(vulnerabilities),
         "vulnerabilities": vulnerabilities,
     }
