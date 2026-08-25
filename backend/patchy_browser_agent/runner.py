@@ -11,6 +11,9 @@ TEST_BACKUP_CODE = os.getenv("CLERK_BACKUP_CODE", "")
 
 BROWSERLESS_WS = "wss://production-sfo.browserless.io/chromium/playwright?token=2V8MYAQGdOa2zWT4cdb32601610399d98cfccd929eea9defb"
 
+# Selector targeting visible submit buttons only
+VISIBLE_SUBMIT_BTN = 'button.cl-formButtonPrimary:visible, button[type="submit"]:visible, button:has-text("Continue"):visible'
+
 async def run_browser_and_get_token():
     async with async_playwright() as pw:
         browser = await pw.chromium.connect(BROWSERLESS_WS)
@@ -20,31 +23,35 @@ async def run_browser_and_get_token():
         )
         page = await context.new_page()
 
-        # 1. Load sign-in page & submit credentials
+        # 1. Load sign-in page & submit email
         await page.goto(BTY_FRONTEND, wait_until="domcontentloaded")
         
-        email_input = page.locator('input[name="identifier"], input[type="email"]').first
+        email_input = page.locator('input[name="identifier"]:visible, input[type="email"]:visible').first
         await email_input.wait_for(state="visible", timeout=15000)
         await email_input.fill(TEST_ADMIN_EMAIL)
-        await page.locator('button.cl-formButtonPrimary, button[type="submit"]').first.click()
+        
+        await page.locator(VISIBLE_SUBMIT_BTN).first.click()
 
-        pwd_input = page.locator('input[name="password"], input[type="password"]').first
+        # 2. Fill password & submit
+        pwd_input = page.locator('input[name="password"]:visible, input[type="password"]:visible').first
         await pwd_input.wait_for(state="visible", timeout=15000)
         await pwd_input.fill(TEST_ADMIN_PASSWORD)
-        await page.locator('button.cl-formButtonPrimary, button[type="submit"]').first.click()
+        
+        await page.locator(VISIBLE_SUBMIT_BTN).first.click()
 
-        # 2. Handle MFA (TOTP or Backup Code)
+        # 3. Handle MFA (TOTP or Backup Code)
         try:
-            code_input = page.locator('input[name="code"], input[type="text"]').first
+            code_input = page.locator('input[name="code"]:visible, input[type="text"]:visible').first
             await code_input.wait_for(state="visible", timeout=8000)
 
             code_to_fill = pyotp.TOTP(TOTP_SECRET).now() if TOTP_SECRET else TEST_BACKUP_CODE
             await code_input.fill(code_to_fill)
-            await page.locator('button.cl-formButtonPrimary, button[type="submit"]').first.click()
+            
+            await page.locator(VISIBLE_SUBMIT_BTN).first.click()
         except Exception:
-            pass  # MFA skipped or already session-cached
+            pass  # MFA skipped or cached
 
-        # 3. Wait explicitly for navigation away from /sign-in
+        # 4. Wait for post-login redirect away from /sign-in
         try:
             await page.wait_for_url(lambda url: "sign-in" not in url, timeout=15000)
         except Exception:
@@ -52,9 +59,9 @@ async def run_browser_and_get_token():
 
         await page.wait_for_load_state("domcontentloaded")
 
-        # 4. Polling Token Extractor (SDK -> LocalStorage -> Cookies)
+        # 5. Extract Session Token
         token = None
-        for _ in range(12):  # Retry polling up to 12s for full hydration
+        for _ in range(12):
             token = await page.evaluate("""
                 async () => {
                     if (window.Clerk?.session) {
@@ -77,7 +84,7 @@ async def run_browser_and_get_token():
                 break
             await asyncio.sleep(1)
 
-        # Fallback to browser context session cookies
+        # Fallback to cookies
         if not token:
             cookies = await context.cookies()
             for c in cookies:
