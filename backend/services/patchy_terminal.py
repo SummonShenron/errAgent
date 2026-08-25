@@ -16,6 +16,7 @@ from backend.services.patchy_test_runner import PatchyTestExecutionError, create
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, create_generated_test_proposal, generate_regression_test
 from backend.services.synthetic_adapters import SyntheticAdapterError, create_question_proposal
 from backend.services.patchy_flow_runner import PatchyFlowError, create_email_validation_proposal, create_flow_plan, create_flow_proposal, create_leakage_validation_proposal, create_validation_proposal, list_flow_plans
+from backend.services.analyze_test_failure import analyze_test_failure
 from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
 
 
@@ -44,6 +45,7 @@ COMMAND_HELP = (
     ("test run <test-plan-id>", "Propose approved CI execution for a test plan"),
     ("test status <test-plan-id>", "Read the latest GitHub Actions test result"),
     ("test generate <incident-id>", "Draft a regression test for operator review"),
+    ("test analyze <test-plan-id>", "Analyze latest CI failure and propose a fix"),
     ("flow define <bty|saapp> <name> <json-actions>", "Save a reusable HTTP flow plan"),
     ("flow list [bty|saapp]", "List saved flow plans"),
     ("flow run <flow-id>", "Propose a flow execution for approval"),
@@ -763,6 +765,18 @@ async def execute_patchy_command(
             f"Review, then run: test run {result['testPlanId']}",
         ]
         return _response("success", "Patchy test plan", lines, result)
+    if args[0].lower() == "analyze":
+        test_plan_id = args[1]
+        try:
+            analysis = await analyze_test_failure(test_plan_id, db, broker)
+        except PatchyReasoningError as exc:
+            raise PatchyCommandError(str(exc)) from exc
+        return _response(
+            "success",
+            "Patchy test failure analysis",
+            analysis["lines"],
+            analysis,
+        )
 
     if command == "diagnostics":
         health_result = await _run_health("all")
