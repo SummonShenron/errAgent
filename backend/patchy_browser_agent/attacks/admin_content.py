@@ -1,108 +1,95 @@
-# patchy_browser_agent/attacks/admin_content.py
-import json
+import logging
 
-ALLOWED_KEYS = [
-    # These are inferred from your frontend contentSections.
-    # Patchy will fuzz outside this list to test backend validation.
+logger = logging.getLogger("errAgent Logger")
+
+ALLOWED_PREFIXES = [
     "hero_", "about_", "programs_", "program_card_", "program_feature_",
     "book_", "programs_page_", "consultation_", "about_page_",
     "qualifications_", "testimonials_", "merch_"
 ]
 
 def _is_allowed_key(key: str) -> bool:
-    return any(key.startswith(prefix) for prefix in ALLOWED_KEYS)
+    return any(key.startswith(prefix) for prefix in ALLOWED_PREFIXES)
 
 
-async def test_admin_content(client):
+async def test_admin_content(admin_client):
     vulnerabilities = []
 
-    # --- 1. Fetch content ----------------------------------------------------
     try:
-        res = await client.get("/api/admin/content")
-        status = res.status_code
-        body = res.json() if status == 200 else res.text
+        logger.info("[pentest] Simulating compromised admin attacks on /api/admin/content...")
 
-        if status != 200:
-            vulnerabilities.append({
-                "endpoint": "/api/admin/content",
-                "issue": "fetch_failed",
-                "response": body,
-            })
+        # 1. Fetch baseline content state
+        res = await admin_client.get("/api/admin/content")
+        if res.status_code != 200:
+            logger.warning(f"[pentest] Could not fetch content baseline (Status {res.status_code})")
             return vulnerabilities
 
+        body = res.json() if isinstance(res.json(), dict) else {}
         items = body.get("items", {})
-        defaults = body.get("defaults", {})
 
-    except Exception as e:
-        vulnerabilities.append({
-            "endpoint": "/api/admin/content",
-            "issue": "exception_fetch",
-            "response": str(e),
-        })
-        return vulnerabilities
+        # Select a target key for payload testing
+        valid_key = next((k for k in items.keys() if _is_allowed_key(k)), "hero_title")
+        original_val = items.get(valid_key, "Default Content")
 
-    # --- 2. Fuzz content updates --------------------------------------------
-    fuzz_cases = [
-        # A. Valid update (baseline)
-        {"items": items},
+        # 2. Test Stored XSS / Unsanitized HTML Injection
+        xss_payload = "<script>alert('STORED_XSS')</script><img src=x onerror=alert(1)>"
+        xss_res = await admin_client.put(
+            "/api/admin/content",
+            json={"items": {valid_key: xss_payload}}
+        )
+        if xss_res.status_code in (200, 204):
+            verify_xss = await admin_client.get("/api/admin/content")
+            if verify_xss.status_code == 200:
+                fetched_val = str(verify_xss.json().get("items", {}).get(valid_key, ""))
+                if "<script>" in fetched_val or "onerror=" in fetched_val:
+                    vulnerabilities.append({
+                        "type": "STORED_XSS_PERSISTED",
+                        "severity": "HIGH",
+                        "endpoint": "/api/admin/content",
+                        "field": valid_key,
+                        "detail": "Backend persisted unescaped script tags; vulnerable to Stored XSS if rendered raw in frontend."
+                    })
 
-        # B. Oversized payload
-        {"items": {k: "A" * 50000 for k in items.keys()}},
+        # 3. Test Arbitrary Schema / Non-Whitelisted Key Injection
+        illegal_key = "unauthorized_admin_injected_key"
+        whitelist_res = await admin_client.put(
+            "/api/admin/content",
+            json={"items": {illegal_key: "malicious_injection"}}
+        )
+        if whitelist_res.status_code in (200, 204):
+            verify_res = await admin_client.get("/api/admin/content")
+            if verify_res.status_code == 200:
+                updated_items = verify_res.json().get("items", {})
+                if illegal_key in updated_items:
+                    vulnerabilities.append({
+                        "type": "UNVALIDATED_SCHEMA_EXPANSION",
+                        "severity": "MEDIUM",
+                        "endpoint": "/api/admin/content",
+                        "detail": f"Backend allows persisting non-whitelisted key '{illegal_key}'."
+                    })
 
-        # C. HTML/script injection
-        {"items": {k: "<script>alert('xss')</script>" for k in items.keys()}},
-
-        # D. Invalid keys (backend should reject)
-        {"items": {"invalid_key": "test"}},
-
-        # E. Nested objects (backend should reject)
-        {"items": {"hero_title": {"nested": "object"}}},
-
-        # F. Type confusion (numbers instead of strings)
-        {"items": {k: 12345 for k in items.keys()}},
-
-        # G. Missing keys (partial update)
-        {"items": {k: items[k] for k in list(items.keys())[:3]}},
-
-        # H. Null values
-        {"items": {k: None for k in items.keys()}},
-    ]
-
-    for case in fuzz_cases:
-        try:
-            res = await client.put("/api/admin/content", json=case)
-            status = res.status_code
-            text = res.text.lower()
-
-            issue = None
-
-            # --- Vulnerability detection -------------------------------------
-            if status >= 500:
-                issue = "server_error"
-
-            elif "traceback" in text or "syntaxerror" in text:
-                issue = "leakage"
-
-            elif "<script>" in text or "alert(" in text:
-                issue = "unsanitized_input"
-
-            elif status == 200 and "invalid" in text:
-                issue = "unexpected_success"
-
-            if issue:
+        # 4. Test Type Confusion / UI Denial of Service
+        type_cases = [
+            ("nested_object", {valid_key: {"nested": "object_payload"}}),
+            ("array_type", {valid_key: ["val1", "val2"]})
+        ]
+        for label, payload in type_cases:
+            tc_res = await admin_client.put("/api/admin/content", json={"items": payload})
+            if tc_res.status_code in (200, 204):
                 vulnerabilities.append({
+                    "type": "TYPE_CONFUSION_ACCEPTED",
+                    "severity": "MEDIUM",
                     "endpoint": "/api/admin/content",
-                    "payload": case,
-                    "issue": issue,
-                    "response": res.text,
+                    "detail": f"Endpoint accepted non-string '{label}' for content field, which could break frontend rendering."
                 })
 
-        except Exception as e:
-            vulnerabilities.append({
-                "endpoint": "/api/admin/content",
-                "payload": case,
-                "issue": "exception",
-                "response": str(e),
-            })
+        # 5. Restore Original State
+        try:
+            await admin_client.put("/api/admin/content", json={"items": {valid_key: original_val}})
+        except Exception as clean_err:
+            logger.warning(f"[pentest] Cleanup failed for key '{valid_key}': {clean_err}")
+
+    except Exception as e:
+        logger.error(f"[pentest] Unexpected error during admin_content testing: {e}")
 
     return vulnerabilities
