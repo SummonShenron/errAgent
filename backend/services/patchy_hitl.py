@@ -388,38 +388,41 @@ async def approve_and_execute_pentest_sweep(
             # 1. Launch browser → sign in → extract JWT
             admin_token = await run_browser_and_get_token()
 
-            # 2. Build authenticated client
-            admin_client = make_admin_client(admin_token)
+            # Guard against empty/None token before creating client
+            if not admin_token or not isinstance(admin_token, str):
+                logger.error("[pentest] Failed to obtain valid admin token. Aborting Phase 2.")
+            else:
+                # 2. Build authenticated client
+                admin_client = make_admin_client(admin_token)
 
-            # 3. Run selected admin fuzzers
-            admin_vulns = []
+                # 3. Run selected admin fuzzers with safe result checking
+                admin_vulns = []
 
-            if target in ("admin_leads", "admin_all", "full"):
-                admin_vulns.extend(await test_admin_leads(admin_client))
+                if target in ("admin_leads", "admin_all", "full"):
+                    try:
+                        leads_results = await test_admin_leads(admin_client)
+                        if isinstance(leads_results, list):
+                            admin_vulns.extend(leads_results)
+                        else:
+                            logger.warning(f"[pentest] test_admin_leads returned non-list value: {type(leads_results)}")
+                    except Exception as e:
+                        logger.error(f"[pentest] test_admin_leads raised an error: {e}")
 
-            if target in ("admin_content", "admin_all", "full"):
-                admin_vulns.extend(await test_admin_content(admin_client))
+                if target in ("admin_content", "admin_all", "full"):
+                    try:
+                        content_results = await test_admin_content(admin_client)
+                        if isinstance(content_results, list):
+                            admin_vulns.extend(content_results)
+                        else:
+                            logger.warning(f"[pentest] test_admin_content returned non-list value: {type(content_results)}")
+                    except Exception as e:
+                        logger.error(f"[pentest] test_admin_content raised an error: {e}")
 
-            # 4. Merge vulnerabilities
-            vulnerabilities.extend(admin_vulns)
+                # 4. Merge vulnerabilities safely
+                vulnerabilities.extend(admin_vulns)
 
-            # 5. Log findings + create incidents
-            for vuln in admin_vulns:
-                logger.info(f"[pentest] Admin vuln detected: {vuln}")
-
-                incident_doc = {
-                    "_id": f"incident_{uuid4().hex}",
-                    "service_name": proposal["action"]["serviceName"],
-                    "repository": resolve_repository(proposal["action"]["serviceName"]),
-                    "status": "open",
-                    "error_message": f"Pentest sweep (admin): {vuln['issue']} at {vuln['endpoint']}",
-                    "created_at": datetime.now(timezone.utc),
-                    "details": vuln,
-                }
-                db["incidents"].insert_one(incident_doc)
-
-        except Exception as e:
-            logger.error(f"[pentest] Browser Agent failed: {e}")
+        except Exception as err:
+            logger.error(f"[pentest] Browser Agent execution failed: {err}")
 
     # ========================================================================
     # FINALIZE
