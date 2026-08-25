@@ -7,23 +7,22 @@ BTY_FRONTEND = "https://btyapp.vercel.app/sign-in"
 TEST_ADMIN_EMAIL = "jackharper0517@gmail.com"
 TEST_ADMIN_PASSWORD = "R1$3ifyouwould!"
 
-# Force string fallbacks so pyotp/base64 never receives None
-TOTP_SECRET = os.getenv("CLERK_TOTP_SECRET") or ""
-TEST_BACKUP_CODE = os.getenv("CLERK_BACKUP_CODE") or ""
+# Force string fallbacks to prevent NoneType exceptions
+TOTP_SECRET = (os.getenv("CLERK_TOTP_SECRET") or "").strip()
+TEST_BACKUP_CODE = (os.getenv("CLERK_BACKUP_CODE") or "").strip()
 
 BROWSERLESS_WS = "wss://production-sfo.browserless.io/chromium/playwright?token=2V8MYAQGdOa2zWT4cdb32601610399d98cfccd929eea9defb"
 
-def get_mfa_code() -> str:
-    """Safely generate TOTP code or return backup code without throwing NoneType errors."""
-    clean_secret = TOTP_SECRET.strip()
-    if clean_secret:
+def generate_mfa_code() -> str:
+    """Safely return valid TOTP or Backup Code without blowing up on NoneType."""
+    if TOTP_SECRET:
         try:
-            return pyotp.TOTP(clean_secret).now()
+            return pyotp.TOTP(TOTP_SECRET).now()
         except Exception:
             pass
-    return TEST_BACKUP_CODE.strip()
+    return TEST_BACKUP_CODE
 
-async def run_browser_and_get_token():
+async def run_browser_and_get_token() -> str:
     async with async_playwright() as pw:
         browser = await pw.chromium.connect(BROWSERLESS_WS)
         context = await browser.new_context(
@@ -51,7 +50,7 @@ async def run_browser_and_get_token():
             code_input = page.locator('input[name="code"]:visible, input[type="text"]:visible').first
             await code_input.wait_for(state="visible", timeout=8000)
 
-            code_to_fill = get_mfa_code()
+            code_to_fill = generate_mfa_code()
             if code_to_fill:
                 await code_input.fill(code_to_fill)
                 await code_input.press("Enter")
@@ -89,7 +88,7 @@ async def run_browser_and_get_token():
                     return null;
                 }
             """)
-            if token:
+            if token and isinstance(token, str):
                 break
             await asyncio.sleep(1)
 
@@ -103,8 +102,8 @@ async def run_browser_and_get_token():
 
         await browser.close()
 
-        if not token:
-            raise RuntimeError("Authentication succeeded, but failed to extract session token from window/cookies.")
+        if not token or not isinstance(token, str):
+            raise RuntimeError("Browser Agent completed login but failed to retrieve a string JWT token.")
 
         return token
 
