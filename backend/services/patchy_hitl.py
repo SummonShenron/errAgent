@@ -321,17 +321,32 @@ async def approve_and_execute_pentest_sweep(
     # ========================================================================
     if alias in ("saapp", "sonic"):
         try:
-            from backend.patchy_browser_agent.saapp_runner import run_sonic_security_suite
+            from backend.patchy_browser_agent.saapp_runner import (
+                run_sonic_security_suite,
+            )
+            from backend.patchy_browser_agent.attacks.guest_phase import run_guest_phase
+            from backend.patchy_browser_agent.attacks.user_phase import run_user_phase
+            from backend.patchy_browser_agent.attacks.admin_phase import run_admin_phase
 
-            logger.info("[pentest] Executing SAAPP (Sonic Assistant) pentest suite...")
-            
-            # Run the SAAPP suite (using guest-sandbox-token bypass)
-            saapp_results = await run_sonic_security_suite(target=target)
-            if isinstance(saapp_results, list):
-                vulnerabilities.extend(saapp_results)
+            logger.info(f"[pentest] Executing Sonic pentest target: {target}")
+
+            if target in ("sonic_guest", "guest"):
+                vulnerabilities.extend(await run_guest_phase())
+
+            elif target in ("sonic_user", "user"):
+                vulnerabilities.extend(await run_user_phase())
+
+            elif target in ("sonic_admin", "admin"):
+                vulnerabilities.extend(await run_admin_phase())
+
+            elif target in ("sonic_full", "full"):
+                vulnerabilities.extend(await run_sonic_security_suite())
+
+            else:
+                logger.warning(f"[pentest] Unknown Sonic target: {target}")
 
         except Exception as err:
-            logger.error(f"[pentest] SAAPP pentest execution failed: {err}")
+            logger.error(f"[pentest] Sonic pentest execution failed: {err}")
 
     elif alias == "bty":
         if target in ("admin_leads", "admin_content", "admin_all", "full"):

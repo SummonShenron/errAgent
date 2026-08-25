@@ -516,6 +516,9 @@ admin_leads	Authenticated Browser Agent sweep of Clerk-protected admin leads end
 admin_content	Authenticated Browser Agent sweep of Clerk-protected admin content endpoints.
 admin_all	Runs both admin_leads and admin_content fuzzers.
 full	Runs public synthetic fuzzing and all admin fuzzers.
+sonic_admin Runs sonic admin attack
+sonic_user Runs user attacks
+sonic_guest Runs attacks from guest session
 
 
 If no target is provided, Patchy defaults to:
