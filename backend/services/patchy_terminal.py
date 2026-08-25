@@ -572,8 +572,8 @@ async def execute_patchy_command(
         )
 
     if command == "test":
-        if len(args) != 2 or args[0].lower() not in {"plan", "run", "status", "generate", "approve", "guide"}:
-            raise PatchyCommandError("Usage: test plan|run|status|generate|approve|guide <id>")
+        if len(args) != 2 or args[0].lower() not in {"plan", "run", "status", "generate", "approve", "guide", "analyze"}:   
+            raise PatchyCommandError("Usage: test plan|run|status|generate|approve|guide|analyze <id>")
         if args[0].lower() == "guide":
             incident_id = args[1]
             generated = db["patchy_generated_tests"].find_one(
