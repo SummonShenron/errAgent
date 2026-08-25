@@ -1,9 +1,17 @@
 import httpx
 import logging
-from .endpoints import GUEST_HEADERS, SONIC_BASE_URL
+import os
 
 logger = logging.getLogger("errAgent Logger")
+SONIC_BASE_URL = os.getenv("SONIC_API_BASE_URL", "https://saapp.onrender.com")
 
+GUEST_SANDBOX_TOKEN = "guest-sandbox-token"
+GUEST_BTY_TOKEN = "guest-bty-token"
+
+GUEST_HEADERS = {
+    "Authorization": f"Bearer {GUEST_SANDBOX_TOKEN}",
+    "Content-Type": "application/json",
+}
 async def run_guest_phase():
     vulns = []
 
