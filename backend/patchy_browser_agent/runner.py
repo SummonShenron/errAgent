@@ -53,7 +53,7 @@ async def run_browser_and_get_token():
 
         await page.wait_for_load_state("domcontentloaded")
 
-        # 5. Extract Session Token
+        # 5. Extract Session Token via polling
         token = None
         for _ in range(12):
             token = await page.evaluate("""
@@ -66,7 +66,7 @@ async def run_browser_and_get_token():
                     }
                     for (let i = 0; i < localStorage.length; i++) {
                         const key = localStorage.key(i);
-                        if (key.includes('clerk') || key.includes('session') || key.includes('jwt')) {
+                        if (key && (key.includes('clerk') || key.includes('session') || key.includes('jwt'))) {
                             const val = localStorage.getItem(key);
                             if (val && val.startsWith('eyJ')) return val;
                         }
@@ -78,12 +78,13 @@ async def run_browser_and_get_token():
                 break
             await asyncio.sleep(1)
 
-        # Fallback to cookies
+        # 6. Fallback to cookies with None guard
         if not token:
-            cookies = await context.cookies()
+            raw_cookies = await context.cookies()
+            cookies = raw_cookies if raw_cookies is not None else []
             for c in cookies:
-                if c["name"] in ["__session", "__clerk_db_jwt"] or "clerk" in c["name"]:
-                    token = c["value"]
+                if c.get("name") in ["__session", "__clerk_db_jwt"] or "clerk" in c.get("name", ""):
+                    token = c.get("value")
                     break
 
         await browser.close()
