@@ -31,35 +31,40 @@ async def run_browser_and_get_token():
 
         await google_btn.wait_for(state="visible", timeout=30000)
 
-        # 3. Click Google button and capture popup
-        async with context.expect_page() as popup_info:
-            await google_btn.click()
-        google = await popup_info.value
+        # 3. Handle Popup vs. In-Tab Redirect
+        auth_page = page
+        try:
+            async with context.expect_page(timeout=5000) as popup_info:
+                await google_btn.click()
+            auth_page = await popup_info.value
+        except Exception:
+            # No popup opened within 5s; Clerk redirected the current page to Google
+            pass
 
-        # 4. Fill Google email
-        await google.wait_for_selector('input[type="email"]', timeout=30000)
-        await google.fill('input[type="email"]', TEST_ADMIN_EMAIL)
-        await google.click('button:has-text("Next")')
+        # 4. Fill Google email on the active auth page/tab
+        await auth_page.wait_for_selector('input[type="email"]', timeout=30000)
+        await auth_page.fill('input[type="email"]', TEST_ADMIN_EMAIL)
+        await auth_page.click('button:has-text("Next")')
 
         # 5. Fill Google password
-        await google.wait_for_selector('input[type="password"]', timeout=30000)
-        await google.fill('input[type="password"]', TEST_ADMIN_PASSWORD)
-        await google.click('button:has-text("Next")')
+        await auth_page.wait_for_selector('input[type="password"]', timeout=30000)
+        await auth_page.fill('input[type="password"]', TEST_ADMIN_PASSWORD)
+        await auth_page.click('button:has-text("Next")')
 
-        # Handle optional prompts
+        # Handle optional security prompts
         try:
-            await google.click('button:has-text("Yes")', timeout=5000)
+            await auth_page.click('button:has-text("Yes")', timeout=5000)
         except Exception:
             pass
 
         try:
-            await google.wait_for_selector('input[type="tel"]', timeout=5000)
-            await google.fill('input[type="tel"]', GOOGLE_PHONE_LAST_2_DIGITS)
-            await google.click('button:has-text("Next")')
+            await auth_page.wait_for_selector('input[type="tel"]', timeout=5000)
+            await auth_page.fill('input[type="tel"]', GOOGLE_PHONE_LAST_2_DIGITS)
+            await auth_page.click('button:has-text("Next")')
         except Exception:
             pass
 
-        # 6. Wait for redirect and Clerk session hydration
+        # 6. Wait for redirect back to application and Clerk session hydration
         await page.wait_for_load_state("networkidle")
         await page.wait_for_function("window.Clerk?.session?.id", timeout=20000)
         await page.wait_for_selector("text=Content", timeout=20000)
