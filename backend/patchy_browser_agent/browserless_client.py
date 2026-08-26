@@ -1,87 +1,82 @@
 import asyncio
-import os
 import json
-import logging
 import websockets
-from dotenv import load_dotenv
-load_dotenv()
+import logging
+import os
 
 logger = logging.getLogger("errAgent Logger")
-
-BROWSERLESS_WS = f"wss://playwright.browserless.io/playwright?token={os.getenv('BROWSERLESS_TOKEN')}"
-class BrowserlessClient:
-    def __init__(self, ws_url=BROWSERLESS_WS):
+BROWSERLESS_WS = f"wss://chrome.browserless.io/playwright?token={os.getenv('BROWSERLESS_TOKEN')}"
+class CDPBrowserlessClient:
+    def __init__(self, ws_url):
         self.ws_url = ws_url
-        self.websocket = None
+        self.ws = None
         self.session_id = None
-        self.page_id = None
+        self.target_id = None
 
     async def connect(self):
-        self.websocket = await websockets.connect(self.ws_url)
-        logger.info("[browserless] Connected to Browserless")
+        self.ws = await websockets.connect(self.ws_url)
+        logger.info("[browserless] Connected")
 
-        # Create Playwright session
-        await self._send({"id": 1, "method": "Playwright.enable"})
-        self.session_id = 1
+        await self._send({"id": 1, "method": "Target.setDiscoverTargets", "params": {"discover": True}})
+        await self._send({"id": 2, "method": "Network.enable"})
+        await self._send({"id": 3, "method": "Runtime.enable"})
+        await self._send({"id": 4, "method": "Page.enable"})
 
-        # Create browser
-        await self._send({
-            "id": 2,
-            "method": "Playwright.createBrowser",
-            "params": {"browserType": "chromium"}
+        # Create a new tab
+        resp = await self._send({
+            "id": 5,
+            "method": "Target.createTarget",
+            "params": {"url": "about:blank"}
         })
+        self.target_id = resp["result"]["targetId"]
 
-        # Create context
-        await self._send({
-            "id": 3,
-            "method": "Browser.createContext",
-            "params": {"browser": 2}
+        # Attach to the tab
+        resp = await self._send({
+            "id": 6,
+            "method": "Target.attachToTarget",
+            "params": {"targetId": self.target_id, "flatten": True}
         })
+        self.session_id = resp["result"]["sessionId"]
 
-        # Create page
+        logger.info("[browserless] CDP session established")
+
+    async def goto(self, url):
         await self._send({
-            "id": 4,
-            "method": "BrowserContext.newPage",
-            "params": {"context": 3}
-        })
-
-        self.page_id = 4
-        logger.info("[browserless] Browser, context, and page created")
-
-    async def _send(self, payload):
-        await self.websocket.send(json.dumps(payload))
-        response = await self.websocket.recv()
-        return json.loads(response)
-
-    async def goto(self, url: str):
-        await self._send({
-            "id": 10,
+            "id": 7,
             "method": "Page.navigate",
-            "params": {"page": self.page_id, "url": url}
+            "params": {"url": url},
+            "sessionId": self.session_id
         })
 
-    async def eval(self, expression: str):
-        result = await self._send({
-            "id": 11,
-            "method": "Page.evaluate",
-            "params": {"page": self.page_id, "expression": expression}
+    async def eval(self, js):
+        resp = await self._send({
+            "id": 8,
+            "method": "Runtime.evaluate",
+            "params": {"expression": js},
+            "sessionId": self.session_id
         })
-        return result.get("result")
+        return resp["result"]
 
-    async def get_network_events(self):
-        """Collect network events from Browserless."""
+    async def listen_network(self, limit=200):
         events = []
-
-        async for msg in self.websocket:
+        async for msg in self.ws:
             data = json.loads(msg)
-            if "method" in data and data["method"] == "Network.requestWillBeSent":
+            if data.get("method") == "Network.requestWillBeSent":
                 events.append(data["params"])
-            if len(events) > 200:
-                break
-
+                if len(events) >= limit:
+                    break
         return events
 
     async def close(self):
-        if self.websocket:
-            await self.websocket.close()
-            logger.info("[browserless] Connection closed")
+        if self.target_id:
+            await self._send({
+                "id": 9,
+                "method": "Target.closeTarget",
+                "params": {"targetId": self.target_id}
+            })
+        if self.ws:
+            await self.ws.close()
+
+    async def _send(self, payload):
+        await self.ws.send(json.dumps(payload))
+        return json.loads(await self.ws.recv())

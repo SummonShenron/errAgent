@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from backend.patchy_browser_agent.browserless_client import BrowserlessClient
+from backend.patchy_browser_agent.browserless_client import CDPBrowserlessClient, BROWSERLESS_WS
 from backend.patchy_browser_agent.attacks.guest_phase import run_guest_phase
 from backend.patchy_browser_agent.attacks.user_phase import run_user_phase
 from backend.patchy_browser_agent.attacks.admin_phase import run_admin_phase
@@ -25,7 +25,7 @@ async def run_sonic_security_suite():
 
 async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     endpoints = []
-    client = BrowserlessClient()
+    client = CDPBrowserlessClient(BROWSERLESS_WS)
 
     try:
         await client.connect()
