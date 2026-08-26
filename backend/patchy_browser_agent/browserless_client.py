@@ -1,14 +1,14 @@
 import asyncio
+import os
 import json
 import logging
 import websockets
 from dotenv import load_dotenv
 load_dotenv()
+
 logger = logging.getLogger("errAgent Logger")
 
-import os
-BROWSERLESS_WS = f"wss://chrome.browserless.io/playwright?token={os.getenv('BROWSERLESS_TOKEN')}"
-
+BROWSERLESS_WS = f"wss://playwright.browserless.io/playwright?token={os.getenv('BROWSERLESS_TOKEN')}"
 class BrowserlessClient:
     def __init__(self, ws_url=BROWSERLESS_WS):
         self.ws_url = ws_url
