@@ -5,8 +5,7 @@ import logging
 import os
 
 logger = logging.getLogger("errAgent Logger")
-BROWSERLESS_WS = f"wss://ws.browserless.io/playwright?token={os.getenv('BROWSERLESS_TOKEN')}"
-
+BROWSERLESS_WS = f"wss://chrome.browserless.io/playwright?token={os.getenv('BROWSERLESS_TOKEN')}"
 class CDPBrowserlessClient:
     def __init__(self, ws_url):
         self.ws_url = ws_url
