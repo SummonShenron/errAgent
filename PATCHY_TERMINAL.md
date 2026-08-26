@@ -124,12 +124,14 @@ test run <test-plan-id>
 test status <test-plan-id>
 test generate <incident-id>
 test approve <generated-test-id>
+test analyze <test-plan-id>
 investigate [incident-id]
 verify [bty|saapp]
 plan verify [bty|saapp] stability
 plan investigate incidents
 next [plan-id]
 pentest sweep [bty|saapp]
+discover endpoints <serviceAlias|url>
 clear
 ```
 
@@ -350,6 +352,7 @@ This guided mode keeps the current commands intact but auto-selects the next saf
 3. `test plan <incident-id>`
 4. `test run <test-plan-id>`
 5. `test status <test-plan-id>`
+6. `test analyze <test-plan-id>`
 
 When a pending approval already exists, `test guide` resumes that approval card instead of creating duplicate work.
 

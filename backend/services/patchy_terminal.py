@@ -3,7 +3,7 @@ import json
 import shlex
 from datetime import datetime, timezone
 from typing import Any
-
+from backend.services.patchy_errors import PatchyCommandError
 from backend.services.log_broker import LogBroker
 from backend.services.patchy_hitl import PatchyProposalError, create_pentest_sweep_proposal, create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
 from backend.services.patchy_planner import PatchyPlanError, build_plan_report, create_incident_investigation_plan, create_plan, next_step, record_adaptive_step_result, get_plan, get_latest_active_plan
@@ -17,6 +17,7 @@ from backend.services.patchy_test_generator import PatchyGeneratedTestError, cre
 from backend.services.synthetic_adapters import SyntheticAdapterError, create_question_proposal
 from backend.services.patchy_flow_runner import PatchyFlowError, create_email_validation_proposal, create_flow_plan, create_flow_proposal, create_leakage_validation_proposal, create_validation_proposal, list_flow_plans
 from backend.services.analyze_test_failure import analyze_test_failure
+from backend.services.patchy_discovery import discover_endpoints_command
 from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
 
 
@@ -30,8 +31,8 @@ COMMAND_HELP = (
     ("logs [all|bty|saapp|erragent] [info|warn|error]", "Show recent in-memory logs"),
     ("diagnostics", "Run health, incident, and log checks together"),
     ("probe [bty|saapp]", "Propose a read-only HTTP probe for approval"),
-        ("synthetic [bty|saapp]", "Propose a registered synthetic HTTP assertion"),
-        ("synthetic ask sonic <question> [--production-read-only]", "Propose a Sonic Assistant question (staging by default)"),
+    ("synthetic [bty|saapp]", "Propose a registered synthetic HTTP assertion"),
+    ("synthetic ask sonic <question> [--production-read-only]", "Propose a Sonic Assistant question (staging by default)"),
     ("verify [bty|saapp]", "Run a two-step HITL stability verification"),
     ("plan verify [bty|saapp] stability", "Create a deterministic multi-step plan"),
     ("investigate [incident-id]", "Create an investigation or request an incident to investigate"),
@@ -53,6 +54,7 @@ COMMAND_HELP = (
     ("validate email <bty|saapp> <path>", "Probe email validation without JSON"),
     ("validate leakage <bty|saapp> <path>", "Probe for leaked database details"),
     ("pentest sweep <bty|saapp> [target]", "Propose a synthetic pentest sweep for approval"),
+    ("discover endpoints <serviceAlias|url>", "Enumerate known endpoints for a service using static, synthetic, and browser discovery"),
     ("clear", "Clear the terminal screen locally"),
 )
 
@@ -68,8 +70,7 @@ _LOG_SERVICE_ALIASES = {
 }
 
 
-class PatchyCommandError(ValueError):
-    pass
+
 
 
 def _response(status: str, title: str, lines: list[str], data: Any = None) -> dict[str, Any]:
@@ -778,6 +779,12 @@ async def execute_patchy_command(
             analysis,
         )
 
+    if command == "discover":
+        if len(args) != 2 or args[0].lower() != "endpoints":
+            raise PatchyCommandError("Usage: discover endpoints <serviceAlias|url>")
+        target = args[1]
+        return await discover_endpoints_command(db, broker, target)
+    
     if command == "diagnostics":
         health_result = await _run_health("all")
         incidents = _active_incidents(db, limit=10)

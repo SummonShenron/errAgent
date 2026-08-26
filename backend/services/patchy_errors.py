@@ -1,0 +1,2 @@
+class PatchyCommandError(ValueError):
+    pass

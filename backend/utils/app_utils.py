@@ -16,7 +16,7 @@ from bson import ObjectId
 from bson import ObjectId
 import requests
 from fastapi import BackgroundTasks, HTTPException
-from typing import Dict
+from typing import Dict, Any
 from pydantic import BaseModel, Field
 from backend.utils.db_utils import get_db
 from backend.prompts.constraints import INCIDENT_ANALYSIS_PROMPT
@@ -54,7 +54,7 @@ SERVICES = [
 # Canonical service names mapped from known aliases. Middleware payloads arrive
 # with inconsistent names ("BTY", "btyapp", etc.); collapsing them keeps
 # incident cards merged and lets the service_registry resolve the right repo.
-_SERVICE_NAME_ALIASES = {
+SERVICE_NAME_ALIASES = {
     "bty": "btyapp",
     "bty-fitness": "btyapp",
     "bty fitness": "btyapp",
@@ -71,7 +71,7 @@ def canonicalize_service_name(name: Any) -> str:
     cleaned = " ".join(name.strip().split()).lower()
     if not cleaned:
         return "unknown-service"
-    canonical = _SERVICE_NAME_ALIASES.get(cleaned, cleaned)
+    canonical = SERVICE_NAME_ALIASES.get(cleaned, cleaned)
     logger.info("[ingest] service_name canonicalized: raw=%r -> canonical=%r", name, canonical)
     return canonical
 
