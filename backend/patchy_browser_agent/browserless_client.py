@@ -39,11 +39,11 @@ class PlaywrightBrowserlessClient:
 
     # backend/patchy_browser_agent/browserless_client.py
 
+    # backend/patchy_browser_agent/browserless_client.py
+
     async def goto(self, url: str, wait_until: str = "networkidle"):
         if not self.page:
             raise RuntimeError("Browser page is not initialized")
-        
-        # "networkidle" waits until no network connections have been active for at least 500ms
         await self.page.goto(url, wait_until=wait_until)
 
     async def eval(self, script: str):

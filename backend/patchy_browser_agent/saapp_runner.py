@@ -23,20 +23,29 @@ async def run_sonic_security_suite():
     return all_vulns
 
 
+# backend/patchy_browser_agent/saapp_runner.py
+
 async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     endpoints = []
     client = PlaywrightBrowserlessClient()
 
     try:
+        logger.info(f"[sonic-discovery] Navigating to target: {base_url}")
         await client.connect()
         await client.goto(base_url)
-        await client.page.wait_for_timeout(5000)
+
+        # Allow React/Vite DOM hydration & background fetch requests to complete
+        if client.page:
+            await client.page.wait_for_timeout(2500)
+
         # 1. Extract <a href> links
         links = await client.eval("""
             Array.from(document.querySelectorAll('a[href]'))
                  .map(a => a.href)
-        """)
-        for href in links or []:
+        """) or []
+        logger.info(f"[sonic-discovery] Discovered {len(links)} HTML links")
+        
+        for href in links:
             endpoints.append({
                 "method": "GET",
                 "url": href,
@@ -48,8 +57,10 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
         forms = await client.eval("""
             Array.from(document.querySelectorAll('form[action]'))
                  .map(f => f.action)
-        """)
-        for action in forms or []:
+        """) or []
+        logger.info(f"[sonic-discovery] Discovered {len(forms)} HTML forms")
+
+        for action in forms:
             endpoints.append({
                 "method": "POST",
                 "url": action,
@@ -57,8 +68,10 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
                 "source": "browser-form"
             })
 
-        # 3. Extract XHR/fetch network requests
+        # 3. Extract captured network events
         network_events = await client.get_network_events()
+        logger.info(f"[sonic-discovery] Captured {len(network_events)} network requests")
+
         for evt in network_events:
             req = evt.get("request", {})
             url = req.get("url")
@@ -78,8 +91,10 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     finally:
         await client.close()
 
+    logger.info(f"[sonic-discovery] Total endpoints discovered: {len(endpoints)}")
     return endpoints
 
 
 if __name__ == "__main__":
     asyncio.run(run_sonic_security_suite())
+    
