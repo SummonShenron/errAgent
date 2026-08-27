@@ -3,6 +3,8 @@ import json
 import shlex
 from datetime import datetime, timezone
 from typing import Any
+from backend.patchy_browser_agent.saapp_runner import run_sonic_discovery_suite
+from backend.patchy_browser_agent.saapp_runner import run_sonic_discovery_suite
 from backend.services.patchy_errors import PatchyCommandError
 from backend.services.log_broker import LogBroker
 from backend.services.patchy_hitl import PatchyProposalError, create_pentest_sweep_proposal, create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
@@ -782,8 +784,34 @@ async def execute_patchy_command(
     if command == "discover":
         if len(args) != 2 or args[0].lower() != "endpoints":
             raise PatchyCommandError("Usage: discover endpoints <serviceAlias|url>")
-        target = args[1]
-        return await discover_endpoints_command(db, broker, target)
+        
+        raw_target = args[1]
+        
+        # 1. Resolve service alias to full URL if needed
+        if raw_target.startswith(("http://", "https://")):
+            target_url = raw_target
+        else:
+            # Fallback/Resolver function for service aliases (e.g., "bty" -> "https://www.btyfitness.app")
+            if not target_url:
+                raise PatchyCommandError(f"Unknown service alias: '{raw_target}'")
+
+        await broker.publish(f"[Patchy] Starting discovery sweep on {target_url}...")
+
+        # 2. Execute discovery suite to fetch endpoints
+        endpoints = await run_sonic_discovery_suite(target_url)
+
+        # 3. Stream discovered endpoints line-by-line to broker/stdout
+        await broker.publish(f"[Patchy] Discovered {len(endpoints)} endpoints:")
+        for idx, ep in enumerate(endpoints, 1):
+            log_line = f"  [{idx:02d}] {ep['method']:<5} {ep['url']} ({ep['source']})"
+            await broker.publish(log_line)
+
+        return {
+            "status": "success",
+            "target": target_url,
+            "total_count": len(endpoints),
+            "endpoints": endpoints
+        }
     
     if command == "diagnostics":
         health_result = await _run_health("all")
