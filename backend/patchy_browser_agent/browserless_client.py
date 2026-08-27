@@ -5,10 +5,10 @@ from playwright.async_api import async_playwright
 
 logger = logging.getLogger("errAgent Logger")
 
-async def capture_network(self, duration_ms=5000):
-    await self.page.wait_for_timeout(duration_ms)
-    return self.network_events
-
+IGNORED_PATTERNS = (
+    ".js", ".css", ".png", ".jpg", ".jpeg", ".svg", 
+    ".woff", ".woff2", ".ico", "blob:", "clerk.accounts.dev"
+)
 
 class PlaywrightBrowserlessClient:
     def __init__(self):
@@ -23,18 +23,22 @@ class PlaywrightBrowserlessClient:
         if not token:
             raise ValueError("BROWSERLESS_TOKEN environment variable is missing or empty")
 
-        # Root endpoint for connect_over_cdp
         ws_url = f"wss://chrome.browserless.io?token={token}"
         self._playwright = await async_playwright().start()
         
-        # Connect via CDP
         self.browser = await self._playwright.chromium.connect_over_cdp(ws_url)
         self.context = await self.browser.new_context()
         self.page = await self.context.new_page()
 
-        self.page.on("request", lambda req: self.network_events.append({
-            "request": {"url": req.url, "method": req.method}
-        }))
+        # Filter out static noise to capture real API calls
+        def handle_request(req):
+            url = req.url.lower()
+            if not any(pattern in url for pattern in IGNORED_PATTERNS):
+                self.network_events.append({
+                    "request": {"url": req.url, "method": req.method}
+                })
+
+        self.page.on("request", handle_request)
         logger.info("[browserless] Connected via Playwright CDP")
 
     async def goto(self, url: str, wait_until: str = "networkidle"):
@@ -46,6 +50,11 @@ class PlaywrightBrowserlessClient:
         if not self.page:
             raise RuntimeError("Browser page is not initialized")
         return await self.page.evaluate(script)
+
+    async def capture_network(self, duration_ms: int = 5000):
+        if self.page:
+            await self.page.wait_for_timeout(duration_ms)
+        return self.network_events
 
     async def get_network_events(self):
         return self.network_events

@@ -22,45 +22,76 @@ async def run_sonic_security_suite():
     logger.info(f"[sonic-runner] Sonic suite complete. Total vulnerabilities: {len(all_vulns)}")
     return all_vulns
 
+
 async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
-    endpoints = []
+    raw_endpoints = []
     client = PlaywrightBrowserlessClient()
 
     try:
         logger.info(f"[sonic-discovery] Navigating to target: {base_url}")
         await client.connect()
-        await client.goto(base_url)
 
-        if client.page:
-            await client.page.wait_for_timeout(2500)
+        visited_urls = set()
+        queue = [base_url]
+        max_pages = 5  # Limits page depth to avoid infinite loops
 
-        # 1. Extract <a href> links
-        links = await client.eval("""
-            Array.from(document.querySelectorAll('a[href]'))
-                 .map(a => a.href)
-        """) or []
-        for href in links:
-            endpoints.append({
-                "method": "GET",
-                "url": href,
-                "auth": "unknown",
-                "source": "browser-link"
-            })
+        while queue and len(visited_urls) < max_pages:
+            target_url = queue.pop(0)
+            if target_url in visited_urls:
+                continue
+            
+            visited_urls.add(target_url)
+            logger.info(f"[sonic-discovery] Scanning route: {target_url}")
+            
+            try:
+                await client.goto(target_url)
+                if client.page:
+                    await client.page.wait_for_timeout(1500)
+            except Exception as nav_err:
+                logger.warning(f"[sonic-discovery] Navigation skipped for {target_url}: {nav_err}")
+                continue
 
-        # 2. Extract <form action> URLs
-        forms = await client.eval("""
-            Array.from(document.querySelectorAll('form[action]'))
-                 .map(f => f.action)
-        """) or []
-        for action in forms:
-            endpoints.append({
-                "method": "POST",
-                "url": action,
-                "auth": "unknown",
-                "source": "browser-form"
-            })
+            # 1. Extract <a href> links on current page
+            links = await client.eval("""
+                Array.from(document.querySelectorAll('a[href]'))
+                     .map(a => a.href)
+            """) or []
+            
+            for href in links:
+                raw_endpoints.append({
+                    "method": "GET",
+                    "url": href,
+                    "auth": "unknown",
+                    "source": "browser-link"
+                })
+                # Add internal links to crawl queue
+                if href.startswith(base_url) and href not in visited_urls and href not in queue:
+                    queue.append(href)
 
-        # 3. Extract captured network events
+            # 2. Extract <form action> URLs
+            forms = await client.eval("""
+                Array.from(document.querySelectorAll('form[action]'))
+                     .map(f => f.action)
+            """) or []
+            
+            for action in forms:
+                raw_endpoints.append({
+                    "method": "POST",
+                    "url": action,
+                    "auth": "unknown",
+                    "source": "browser-form"
+                })
+
+            # 3. Trigger client-side React UI elements to surface hidden fetch calls
+            await client.eval("""
+                document.querySelectorAll('button, nav a, [role="button"]').forEach(el => {
+                    try { el.click(); } catch (e) {}
+                });
+            """)
+            if client.page:
+                await client.page.wait_for_timeout(1000)
+
+        # 4. Extract filtered network events captured across all visited routes
         network_events = await client.get_network_events()
         for evt in network_events:
             req = evt.get("request", {})
@@ -68,7 +99,7 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
             method = req.get("method", "GET")
 
             if url:
-                endpoints.append({
+                raw_endpoints.append({
                     "method": method,
                     "url": url,
                     "auth": "unknown",
@@ -81,14 +112,16 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     finally:
         await client.close()
 
-    # Log total count and print every discovered endpoint to stdout
-    logger.info(f"[sonic-discovery] Total endpoints discovered: {len(endpoints)}")
-    logger.info("=" * 60)
-    logger.info("DISCOVERED ENDPOINTS:")
-    for idx, ep in enumerate(endpoints, 1):
-        logger.info(f"  [{idx:02d}] {ep['method']:<5} {ep['url']} (source: {ep['source']})")
-    logger.info("=" * 60)
+    # Deduplicate endpoints by (method, url)
+    seen = set()
+    endpoints = []
+    for ep in raw_endpoints:
+        key = (ep["method"], ep["url"])
+        if key not in seen:
+            seen.add(key)
+            endpoints.append(ep)
 
+    logger.info(f"[sonic-discovery] Total unique endpoints discovered: {len(endpoints)}")
     return endpoints
 
 
