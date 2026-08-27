@@ -5,6 +5,11 @@ from playwright.async_api import async_playwright
 
 logger = logging.getLogger("errAgent Logger")
 
+async def capture_network(self, duration_ms=5000):
+    await self.page.wait_for_timeout(duration_ms)
+    return self.network_events
+
+
 class PlaywrightBrowserlessClient:
     def __init__(self):
         self._playwright = None
@@ -32,10 +37,14 @@ class PlaywrightBrowserlessClient:
         }))
         logger.info("[browserless] Connected via Playwright CDP")
 
-    async def goto(self, url: str):
+    # backend/patchy_browser_agent/browserless_client.py
+
+    async def goto(self, url: str, wait_until: str = "networkidle"):
         if not self.page:
             raise RuntimeError("Browser page is not initialized")
-        await self.page.goto(url)
+        
+        # "networkidle" waits until no network connections have been active for at least 500ms
+        await self.page.goto(url, wait_until=wait_until)
 
     async def eval(self, script: str):
         if not self.page:
