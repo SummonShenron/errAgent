@@ -785,32 +785,29 @@ async def execute_patchy_command(
             raise PatchyCommandError("Usage: discover endpoints <serviceAlias|url>")
         
         target_url = args[1]
-        
-        # 1. Run discovery suite
         endpoints = await run_sonic_discovery_suite(target_url)
 
-        # 2. Format output block for terminal rendering
-        output_lines = [f"Discovered {len(endpoints)} endpoints for {target_url}:"]
+        # Build terminal output lines
+        lines = [f"Discovered {len(endpoints)} endpoints for {target_url}:"]
         for idx, ep in enumerate(endpoints, 1):
-            line = f"  [{idx:02d}] {ep['method']:<5} {ep['url']} ({ep['source']})"
-            output_lines.append(line)
+            lines.append(f"  [{idx:02d}] {ep['method']:<5} {ep['url']} ({ep['source']})")
 
-            # Publish to real-time stream under service="patchy"
-            await broker.publish(LogEventInput(
-                service="patchy",
-                level="info",
-                message=line
-            ))
+        # Stream lines individually to live event subscribers
+        for line in lines:
+            for srv in ["patchy", "errAgent"]:
+                await broker.publish(LogEventInput(
+                    service=srv,
+                    level="info",
+                    message=line
+                ))
 
-        formatted_output = "\n".join(output_lines)
-
-        # 3. Return formatted text directly to UI
-        return {
-            "status": "success",
-            "message": formatted_output,
-            "output": formatted_output,
-            "data": endpoints
-        }
+        # Return through the standard response helper
+        return _response(
+            "success",
+            f"Discovered {len(endpoints)} endpoints",
+            lines,
+            {"data": endpoints}
+        )
     
     if command == "diagnostics":
         health_result = await _run_health("all")
