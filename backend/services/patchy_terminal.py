@@ -4,7 +4,6 @@ import shlex
 from datetime import datetime, timezone
 from typing import Any
 from backend.patchy_browser_agent.saapp_runner import run_sonic_discovery_suite
-from backend.patchy_browser_agent.saapp_runner import run_sonic_discovery_suite
 from backend.services.patchy_errors import PatchyCommandError
 from backend.services.log_broker import LogBroker
 from backend.services.patchy_hitl import PatchyProposalError, create_pentest_sweep_proposal, create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
@@ -21,7 +20,7 @@ from backend.services.patchy_flow_runner import PatchyFlowError, create_email_va
 from backend.services.analyze_test_failure import analyze_test_failure
 from backend.services.patchy_discovery import discover_endpoints_command
 from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
-
+from backend.services.log_broker import LogEventInput
 
 COMMAND_HELP = (
     ("help", "List available Patchy commands"),
@@ -785,32 +784,32 @@ async def execute_patchy_command(
         if len(args) != 2 or args[0].lower() != "endpoints":
             raise PatchyCommandError("Usage: discover endpoints <serviceAlias|url>")
         
-        raw_target = args[1]
+        target_url = args[1]
         
-        # 1. Resolve service alias to full URL if needed
-        if raw_target.startswith(("http://", "https://")):
-            target_url = raw_target
-        else:
-            # Fallback/Resolver function for service aliases (e.g., "bty" -> "https://www.btyfitness.app")
-            if not target_url:
-                raise PatchyCommandError(f"Unknown service alias: '{raw_target}'")
-
-        await broker.publish(f"[Patchy] Starting discovery sweep on {target_url}...")
-
-        # 2. Execute discovery suite to fetch endpoints
+        # 1. Run discovery suite
         endpoints = await run_sonic_discovery_suite(target_url)
 
-        # 3. Stream discovered endpoints line-by-line to broker/stdout
-        await broker.publish(f"[Patchy] Discovered {len(endpoints)} endpoints:")
+        # 2. Format output block for terminal rendering
+        output_lines = [f"Discovered {len(endpoints)} endpoints for {target_url}:"]
         for idx, ep in enumerate(endpoints, 1):
-            log_line = f"  [{idx:02d}] {ep['method']:<5} {ep['url']} ({ep['source']})"
-            await broker.publish(log_line)
+            line = f"  [{idx:02d}] {ep['method']:<5} {ep['url']} ({ep['source']})"
+            output_lines.append(line)
 
+            # Publish to real-time stream under service="patchy"
+            await broker.publish(LogEventInput(
+                service="patchy",
+                level="info",
+                message=line
+            ))
+
+        formatted_output = "\n".join(output_lines)
+
+        # 3. Return formatted text directly to UI
         return {
             "status": "success",
-            "target": target_url,
-            "total_count": len(endpoints),
-            "endpoints": endpoints
+            "message": formatted_output,
+            "output": formatted_output,
+            "data": endpoints
         }
     
     if command == "diagnostics":
