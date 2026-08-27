@@ -3,7 +3,7 @@ import json
 import shlex
 from datetime import datetime, timezone
 from typing import Any
-from backend.patchy_browser_agent.saapp_runner import run_sonic_discovery_suite
+from backend.patchy_browser_agent.saapp_runner import run_sonic_discovery_suite, run_generic_security_suite
 from backend.services.patchy_errors import PatchyCommandError
 from backend.services.log_broker import LogBroker
 from backend.services.patchy_hitl import PatchyProposalError, create_pentest_sweep_proposal, create_plan_step_proposal, create_probe_proposal, create_synthetic_proposal, create_verification_workflow
@@ -56,6 +56,7 @@ COMMAND_HELP = (
     ("validate leakage <bty|saapp> <path>", "Probe for leaked database details"),
     ("pentest sweep <bty|saapp> [target]", "Propose a synthetic pentest sweep for approval"),
     ("discover endpoints <serviceAlias|url>", "Enumerate known endpoints for a service using static, synthetic, and browser discovery"),
+    ("scan <url>", "Run a full dynamic security scan on the specified URL"),
     ("clear", "Clear the terminal screen locally"),
 )
 
@@ -807,6 +808,31 @@ async def execute_patchy_command(
             f"Discovered {len(endpoints)} endpoints",
             lines,
             {"data": endpoints}
+        )
+
+    if command == "scan":
+        if len(args) != 1:
+            raise PatchyCommandError("Usage: scan <url>")
+        
+        target_url = args[0]
+        await broker.publish(f"[Patchy] Launching full dynamic security scan on {target_url}...")
+
+        vulns = await run_generic_security_suite(target_url)
+
+        lines = [f"Security Scan Results for {target_url} ({len(vulns)} issues found):"]
+        for idx, v in enumerate(vulns, 1):
+            lines.append(f"  [{idx:02d}] [{v['severity']}] {v['type']} - {v['endpoint']}")
+            lines.append(f"       -> {v['description']}")
+
+        for line in lines:
+            for srv in ["patchy", "errAgent"]:
+                await broker.publish(LogEventInput(service=srv, level="info", message=line))
+
+        return _response(
+            "success",
+            f"Security scan complete. Found {len(vulns)} vulnerabilities.",
+            lines,
+            {"vulnerabilities": vulns}
         )
     
     if command == "diagnostics":

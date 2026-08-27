@@ -132,6 +132,7 @@ plan investigate incidents
 next [plan-id]
 pentest sweep [bty|saapp]
 discover endpoints <serviceAlias|url>
+scan <url>
 clear
 ```
 
@@ -573,5 +574,27 @@ Number of vulnerabilities found
 Vulnerability details (endpoint, payload, issue, response)
 
 Sweeps complete only after all selected targets have been processed.
+```
+
+## Generic Security Scanning
+
+Use:
+```text
+scan <url>
+The scan command performs an end-to-end automated security audit on any target site by combining dynamic Playwright endpoint discovery with parallel httpx security checks:
+
+Dynamic Discovery: Uses PlaywrightBrowserlessClient with stealth mode enabled to navigate internal routes, click navigation elements, and collect <a href> tags, <form action> paths, and background API requests.
+
+Automated Vulnerability Audit: Probes discovered host endpoints for core web vulnerabilities:
+
+Sensitive Path Exposure: Flags unauthenticated 200 OK responses on administrative/system routes (e.g., /admin, /env, /config, /swagger, /actuator).
+
+Missing Security Headers: Checks for missing Strict-Transport-Security, Content-Security-Policy, X-Frame-Options, and X-Content-Type-Options headers.
+
+Permissive CORS: Detects wildcard Access-Control-Allow-Origin: * headers on API endpoints.
+
+Information Disclosure: Identifies exposed backend technology or infrastructure details in Server or X-Powered-By headers.
+
+Live Terminal Logging: Streams audit findings line-by-line to both patchy and errAgent log channels via LogBroker before outputting the final summary table.
 ```
 

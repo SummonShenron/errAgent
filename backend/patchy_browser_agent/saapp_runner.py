@@ -5,6 +5,7 @@ from backend.patchy_browser_agent.browserless_client import PlaywrightBrowserles
 from backend.patchy_browser_agent.attacks.guest_phase import run_guest_phase
 from backend.patchy_browser_agent.attacks.user_phase import run_user_phase
 from backend.patchy_browser_agent.attacks.admin_phase import run_admin_phase
+from backend.patchy_browser_agent.attacks.generic_phase import run_generic_phase
 
 logger = logging.getLogger("errAgent Logger")
 
@@ -124,6 +125,18 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     logger.info(f"[sonic-discovery] Total unique endpoints discovered: {len(endpoints)}")
     return endpoints
 
+async def run_generic_security_suite(target_url: str) -> list[dict]:
+    """Runs automated discovery followed by generic security audits on any target site."""
+    logger.info(f"[security-runner] Starting generic security suite for {target_url}...")
+    
+    # Step 1: Discover endpoints
+    endpoints = await run_sonic_discovery_suite(target_url)
+    
+    # Step 2: Run generic attack phase against discovered endpoints
+    vulnerabilities = await run_generic_phase(endpoints, target_url)
+    
+    logger.info(f"[security-runner] Security scan complete. Total vulnerabilities found: {len(vulnerabilities)}")
+    return vulnerabilities
 
 if __name__ == "__main__":
     asyncio.run(run_sonic_security_suite())
