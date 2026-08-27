@@ -37,10 +37,6 @@ class PlaywrightBrowserlessClient:
         }))
         logger.info("[browserless] Connected via Playwright CDP")
 
-    # backend/patchy_browser_agent/browserless_client.py
-
-    # backend/patchy_browser_agent/browserless_client.py
-
     async def goto(self, url: str, wait_until: str = "networkidle"):
         if not self.page:
             raise RuntimeError("Browser page is not initialized")

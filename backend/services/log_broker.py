@@ -51,7 +51,21 @@ class LogBroker:
         self._subscriber_queue_size = subscriber_queue_size
         self._lock = asyncio.Lock()
 
-    async def publish(self, event: LogEventInput, source_app_id: str | None = None) -> dict[str, Any]:
+    async def publish(
+        self, 
+        event: LogEventInput | str, 
+        source_app_id: str | None = None,
+        service: str = "patchy",
+        level: LogLevel = "info",
+    ) -> dict[str, Any]:
+        # Handle raw strings by converting them to a LogEventInput model
+        if isinstance(event, str):
+            event = LogEventInput(
+                service=service,
+                level=level,
+                message=event,
+            )
+
         entry = {
             "id": uuid4().hex,
             "service": event.service.strip(),
@@ -67,8 +81,8 @@ class LogBroker:
             self._buffers[entry["service"]].append(entry)
             subscribers = list(self._subscribers.items())
 
-        for queue, (service, level) in subscribers:
-            if service != entry["service"] or (level and level != entry["level"]):
+        for queue, (sub_service, sub_level) in subscribers:
+            if sub_service != entry["service"] or (sub_level and sub_level != entry["level"]):
                 continue
             if queue.full():
                 try:

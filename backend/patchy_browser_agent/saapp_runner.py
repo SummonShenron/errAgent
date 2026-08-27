@@ -22,9 +22,6 @@ async def run_sonic_security_suite():
     logger.info(f"[sonic-runner] Sonic suite complete. Total vulnerabilities: {len(all_vulns)}")
     return all_vulns
 
-
-# backend/patchy_browser_agent/saapp_runner.py
-
 async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     endpoints = []
     client = PlaywrightBrowserlessClient()
@@ -34,7 +31,6 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
         await client.connect()
         await client.goto(base_url)
 
-        # Allow React/Vite DOM hydration & background fetch requests to complete
         if client.page:
             await client.page.wait_for_timeout(2500)
 
@@ -43,8 +39,6 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
             Array.from(document.querySelectorAll('a[href]'))
                  .map(a => a.href)
         """) or []
-        logger.info(f"[sonic-discovery] Discovered {len(links)} HTML links")
-        
         for href in links:
             endpoints.append({
                 "method": "GET",
@@ -58,8 +52,6 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
             Array.from(document.querySelectorAll('form[action]'))
                  .map(f => f.action)
         """) or []
-        logger.info(f"[sonic-discovery] Discovered {len(forms)} HTML forms")
-
         for action in forms:
             endpoints.append({
                 "method": "POST",
@@ -70,8 +62,6 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
 
         # 3. Extract captured network events
         network_events = await client.get_network_events()
-        logger.info(f"[sonic-discovery] Captured {len(network_events)} network requests")
-
         for evt in network_events:
             req = evt.get("request", {})
             url = req.get("url")
@@ -91,10 +81,16 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     finally:
         await client.close()
 
+    # Log total count and print every discovered endpoint to stdout
     logger.info(f"[sonic-discovery] Total endpoints discovered: {len(endpoints)}")
+    logger.info("=" * 60)
+    logger.info("DISCOVERED ENDPOINTS:")
+    for idx, ep in enumerate(endpoints, 1):
+        logger.info(f"  [{idx:02d}] {ep['method']:<5} {ep['url']} (source: {ep['source']})")
+    logger.info("=" * 60)
+
     return endpoints
 
 
 if __name__ == "__main__":
     asyncio.run(run_sonic_security_suite())
-    
