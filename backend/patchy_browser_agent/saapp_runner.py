@@ -30,7 +30,7 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     try:
         await client.connect()
         await client.goto(base_url)
-
+        await client.page.wait_for_timeout(5000)
         # 1. Extract <a href> links
         links = await client.eval("""
             Array.from(document.querySelectorAll('a[href]'))
