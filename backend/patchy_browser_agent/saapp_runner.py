@@ -1,6 +1,7 @@
+# backend/patchy_browser_agent/saapp_runner.py
 import logging
 import asyncio
-from backend.patchy_browser_agent.browserless_client import CDPBrowserlessClient, BROWSERLESS_WS
+from backend.patchy_browser_agent.browserless_client import PlaywrightBrowserlessClient
 from backend.patchy_browser_agent.attacks.guest_phase import run_guest_phase
 from backend.patchy_browser_agent.attacks.user_phase import run_user_phase
 from backend.patchy_browser_agent.attacks.admin_phase import run_admin_phase
@@ -21,11 +22,10 @@ async def run_sonic_security_suite():
     logger.info(f"[sonic-runner] Sonic suite complete. Total vulnerabilities: {len(all_vulns)}")
     return all_vulns
 
-# backend/patchy_browser_agent/saapp_runner.py
 
 async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
     endpoints = []
-    client = CDPBrowserlessClient(BROWSERLESS_WS)
+    client = PlaywrightBrowserlessClient()
 
     try:
         await client.connect()
@@ -36,7 +36,7 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
             Array.from(document.querySelectorAll('a[href]'))
                  .map(a => a.href)
         """)
-        for href in links:
+        for href in links or []:
             endpoints.append({
                 "method": "GET",
                 "url": href,
@@ -49,7 +49,7 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
             Array.from(document.querySelectorAll('form[action]'))
                  .map(f => f.action)
         """)
-        for action in forms:
+        for action in forms or []:
             endpoints.append({
                 "method": "POST",
                 "url": action,
@@ -80,7 +80,6 @@ async def run_sonic_discovery_suite(base_url: str) -> list[dict]:
 
     return endpoints
 
-    
 
 if __name__ == "__main__":
     asyncio.run(run_sonic_security_suite())
