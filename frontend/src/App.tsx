@@ -690,7 +690,7 @@ export default function App() {
           )}
         </div>
 
-        <div className="panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: '1rem' }}>
+        <div className="patchy-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: '1rem' }}>
           <PatchyEmptyState activeIncidentsCount={activeIncidentsCount} tab={incidentTab} status={activeIncident?.status} />
         </div>
       </div>

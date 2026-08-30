@@ -2,3 +2,5 @@
 seed_db.py
 node_modules/
 frontend/node_modules/
+__pycache__/
+*.pyc

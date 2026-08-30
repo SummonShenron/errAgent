@@ -26,6 +26,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   isResolved = false,
 }) => {
   const [celebrationDone, setCelebrationDone] = useState(true);
+  const [isLaughing, setIsLaughing] = useState(false);
   const prevStatusRef = useRef<string | null>(null);
 
   const hasActiveIncidents = activeIncidentsCount > 0;
@@ -62,6 +63,14 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
     prevStatusRef.current = rawStatus;
   }, [isRawResolved, rawStatus]);
 
+  const handlePoke = () => {
+    if (isLaughing) return;
+    setIsLaughing(true);
+    setTimeout(() => {
+      setIsLaughing(false);
+    }, 1800);
+  };
+
   const currentStatus: IncidentStatus = useMemo(() => {
     if (isRawResolved && !celebrationDone) return 'resolved';
     if (isRawFailed) return 'analysis_failed';
@@ -73,6 +82,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   }, [isRawResolved, celebrationDone, isRawFailed, rawStatus, isAnalyzing, hasActiveIncidents, isSystemDegradedOrUnhealthy]);
 
   const getAccentColor = () => {
+    if (isLaughing) return '#EC4899'; // Vibrant pink when poked
     switch (currentStatus) {
       case 'resolved': return '#22C55E';
       case 'validating': return '#A855F7';
@@ -86,6 +96,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   };
 
   const getGlowColor = () => {
+    if (isLaughing) return 'rgba(236, 72, 153, 0.35)';
     switch (currentStatus) {
       case 'resolved': return 'rgba(34, 197, 94, 0.3)';
       case 'validating': return 'rgba(168, 85, 247, 0.25)';
@@ -99,6 +110,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   };
 
   const getVisorBg = () => {
+    if (isLaughing) return '#240a19';
     switch (currentStatus) {
       case 'resolved': return '#0d1f12';
       case 'validating': return '#160d21';
@@ -112,6 +124,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   };
 
   const getVisorBorder = () => {
+    if (isLaughing) return '#6b1947';
     switch (currentStatus) {
       case 'resolved': return '#174722';
       case 'validating': return '#421a63';
@@ -130,6 +143,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   const visorBorder = getVisorBorder();
 
   const getHeaderTitle = () => {
+    if (isLaughing) return 'Hehehe! That tickles!';
     switch (currentStatus) {
       case 'resolved': return 'Incident Resolved!';
       case 'validating': return 'Patchy is Validating...';
@@ -145,6 +159,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
   };
 
   const getSubtext = () => {
+    if (isLaughing) return 'Patchy is highly ticklish in operational mode.';
     switch (currentStatus) {
       case 'resolved': return 'Patchy verified the fix! Systems are stable and green.';
       case 'validating': return 'Monitoring post-deploy telemetry and health metrics to confirm stability.';
@@ -197,6 +212,13 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
           75% { transform: translateY(-2px) rotate(-4deg) scale(1.03); }
         }
 
+        @keyframes ibmGiggle {
+          0%, 100% { transform: translateY(0px) rotate(0deg) scale(1); }
+          25% { transform: translateY(-4px) rotate(-3.5deg) scale(1.03, 0.97); }
+          50% { transform: translateY(2px) rotate(3.5deg) scale(0.97, 1.03); }
+          75% { transform: translateY(-2px) rotate(-2deg) scale(1.01, 0.99); }
+        }
+
         @keyframes ibmHeadTilt {
           0%, 100% { transform: rotate(0deg); }
           25% { transform: rotate(-7deg); }
@@ -238,9 +260,23 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
           66% { transform: translate(1px, 1px) rotate(2deg); }
         }
 
+        .ibm-bot-interactive-wrap {
+          cursor: pointer;
+          transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+          user-select: none;
+        }
+        .ibm-bot-interactive-wrap:hover {
+          transform: scale(1.06);
+        }
+        .ibm-bot-interactive-wrap:active {
+          transform: scale(0.95);
+        }
+
         .ibm-bot-float { 
           animation: ${
-            currentStatus === 'resolved'
+            isLaughing
+              ? 'ibmGiggle 0.5s ease-in-out infinite'
+              : currentStatus === 'resolved'
               ? 'ibmVictoryJitter 0.22s ease-in-out infinite'
               : (currentStatus === 'alert' || currentStatus === 'analysis_failed')
               ? 'ibmAlertPulse 1.4s ease-in-out infinite' 
@@ -265,7 +301,15 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
         }
       `}</style>
 
-      <div style={{ width: '150px', height: '150px', marginBottom: '1rem' }}>
+      <div 
+        className="ibm-bot-interactive-wrap"
+        onClick={handlePoke}
+        title="Poke Patchy!"
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && handlePoke()}
+        style={{ width: '150px', height: '150px', marginBottom: '1rem' }}
+      >
         <svg
           viewBox="0 0 100 100"
           fill="none"
@@ -302,7 +346,9 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
             {/* Left Arm */}
             <path
               d={
-                currentStatus === 'resolved'
+                isLaughing
+                  ? "M 24 62 C 28 75, 36 75, 43 70"
+                  : currentStatus === 'resolved'
                   ? "M 24 62 C 16 50, 14 36, 18 24"
                   : "M24 62 C16 66, 16 76, 22 82"
               }
@@ -312,10 +358,10 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
               fill="none"
             />
             <circle 
-              cx={currentStatus === 'resolved' ? 18 : 22} 
-              cy={currentStatus === 'resolved' ? 24 : 82} 
+              cx={isLaughing ? 43 : currentStatus === 'resolved' ? 18 : 22} 
+              cy={isLaughing ? 70 : currentStatus === 'resolved' ? 24 : 82} 
               r="3.5" 
-              fill={currentStatus === 'resolved' ? accentColor : "#8E95A2"} 
+              fill={isLaughing || currentStatus === 'resolved' ? accentColor : "#8E95A2"} 
             />
 
             {/* Head Group */}
@@ -328,7 +374,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
               <rect x="28" y="20" width="44" height="34" rx="10" fill="#121316" stroke="#2A2A32" strokeWidth="2" />
 
               {/* Anxious Sweat Drop */}
-              {currentStatus === 'fix_proposed' && (
+              {currentStatus === 'fix_proposed' && !isLaughing && (
                 <path
                   className="ibm-bot-sweat-drop"
                   d="M74 22 C72 20, 70 23, 71 25 C72 27, 74 27, 75 25 C76 23, 76 22, 74 22 Z"
@@ -349,21 +395,30 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
               </g>
 
               {/* Anxious Worried Eyebrows */}
-              {currentStatus === 'fix_proposed' && (
+              {currentStatus === 'fix_proposed' && !isLaughing && (
                 <g stroke={accentColor} strokeWidth="1.8" strokeLinecap="round">
                   <path d="M38 30 L45 32" />
                   <path d="M62 30 L55 32" />
                 </g>
               )}
 
-              {/* Blinking Eyes */}
-              <g className="ibm-bot-eyes">
-                <circle cx="42" cy="35" r="3.5" fill={accentColor} />
-                <circle cx="58" cy="35" r="3.5" fill={accentColor} />
-              </g>
+              {/* Eyes */}
+              {isLaughing ? (
+                <g stroke={accentColor} strokeWidth="2.5" strokeLinecap="round" fill="none">
+                  <path d="M 38 36 Q 42 30 46 36" />
+                  <path d="M 54 36 Q 58 30 62 36" />
+                </g>
+              ) : (
+                <g className="ibm-bot-eyes">
+                  <circle cx="42" cy="35" r="3.5" fill={accentColor} />
+                  <circle cx="58" cy="35" r="3.5" fill={accentColor} />
+                </g>
+              )}
 
               {/* Mouth Expression */}
-              {currentStatus === 'resolved' ? (
+              {isLaughing ? (
+                <path d="M41 39 Q50 50 59 39 Z" fill={accentColor} opacity="0.9" />
+              ) : currentStatus === 'resolved' ? (
                 <path d="M41 40 Q50 48 59 40" stroke={accentColor} strokeWidth="2.5" strokeLinecap="round" fill="none" />
               ) : currentStatus === 'validating' ? (
                 <path d="M44 42 H56" stroke={accentColor} strokeWidth="2.5" strokeLinecap="round" />
@@ -378,11 +433,13 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
               )}
             </g>
 
-            {/* Right Arm & Hand Group */}
-            <g className={currentStatus === 'validating' ? 'ibm-bot-magnifier-group' : undefined}>
+            {/* Right Arm */}
+            <g className={currentStatus === 'validating' && !isLaughing ? 'ibm-bot-magnifier-group' : undefined}>
               <path
                 d={
-                  currentStatus === 'resolved'
+                  isLaughing
+                    ? "M 76 62 C 72 75, 64 75, 57 70"
+                    : currentStatus === 'resolved'
                     ? "M 76 62 C 84 50, 86 36, 82 24"
                     : currentStatus === 'analyzing'
                     ? "M 76 62 C 88 50, 84 32, 74 28"
@@ -395,7 +452,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
                 strokeLinecap="round"
                 fill="none"
               >
-                {currentStatus === 'idle' && (
+                {currentStatus === 'idle' && !isLaughing && (
                   <animate
                     attributeName="d"
                     dur="8s"
@@ -415,7 +472,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
                     "
                   />
                 )}
-                {currentStatus === 'analyzing' && (
+                {currentStatus === 'analyzing' && !isLaughing && (
                   <animate
                     attributeName="d"
                     dur="0.6s"
@@ -434,7 +491,9 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
 
               <circle 
                 cx={
-                  currentStatus === 'resolved' 
+                  isLaughing
+                    ? 57
+                    : currentStatus === 'resolved' 
                     ? 82 
                     : currentStatus === 'analyzing'
                     ? 74
@@ -443,7 +502,9 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
                     : (currentStatus !== 'idle' ? 78 : undefined)
                 } 
                 cy={
-                  currentStatus === 'resolved' 
+                  isLaughing
+                    ? 70
+                    : currentStatus === 'resolved' 
                     ? 24 
                     : currentStatus === 'analyzing'
                     ? 28
@@ -454,7 +515,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
                 r="3.5" 
                 fill={accentColor}
               >
-                {currentStatus === 'idle' && (
+                {currentStatus === 'idle' && !isLaughing && (
                   <>
                     <animate
                       attributeName="cx"
@@ -476,7 +537,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
                     />
                   </>
                 )}
-                {currentStatus === 'analyzing' && (
+                {currentStatus === 'analyzing' && !isLaughing && (
                   <>
                     <animate
                       attributeName="cx"
@@ -501,7 +562,7 @@ export const PatchyEmptyState: React.FC<PatchyEmptyStateProps> = ({
               </circle>
 
               {/* Magnifying Glass Element centered over Right Eye (58, 35) */}
-              {currentStatus === 'validating' && (
+              {currentStatus === 'validating' && !isLaughing && (
                 <g>
                   {/* Handle */}
                   <line x1="66" y1="45" x2="61" y2="39" stroke="#8E95A2" strokeWidth="3" strokeLinecap="round" />
