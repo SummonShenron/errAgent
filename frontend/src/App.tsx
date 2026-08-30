@@ -546,7 +546,7 @@ export default function App() {
           <PatchyBrandMark activeIncidentsCount={activeIncidentsCount} />
           <div>
             <p className="eyebrow">Incident Operations Console</p>
-            <h1>errAgent Dashboard</h1>
+            <h1 style={{ fontSize: '1rem' }}>Error Remediation Responder Agent Dashboard</h1>
           </div>
         </div>
         <div className="topbar-actions">
@@ -724,7 +724,7 @@ export default function App() {
           ) : visibleIncidents.length === 0 ? (
             <p className="muted">
               {incidentTab === 'open'
-                ? 'No active incidents found. Run seed_db.py on backend or trigger an error webhook.'
+                ? 'No active incidents found. Patchy is monitoring the system.'
                 : 'No resolved incidents yet.'}
             </p>
           ) : (
@@ -1044,7 +1044,7 @@ export default function App() {
       </main>
 
       <section className="footer-note">
-        <p>Live incident feed connected to your backend API and Clerk session.</p>
+        <p>Live incident feed powered by Patchy.</p>
       </section>
     </div>
   );

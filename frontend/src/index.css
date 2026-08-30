@@ -136,9 +136,33 @@ button {
 	font-size: 1.05rem;
 	font-weight: 800;
 	cursor: pointer;
+	box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 4px 0 0 #1e3a5f,
+        0 5px 15px rgba(0, 0, 0, 0.4) !important;
 }
 
-.incident-guide-trigger:hover { border-color: #38bdf8; color: #f0f9ff; }
+.incident-guide-trigger:hover { 
+	border-color: #38bdf8; 
+	transform: translateY(-1px);
+	color: #f0f9ff; 
+	box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 8px 0 0 #38bdf8,
+        0 10px 15px rgba(0, 0, 0, 0.4) !important;
+}
+
+.incident-guide-trigger:active { 
+	border-color: #38bdf8; 
+	color: #f0f9ff; 
+	transform: translateY(4px);
+	box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 1px 0 0 #38bdf8,
+        0 1px 15px rgba(0, 0, 0, 0.4) !important;
+}
+
+
 
 .eyebrow {
 	margin: 0 0 4px;
@@ -154,6 +178,8 @@ button {
 	border: 1px solid #28364f;
 	border-radius: 999px;
 	padding: 6px 10px;
+	
+	
 }
 
 .session-band {
@@ -166,8 +192,29 @@ button {
 	border-radius: 12px;
 	padding: 12px 14px;
 	margin-bottom: 18px;
+	box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 4px 0 0 #0d162b,
+        0 5px 15px rgba(0, 0, 0, 0.4) !important;
 }
 
+.session-band:hover {
+    transform: translateY(-1px);
+	box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 8px 0 0 #2563eb,
+        0 10px 15px rgba(0, 0, 0, 0.4) !important;
+    transition: transform all 0.2s ease !important;
+}
+
+.session-band:active {
+    transform: translateY(4px);
+    box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 1px 0 0 #2563eb,
+        0 1px 15px rgba(0, 0, 0, 0.4) !important;
+    transition: transform all 0.2s ease !important;
+}
 .session-label {
 	font-weight: 700;
 	font-size: 0.88rem;
@@ -193,6 +240,10 @@ button {
 	box-shadow: 0 10px 30px rgba(2, 6, 23, 0.45);
 	max-width: 100%;
 	overflow: hidden;
+	box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 8px 0 0 #0d162b,
+        0 10px 15px rgba(0, 0, 0, 0.4) !important;
 	min-width: 0;
 }
 
@@ -200,8 +251,8 @@ button {
     transform: translateY(-2px) !important;
     box-shadow: 
         inset 0 1px 0 rgba(255, 255, 255, 0.1),
-        0 8px 0 0 #2563eb,
-        0 10px 15px rgba(0, 0, 0, 0.4) !important;
+        0 10px 0 0 #2563eb,
+        0 12px 15px rgba(0, 0, 0, 0.4) !important;
     
     transition: transform all 0.2s ease !important; 
 	border: 1px solid #2563eb;
@@ -227,6 +278,10 @@ button {
 	max-width: 100%;
 	overflow: hidden;
 	min-width: 0;
+	box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 8px 0 0 #0d162b,
+        0 10px 15px rgba(0, 0, 0, 0.4) !important;
 	transition: transform all 0.2s ease !important; 
 }
 
@@ -234,8 +289,8 @@ button {
     transform: translateY(-2px) !important;
     box-shadow: 
         inset 0 1px 0 rgba(255, 255, 255, 0.1),
-        0 8px 0 0 #2563eb,
-        0 10px 15px rgba(0, 0, 0, 0.4) !important;
+        0 10px 0 0 #2563eb,
+        0 12px 15px rgba(0, 0, 0, 0.4) !important;
     
     transition: transform all 0.2s ease !important; 
 	border: 1px solid #2563eb;
@@ -365,13 +420,14 @@ button {
 
 /* Hover state for inactive tabs */
 .incident-tab:hover:not(.active) {
+    transform: translateY(-1px);
     border-color: #3b82f6;
     color: #f1f5f9;
     background: rgba(15, 23, 42, 0.85);
     box-shadow: 
         inset 0 1px 0 rgba(255, 255, 255, 0.2),
-        0 6px 0 0 #2563eb,
-        0 8px 14px rgba(37, 99, 235, 0.25);
+        0 8px 0 0 #2563eb,
+        0 10px 14px rgba(37, 99, 235, 0.25);
 }
 
 /* 3D Pressed State: Selected tab stays depressed down */
@@ -425,16 +481,23 @@ button {
 	transition: all 0.16s ease;
 	overflow: hidden;
 	min-width: 0;
+	border-bottom: 4px solid #25344a;
 }
 
 .incident-card:hover {
 	border-color: #60a5fa;
+	border-bottom: 8px solid #60a5fa;
 	transform: translateY(-1px);
 }
 
 .incident-card.active {
 	border-color: #3b82f6;
 	box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.24);
+}
+
+.incident-card:active {
+	transform: translateY(4px);
+	border-bottom: 1px solid #60a5fa;
 }
 
 .incident-card-top {
@@ -726,6 +789,7 @@ button {
 	padding: 0.28rem 0.62rem;
 	border-radius: 999px !important;
 	border: 1px solid rgba(96, 165, 250, 0.9) !important;
+	border-bottom: 4px solid rgba(96, 165, 250, 0.9) !important;
 	background: rgba(37, 99, 235, 0.18) !important;
 	color: #dbeafe !important;
 	font-size: 0.7rem !important;
@@ -744,11 +808,13 @@ button {
 	border-color: rgba(147, 197, 253, 0.95) !important;
 	background: rgba(59, 130, 246, 0.22) !important;
 	box-shadow: 0 8px 18px rgba(59, 130, 246, 0.15);
+	border-bottom: 6px solid rgba(96, 165, 250, 0.9) !important;
 }
 
 .retry-analysis-btn:active {
 	transform: translateY(0);
 	box-shadow: none;
+	border-bottom: 1px solid rgba(96, 165, 250, 0.9) !important;
 }
 
 .retry-failed-analysis-btn {
@@ -935,6 +1001,10 @@ button {
   padding: 14px;
   box-shadow: 0 10px 30px rgba(2, 6, 23, 0.45);
   margin-bottom: 18px;
+  box-shadow: 
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        0 8px 0 0 #0d162b,
+        0 10px 15px rgba(0, 0, 0, 0.4) !important;
   
 }
 
@@ -942,8 +1012,8 @@ button {
     transform: translateY(-2px) !important;
     box-shadow: 
         inset 0 1px 0 rgba(255, 255, 255, 0.1),
-        0 8px 0 0 #2563eb,
-        0 10px 15px rgba(0, 0, 0, 0.4) !important;
+        0 10px 0 0 #2563eb,
+        0 12px 15px rgba(0, 0, 0, 0.4) !important;
     
     transition: transform all 0.2s ease !important; 
 	border: 1px solid #2563eb;
@@ -999,7 +1069,10 @@ button {
 }
 
 .health-actions button:hover {
+  transform: translateY(-1px);
   filter: brightness(1.08);
+  box-shadow: inset 0 -8px 0 0 rgba(0, 0, 0, 0.35);
+
 }
 
 .health-actions button:active {
@@ -1026,12 +1099,14 @@ button {
   border: 1px solid #25344a;
   border-radius: 12px;
   padding: 10px;
+  border-bottom: 4px solid #25344a;
   transition: all 0.16s ease;
 }
 
 .service-item:hover {
   border-color: #60a5fa;
   transform: translateY(-1px);
+  border-bottom: 8px solid #60a5fa;
 }
 
 .service-info {
@@ -1102,7 +1177,7 @@ button {
 }
 
 .service-item button:active {
-  border-bottom: 1px solid rgba(96, 165, 250, 0.9);
+  border-bottom: 1px solid rgba(96, 165, 250, 0.9) !important;
   transition: transform 0.14s ease, box-shadow 0.14s ease;
 }
 
@@ -1112,6 +1187,10 @@ button {
   box-shadow: 0 8px 18px rgba(59, 130, 246, 0.15);  
 }
 
+.service-item button:hover {
+  transform: translateY(-1px);
+  border-bottom: 6px solid rgba(96, 165, 250, 0.9);
+}
 .health-results {
   margin-top: 16px;
 }
@@ -1194,8 +1273,9 @@ button {
     /* Brightened lip and cyan ambient glow on hover */
     box-shadow: 
         inset 0 1px 0 rgba(255, 255, 255, 0.3),
-        0 6px 0 0 #38bdf8,
-        0 10px 20px rgba(56, 189, 248, 0.2);
+        0 8px 0 0 #38bdf8,
+        0 12px 20px rgba(56, 189, 248, 0.2);
+	transform: translateY(-1px);
 }
 
 .console-launch:active {

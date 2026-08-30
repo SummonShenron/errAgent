@@ -1,8 +1,12 @@
 import asyncio
 import json
 import shlex
+import time
 from datetime import datetime, timezone
+import socket 
 from typing import Any
+from urllib.parse import urlparse
+import httpx
 from backend.patchy_browser_agent.saapp_runner import run_sonic_discovery_suite, run_generic_security_suite
 from backend.services.patchy_errors import PatchyCommandError
 from backend.services.log_broker import LogBroker
@@ -57,6 +61,7 @@ COMMAND_HELP = (
     ("pentest sweep <bty|saapp> [target]", "Propose a synthetic pentest sweep for approval"),
     ("discover endpoints <serviceAlias|url>", "Enumerate known endpoints for a service using static, synthetic, and browser discovery"),
     ("scan <url>", "Run a full dynamic security scan on the specified URL"),
+    ("ping <url> [http|tcp]", "Run a L4/L7 diagnostic ping (bypasses ICMP blocks)"),
     ("clear", "Clear the terminal screen locally"),
 )
 
@@ -270,7 +275,79 @@ async def _run_logs(broker: LogBroker, args: list[str]) -> dict[str, Any]:
         entries,
     )
 
+PING_TARGET_URLS = {
+    "bty": "https://bty-fitness.onrender.com",  # adjust to target actual URLs
+    "saapp": "https://saapp-widget.onrender.com",
+    "erragent": "http://localhost:8000",
+}
 
+async def run_ping(target_raw: str, mode: str = "http") -> dict[str, Any]:
+    # Normalize input into a valid URL structure
+    url = target_raw if target_raw.startswith(("http://", "https://")) else f"https://{target_raw}"
+
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise PatchyCommandError(f"Invalid target host or URL: '{target_raw}'")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    lines = [f"Pinging {hostname}:{port} via [{mode.upper()}]..."]
+    metrics: dict[str, Any] = {"target": url, "mode": mode}
+
+    # Phase 1: DNS Resolution
+    dns_start = time.perf_counter()
+    try:
+        ip_address = await asyncio.to_thread(socket.gethostbyname, hostname)
+        dns_ms = round((time.perf_counter() - dns_start) * 1000, 2)
+        metrics["dns_ms"] = dns_ms
+        metrics["ip"] = ip_address
+        lines.append(f"✓ DNS resolved: {ip_address} ({dns_ms}ms)")
+    except socket.gaierror as exc:
+        raise PatchyCommandError(f"DNS Resolution failed for {hostname}: {exc}")
+
+    # Phase 2: TCP Handshake Ping
+    tcp_start = time.perf_counter()
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip_address, port), timeout=5.0
+        )
+        tcp_ms = round((time.perf_counter() - tcp_start) * 1000, 2)
+        metrics["tcp_ms"] = tcp_ms
+        lines.append(f"✓ TCP Handshake connected ({tcp_ms}ms)")
+        writer.close()
+        await writer.wait_closed()
+    except Exception as exc:
+        raise PatchyCommandError(f"TCP Connection failed to {hostname}:{port}: {exc}")
+
+    if mode == "tcp":
+        return _response("success", f"TCP Ping: {hostname}", lines, metrics)
+
+    # Phase 3: Layer 7 HTTP HEAD Ping
+    http_start = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+            resp = await client.head(url, follow_redirects=True)
+            ttfb_ms = round((time.perf_counter() - http_start) * 1000, 2)
+
+            metrics.update({
+                "ttfb_ms": ttfb_ms,
+                "status_code": resp.status_code,
+                "server": resp.headers.get("server", "unknown"),
+                "cdn_ray": resp.headers.get("cf-ray") or resp.headers.get("x-render-origin-server", "none"),
+                "rate_limit_remaining": resp.headers.get("x-ratelimit-remaining", "n/a"),
+            })
+
+            lines.extend([
+                f"✓ HTTP HEAD: Status {resp.status_code} | TTFB: {ttfb_ms}ms",
+                f"  Server: {metrics['server']} | Edge Node: {metrics['cdn_ray']}",
+                f"  Rate Limit Remaining: {metrics['rate_limit_remaining']}",
+            ])
+    except httpx.HTTPError as exc:
+        lines.append(f"⚠ HTTP Probe degraded/failed: {exc}")
+        return _response("warning", f"Ping warning: {hostname}", lines, metrics)
+
+    return _response("success", f"Ping diagnostics: {hostname}", lines, metrics)
 async def execute_patchy_command(
     command_text: str,
     db,
@@ -1133,6 +1210,14 @@ async def execute_patchy_command(
             {"proposal": proposal},
         )
 
+    if command == "ping":
+        if not args:
+            raise PatchyCommandError("Usage: ping <url_or_domain> [http|tcp]")
+        target = args[0]
+        mode = args[1].lower() if len(args) > 1 else "http"
+        if mode not in {"http", "tcp"}:
+            raise PatchyCommandError("Mode must be 'http' or 'tcp'")
+        return await run_ping(target, mode=mode)
 
 
     if command == "clear":

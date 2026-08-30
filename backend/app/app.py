@@ -959,7 +959,7 @@ async def ingest_incident(
 @app.delete("/api/v1/incidents/{incident_id}", tags=["Incidents"])
 async def delete_incident(
     incident_id: str, 
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_role("Incident_Managers"))
 ):
     """Deletes an incident and its associated records from MongoDB."""
     db = get_db()
@@ -976,7 +976,7 @@ async def delete_incident(
     db["remediations"].delete_one({"incident_id": incident_id})
 
     # 3. Log audit event
-    actor = current_user.get("username", "operator")
+    actor = current_user.get("full_name") or current_user.get("email") or "operator"
     db["audit_logs"].insert_one({
         "incident_id": incident_id,
         "actor": actor,
