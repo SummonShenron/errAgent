@@ -41,6 +41,7 @@ from backend.services.patchy_hitl import PatchyProposalError, approve_and_execut
 from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
 from backend.services.patchy_flow_runner import execute_flow, execute_validation_audit
+from backend.services.circuit_architect import CircuitArchitectRequest, CircuitArchitectResponse, create_circuit_architect_response
 from backend.middleware.rbac import require_role
 
 logging.basicConfig(level=logging.INFO)
@@ -239,6 +240,19 @@ class ClientErrorRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     stack: str | None = Field(default=None, max_length=12000)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/api/v1/circuit/architect", response_model=CircuitArchitectResponse, tags=["Circuit"])
+async def circuit_architect(request: Request, payload: CircuitArchitectRequest):
+    expected_key = os.getenv("CIRCUIT_BRIDGE_API_KEY", "").strip()
+    authorization = request.headers.get("Authorization", "")
+    supplied_key = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
+    if not expected_key:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Circuit bridge authentication is not configured")
+    if not supplied_key or not hmac.compare_digest(supplied_key, expected_key):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid circuit bridge credentials")
+
+    return await create_circuit_architect_response(payload, get_db())
 
 
 _SENSITIVE_CLIENT_ERROR_PATTERN = re.compile(
