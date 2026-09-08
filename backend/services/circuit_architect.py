@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 CircuitOperation = Literal[
@@ -17,6 +17,7 @@ CircuitOperation = Literal[
 
 
 class CircuitArchitectRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"additionalProperties": False})
     operation: CircuitOperation
     goal: str = Field(min_length=1, max_length=4000)
     incident_id: str | None = None
@@ -24,6 +25,7 @@ class CircuitArchitectRequest(BaseModel):
 
 
 class CircuitArchitectResponse(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"additionalProperties": False})
     status: Literal["answer", "proposal", "error"]
     summary: str
     findings: list[dict[str, Any]] = Field(default_factory=list)
@@ -172,11 +174,12 @@ async def create_circuit_architect_response(
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=CircuitArchitectResponse,
                 temperature=0.1,
             ),
         )
-        result = CircuitArchitectResponse.model_validate(response.parsed)
+        # Parse raw JSON response without Pydantic schema (avoids additionalProperties issue)
+        response_json = json.loads(response.text)
+        result = CircuitArchitectResponse.model_validate(response_json)
         if result.patch is not None and request.operation != "generate_connector":
             result.patch = _validate_patch(
                 request.operation,
