@@ -159,11 +159,24 @@ async def create_circuit_architect_response(
         return CircuitArchitectResponse(status="error", summary="Gemini is not configured", errors=["GOOGLE_API_KEY is not configured"])
 
     evidence = _build_evidence(request, incident)
+    
+    # Build example response based on operation
+    example_response = {
+        "status": "proposal" if request.operation != "debug_run" else "answer",
+        "summary": "Example summary of the proposal or answer",
+        "findings": [{"key": "value"}],
+        "patch": None if request.operation == "generate_connector" else {},
+        "requires_approval": True,
+        "errors": [],
+    }
+    
     prompt = (
         "You are ErrAgent's Circuit Architect. Produce a safe, read-only proposal for Circuit. "
         "Do not claim to apply changes, access unavailable data, or execute workflows. "
         f"Operation rules: {_operation_rules(request.operation)}\n"
-        "Return JSON matching the supplied response schema. Keep findings evidence-based. "
+        "Return ONLY a JSON object with these exact fields: status, summary, findings, patch, requires_approval, errors. "
+        f"Example response structure:\n{json.dumps(example_response, indent=2)}\n"
+        "Keep findings evidence-based. "
         f"Evidence:\n{json.dumps(evidence, default=str)}"
     )
 
