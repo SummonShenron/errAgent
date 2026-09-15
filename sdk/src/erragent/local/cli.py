@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import click
@@ -35,6 +36,12 @@ def serve(root: Path, port: int, poll_interval: float, poll_timeout: float) -> N
     import uvicorn
 
     from .daemon import create_app
+
+    # The daemon's own logger (erragent.local.daemon) is where every diagnostic and outcome
+    # message goes — configure it explicitly here rather than relying on Python's implicit
+    # "handler of last resort" (which only surfaces WARNING+ and silently drops INFO), so
+    # `erragent serve` is legible standalone without the caller needing to configure logging.
+    logging.basicConfig(level=logging.INFO, format="[errAgent] %(message)s")
 
     click.echo(f"erragent local daemon: serving from {root.resolve()} on http://127.0.0.1:{port}")
     click.echo(f"Set ERRAGENT_LOCAL_URL=http://127.0.0.1:{port} before starting your app.")

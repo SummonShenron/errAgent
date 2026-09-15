@@ -99,21 +99,21 @@ async def _handle_error_event(root: Path, event: LogEvent, poll_interval: float,
     config = load_config()
     if config.cloud is None:
         logger.error(
-            "errAgent local daemon: no cloud credentials configured (ERRAGENT_URL + "
-            "ERRAGENT_INGEST_SECRET or ERRAGENT_APP_ID/ERRAGENT_APP_SECRET) — cannot analyze."
+            "No cloud credentials configured (ERRAGENT_URL + ERRAGENT_INGEST_SECRET or "
+            "ERRAGENT_APP_ID/ERRAGENT_APP_SECRET) — cannot analyze this error."
         )
         return
 
     resolved = resolve_target_file(root, event.message, event.context)
     if resolved is None:
-        logger.info("errAgent local daemon: could not resolve a local source file for this error; skipping.")
+        logger.info("Could not resolve a local source file for this error; skipping local analysis.")
         return
     target_file_path, absolute_path = resolved
 
     try:
         file_content = absolute_path.read_text(encoding="utf-8")
     except OSError as exc:
-        logger.error("errAgent local daemon: failed to read %s: %s", absolute_path, exc)
+        logger.error("Failed to read %s: %s", absolute_path, exc)
         return
 
     incident_payload = {
@@ -135,22 +135,25 @@ async def _handle_error_event(root: Path, event: LogEvent, poll_interval: float,
     try:
         response = await _cloud_request(config, "POST", "/api/v1/webhooks/ingest", incident_payload)
     except Exception as exc:
-        logger.error("errAgent local daemon: failed to report incident: %s", exc)
+        logger.error("Failed to report incident to errAgent: %s", exc)
         return
 
     incident_id = response.get("incident_id")
     if not incident_id:
-        logger.error("errAgent local daemon: cloud did not return an incident_id: %s", response)
+        logger.error("errAgent did not return an incident_id: %s", response)
         return
 
-    print(f"\n[errAgent] Local error reported (incident {incident_id}). Analyzing...")
+    logger.info("Local error reported (incident %s). Analyzing...", incident_id)
 
     proposal = await _poll_for_proposal(config, incident_id, poll_interval, poll_timeout)
     if proposal is None or proposal.get("status") != "awaiting_approval":
         return
 
     # prompt_approval() blocks on input() — run it off the event loop so the daemon keeps
-    # serving other requests (e.g. /health) while waiting on the developer's terminal.
+    # serving other requests (e.g. /health) while waiting on the developer's terminal. Its
+    # diff display and y/N prompt are interactive UI, not log records, so it uses print()/
+    # input() directly rather than the logger — everything else in this module goes through
+    # `logger` so it's consistently controlled by the logging config set up in cli.py.
     approved = await asyncio.to_thread(
         prompt_approval,
         target_file_path=target_file_path,
@@ -162,8 +165,8 @@ async def _handle_error_event(root: Path, event: LogEvent, poll_interval: float,
         try:
             await _cloud_request(config, "POST", f"/api/v1/local-patch/{proposal['_id']}/decline")
         except Exception as exc:
-            logger.error("errAgent local daemon: failed to record decline: %s", exc)
-        print("[errAgent] Fix declined; no changes written.")
+            logger.error("Failed to record decline: %s", exc)
+        logger.info("Fix declined; no changes written.")
         return
 
     await _apply_proposal(config, root, target_file_path, absolute_path, proposal["_id"])
@@ -177,19 +180,19 @@ async def _poll_for_proposal(
         try:
             status = await _cloud_request(config, "GET", f"/api/v1/local-patch/by-incident/{incident_id}")
         except Exception as exc:
-            logger.error("errAgent local daemon: failed to poll analysis status: %s", exc)
+            logger.error("Failed to poll analysis status: %s", exc)
             return None
 
         if status.get("proposal"):
             return status["proposal"]
         if status.get("incident_status") == "analysis_failed":
-            print(f"[errAgent] Analysis failed: {status.get('failure_reason')}")
+            logger.error("Analysis failed: %s", status.get("failure_reason"))
             return None
 
         await asyncio.sleep(poll_interval)
         elapsed += poll_interval
 
-    print("[errAgent] Timed out waiting for analysis to finish.")
+    logger.warning("Timed out waiting for analysis to finish.")
     return None
 
 
@@ -199,7 +202,7 @@ async def _ack(config: ErrAgentConfig, proposal_id: str, outcome: str, detail: s
             config, "POST", f"/api/v1/local-patch/{proposal_id}/ack", {"outcome": outcome, "detail": detail}
         )
     except Exception as exc:
-        logger.error("errAgent local daemon: failed to ack proposal %s: %s", proposal_id, exc)
+        logger.error("Failed to ack proposal %s: %s", proposal_id, exc)
 
 
 async def _apply_proposal(
@@ -208,38 +211,40 @@ async def _apply_proposal(
     try:
         content = await _cloud_request(config, "POST", f"/api/v1/local-patch/{proposal_id}/approve")
     except Exception as exc:
-        logger.error("errAgent local daemon: approval failed: %s", exc)
+        logger.error("Approval failed: %s", exc)
         return
 
     resolved_path = absolute_path.resolve()
     try:
         resolved_path.relative_to(root)
     except ValueError:
+        logger.error("Refusing to apply: resolved path escaped the project root.")
         await _ack(config, proposal_id, "failed", "resolved path escaped the project root")
         return
 
     if content.get("content_source") != "sandbox_applied":
+        logger.error("Refusing to apply: remediation content was not sandbox-verified.")
         await _ack(config, proposal_id, "failed", "remediation content was not sandbox-verified")
-        print("[errAgent] Refusing to apply: remediation content was not sandbox-verified.")
         return
 
     full_content = content.get("full_file_content") or ""
     expected_hash = content.get("full_file_content_sha256") or ""
     if hashlib.sha256(full_content.encode("utf-8")).hexdigest() != expected_hash:
+        logger.error("Refusing to apply: content failed integrity check.")
         await _ack(config, proposal_id, "failed", "full_file_content failed integrity check")
-        print("[errAgent] Refusing to apply: content failed integrity check.")
         return
 
     try:
         current_content = absolute_path.read_text(encoding="utf-8")
     except OSError as exc:
+        logger.error("Could not re-read %s before writing: %s", absolute_path, exc)
         await _ack(config, proposal_id, "failed", f"could not re-read local file: {exc}")
         return
 
     base_hash = content.get("base_file_sha256") or ""
     if base_hash and hashlib.sha256(current_content.encode("utf-8")).hexdigest() != base_hash:
+        logger.warning("File changed on disk since analysis — refusing to overwrite. Re-run to retry.")
         await _ack(config, proposal_id, "failed", "local file changed since analysis; refused to overwrite")
-        print("[errAgent] File changed on disk since analysis — refusing to overwrite. Re-run to retry.")
         return
 
     tmp_path = absolute_path.with_name(absolute_path.name + ".erragent-tmp")
@@ -249,9 +254,9 @@ async def _apply_proposal(
     except OSError as exc:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
+        logger.error("Failed to write %s: %s", target_file_path, exc)
         await _ack(config, proposal_id, "failed", f"write failed: {exc}")
-        print(f"[errAgent] Failed to write {target_file_path}: {exc}")
         return
 
     await _ack(config, proposal_id, "succeeded", None)
-    print(f"[errAgent] Applied fix to {target_file_path}.")
+    logger.info("Applied fix to %s.", target_file_path)
