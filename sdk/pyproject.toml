@@ -12,7 +12,7 @@ license = { text = "Unlicense" }
 dependencies = []
 
 [project.optional-dependencies]
-local = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "click>=8.1"]
+local = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "click>=8.1", "python-dotenv>=1.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
