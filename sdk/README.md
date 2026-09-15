@@ -95,11 +95,27 @@ erragent.report_incident_nowait(error_message="...", stack_trace="...")
 
 ```bash
 pip install "erragent-sdk[local]"
+```
+
+Easiest: run the daemon and your app together in one terminal with `erragent dev`, which
+starts `erragent serve` as its own process (so your app's `--reload` only ever restarts your
+app, never the daemon), auto-sets `ERRAGENT_LOCAL_URL` for it, and stops the daemon when the
+app exits or you Ctrl+C:
+
+```bash
+erragent dev --root . -- uvicorn app:app --reload
+```
+
+Or run them separately if you'd rather — start the daemon in its own terminal:
+
+```bash
 erragent serve --root .
 ```
 
-Then set `ERRAGENT_LOCAL_URL=http://127.0.0.1:8765` (the daemon's default port) before starting
-your app. When an error occurs locally, the daemon reads the relevant source file directly off
-disk, sends it to errAgent for analysis, and prompts you in the terminal to approve or decline
-the proposed fix before writing anything to disk. See the main [README](../README.md) for the
-full remediation/HITL model this participates in.
+and set `ERRAGENT_LOCAL_URL=http://127.0.0.1:8765` (the daemon's default port) yourself before
+starting your app.
+
+Either way: when an error occurs locally, the daemon reads the relevant source file directly
+off disk, sends it to errAgent for analysis, and prompts you in the terminal to approve or
+decline the proposed fix before writing anything to disk. See the main
+[README](../README.md) for the full remediation/HITL model this participates in.
