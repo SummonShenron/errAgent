@@ -55,7 +55,19 @@ def load_config() -> ErrAgentConfig:
     """
     service = os.getenv("ERRAGENT_SERVICE")
     timeout_seconds = float(os.getenv("ERRAGENT_TIMEOUT_SECONDS", "30"))
-    local_only = _truthy(os.getenv("ERRAGENT_LOCAL_ONLY"))
+    local_url = os.getenv("ERRAGENT_LOCAL_URL")
+
+    # Default to local-only whenever local-dev mode is active (ERRAGENT_LOCAL_URL set) — the
+    # local daemon already forwards every error it handles to the cloud itself (tagged
+    # local_dev=true), so error/incident visibility in the console isn't lost by skipping the
+    # app's own direct cloud handler. Without this, every local error produced two incidents:
+    # one via the daemon (works, since it has the real local file content) and one via the
+    # app's direct cloud handler (guaranteed to fail analysis, since the cloud pipeline can't
+    # fetch an uncommitted local-only fix from GitHub) — pure noise, confirmed by live testing.
+    # Set ERRAGENT_LOCAL_ONLY=false to opt back into dual-reporting (e.g. to keep streaming
+    # non-error log lines to the shared Live Console during local dev too).
+    local_only_env = os.getenv("ERRAGENT_LOCAL_ONLY")
+    local_only = _truthy(local_only_env) if local_only_env is not None else bool(local_url)
 
     cloud: CloudConfig | None = None
     cloud_url = os.getenv("ERRAGENT_URL")
@@ -73,7 +85,6 @@ def load_config() -> ErrAgentConfig:
         )
 
     local: LocalConfig | None = None
-    local_url = os.getenv("ERRAGENT_LOCAL_URL")
     if local_url and service:
         local = LocalConfig(url=local_url, service=service, timeout_seconds=timeout_seconds)
 

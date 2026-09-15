@@ -39,14 +39,17 @@ All configuration is environment-only, matching errAgent's existing convention:
 | `ERRAGENT_INGEST_SECRET` | Legacy shared ingest secret. Supported for backward compatibility; prefer `ERRAGENT_APP_ID`/`ERRAGENT_APP_SECRET` for new integrations. |
 | `ERRAGENT_SERVICE` | Stable service name reported with every event |
 | `ERRAGENT_LOCAL_URL` | Local-dev daemon URL (e.g. `http://127.0.0.1:8765`), set only when running `erragent serve` |
-| `ERRAGENT_LOCAL_ONLY` | `true` to skip cloud reporting entirely while `ERRAGENT_LOCAL_URL` is set (fully offline local sessions) |
+| `ERRAGENT_LOCAL_ONLY` | Defaults to local-only whenever `ERRAGENT_LOCAL_URL` is set (see below). Set to `false` to also install the cloud handler alongside it. |
 | `ERRAGENT_TIMEOUT_SECONDS` | HTTP timeout for delivery (default `30`) |
 
-When both `ERRAGENT_URL` and `ERRAGENT_LOCAL_URL` are configured, `erragent.install()` attaches
-**both** a cloud handler and a local handler by default — local-dev sessions keep streaming into
-errAgent's Live Console exactly as they do today, while the local daemon additionally gets the
-same stream for file-aware remediation. Set `ERRAGENT_LOCAL_ONLY=true` to opt out of cloud
-reporting during local development.
+When `ERRAGENT_LOCAL_URL` is set, `erragent.install()` installs **only** the local handler by
+default, not the cloud one — the local daemon already forwards every error it handles to the
+cloud itself (tagged `local_dev=true`), so incident visibility in the console isn't lost. Installing
+both would report each local error twice: once via the daemon (works, since it has the real local
+file content) and once via a direct cloud report that's guaranteed to fail analysis, since the
+cloud pipeline can't fetch an uncommitted local-only fix from GitHub. Set `ERRAGENT_LOCAL_ONLY=false`
+if you want the direct cloud handler installed too anyway (e.g. to keep streaming non-error log
+lines to the shared Live Console during local dev).
 
 ## Auto-attaching structured context
 

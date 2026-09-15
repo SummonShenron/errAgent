@@ -39,11 +39,14 @@ __all__ = [
 def install(logger: logging.Logger | None = None) -> bool:
     """Install errAgent logging handler(s) + exception hooks based on ``ERRAGENT_*`` env vars.
 
-    Installs a cloud handler whenever ``ERRAGENT_URL`` + credentials are configured, and
-    additionally a local-dev handler whenever ``ERRAGENT_LOCAL_URL`` is set — both fire for
-    every log record by default, so local-dev sessions keep streaming into errAgent's Live
-    Console while the local daemon also receives the same stream for file-aware remediation.
-    Set ``ERRAGENT_LOCAL_ONLY=true`` to skip the cloud handler during local development.
+    Installs a cloud handler whenever ``ERRAGENT_URL`` + credentials are configured. When
+    ``ERRAGENT_LOCAL_URL`` is also set, the local-dev handler is installed *instead of* the
+    cloud one by default — the local daemon already forwards every error it handles to the
+    cloud itself, so incident visibility isn't lost, and this avoids reporting the same local
+    error twice (once via the daemon, once via a direct cloud report that's guaranteed to fail
+    analysis since it can't fetch an uncommitted local fix from GitHub). Set
+    ``ERRAGENT_LOCAL_ONLY=false`` to install both handlers anyway (e.g. to keep streaming
+    non-error log lines to the shared Live Console during local dev too).
 
     Returns True if at least one handler was installed.
     """
