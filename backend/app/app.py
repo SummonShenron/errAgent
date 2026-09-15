@@ -39,6 +39,7 @@ from backend.services.github_service import GitHubOpsService
 from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
 from backend.services.patchy_terminal import PatchyCommandError, _guided_test_flow, execute_patchy_command
 from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_proposal, list_proposals
+from backend.services.patchy_local_patch import approve_local_patch, ack_local_patch, get_local_patch_status
 from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
 from backend.services.patchy_flow_runner import execute_flow, execute_validation_audit
@@ -539,6 +540,12 @@ async def _execute_proposal_approval(
     actor: str,
     outbound_bearer_token: str | None,
 ) -> dict[str, Any]:
+    if proposal.get("kind") == "local_patch":
+        raise PatchyProposalError(
+            "local_patch proposals can only be approved via the local erragent daemon "
+            "(erragent serve), which is the only party with filesystem access to the "
+            "developer's machine. Use the daemon's approval prompt instead of the console."
+        )
     if proposal.get("kind") == "validation_audit":
         return await execute_validation_audit(db, proposal_id, actor)
     if proposal.get("kind") == "synthetic_flow":
@@ -628,6 +635,82 @@ async def decline_patchy_proposal(
     actor = current_user.get("username") or current_user.get("sub") or "operator"
     try:
         return await asyncio.to_thread(decline_proposal, db, proposal_id, actor)
+    except PatchyProposalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+# --- Local-dev-mode remediation: machine-authenticated endpoints for the local erragent
+# daemon (erragent serve), not the operator console. The developer approves in their own
+# terminal; these endpoints let the daemon fetch verified content and report the outcome of
+# a write it performs on the developer's own machine, which the backend has no visibility into.
+@app.get("/api/v1/local-patch/by-incident/{incident_id}", tags=["Patchy"])
+async def get_local_patch_status_route(
+    incident_id: str,
+    x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    try:
+        return await asyncio.to_thread(get_local_patch_status, db, incident_id)
+    except PatchyProposalError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/local-patch/{proposal_id}/approve", tags=["Patchy"])
+async def approve_local_patch_route(
+    proposal_id: str,
+    x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    ingest_context = authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    try:
+        return await asyncio.to_thread(approve_local_patch, db, proposal_id, ingest_context["actor"])
+    except PatchyProposalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/local-patch/{proposal_id}/decline", tags=["Patchy"])
+async def decline_local_patch_route(
+    proposal_id: str,
+    x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    ingest_context = authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    try:
+        return await asyncio.to_thread(decline_proposal, db, proposal_id, ingest_context["actor"])
+    except PatchyProposalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class LocalPatchAck(BaseModel):
+    outcome: str
+    detail: str | None = None
+
+
+@app.post("/api/v1/local-patch/{proposal_id}/ack", tags=["Patchy"])
+async def ack_local_patch_route(
+    proposal_id: str,
+    payload: LocalPatchAck,
+    x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    ingest_context = authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    try:
+        return await asyncio.to_thread(
+            ack_local_patch, db, proposal_id, ingest_context["actor"], payload.outcome, payload.detail
+        )
     except PatchyProposalError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

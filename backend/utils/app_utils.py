@@ -236,7 +236,13 @@ def _store_incident_and_queue_analysis(
         "details": {"service_name": incident_doc["service_name"]},
         "timestamp": now,
     })
-    background_tasks.add_task(run_ai_analysis_pipeline, incident_id, payload)
+    incident_metadata = payload.get("metadata")
+    is_local_dev = isinstance(incident_metadata, dict) and bool(incident_metadata.get("local_dev"))
+    background_tasks.add_task(
+        run_ai_analysis_pipeline_local if is_local_dev else run_ai_analysis_pipeline,
+        incident_id,
+        payload,
+    )
     return incident_id
 
 
@@ -762,6 +768,178 @@ def _apply_patch_in_sandbox(target_file: str, existing_code: str, clean_patch: s
 
         return full_file_content, canonical_patch
 
+def _run_analysis_with_source(
+    db,
+    client,
+    incident_id: str,
+    payload: dict,
+    target_file: str,
+    existing_code: str,
+    remediation_extra: dict,
+) -> dict:
+    """Shared tail of the analysis pipeline: prompt Gemini, validate/apply the patch in a
+    sandbox, and persist analyses/remediations/incident status. Everything from here on is
+    agnostic to how ``existing_code`` was obtained (GitHub fetch vs. local disk read), so both
+    ``run_ai_analysis_pipeline`` and ``run_ai_analysis_pipeline_local`` share this. Raises on
+    failure — callers are responsible for the surrounding try/except and failure bookkeeping,
+    since they know the source-specific context (target_repo vs. local_project_root) to record.
+
+    Returns the remediation dict that was written (pre-insert, so it has no Mongo ``_id`` — look
+    it up by ``incident_id`` if a caller needs the persisted copy).
+    """
+    stack_trace = payload.get("stack_trace", "No stack trace provided.")
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    engineering_instructions = (
+        payload.get("engineering_instructions")
+        or metadata.get("engineering_instructions")
+        or ""
+    )
+
+    base_prompt = INCIDENT_ANALYSIS_PROMPT.format(
+        service_name=payload.get("service_name", "unknown-service"),
+        environment=payload.get("environment", "production"),
+        stack_trace=stack_trace,
+        git_diffs=payload.get("git_diffs", "No git diff context provided."),
+        metadata=metadata,
+        engineering_instructions=engineering_instructions,
+        target_file_path=target_file
+    )
+
+    # Append file contents safely via f-string
+    prompt = f"""{base_prompt}
+--------------------------------------------------
+CURRENT CONTENT OF TARGET FILE ({target_file}):
+```python
+{existing_code}
+```
+    """
+    logger.info(f"--> [errAgent AI] Prompt sent to Gemini (first 500 chars):\n{prompt[:500]}...")
+
+    result: AIAnalysisSchema | None = None
+    now = datetime.now(timezone.utc)
+    full_file_content = existing_code
+    canonical_patch = clean_patch = ""
+    resolved_head_branch = ""
+    last_error: Exception | None = None
+    retry_suffix = """
+
+CRITICAL RETRY RULES:
+- Output a minimal patch with only localized hunks near the failing function.
+- Do not rewrite from top-of-file. Do not emit broad file-wide changes.
+- Keep patch to one target file only.
+    - old_snippet and new_snippet are required.
+    - old_snippet must be copied exactly from CURRENT CONTENT OF TARGET FILE.
+"""
+
+    for attempt_index in range(2):
+        prompt_to_use = prompt if attempt_index == 0 else f"{prompt}\n{retry_suffix}"
+        logger.info("--> [errAgent AI] Starting generation attempt=%s for incident=%s", attempt_index + 1, incident_id)
+        response = client.models.generate_content(
+            model=os.getenv("PATCHY_CODE_MODEL") or os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
+            contents=prompt_to_use,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=AIAnalysisSchema,
+                temperature=0.1,
+            ),
+        )
+
+        result = response.parsed
+        resolved_head_branch = _build_unique_head_branch(result.head_branch, incident_id)
+        try:
+            clean_patch = _build_patch_from_snippet_edit(
+                target_file=target_file,
+                existing_code=existing_code,
+                old_snippet=result.old_snippet,
+                new_snippet=result.new_snippet,
+            )
+            logger.info("--> [errAgent AI] Using deterministic snippet edit synthesis (attempt=%s).", attempt_index + 1)
+        except Exception as snippet_exc:
+            logger.warning(
+                "--> [errAgent AI] Snippet synthesis unavailable (attempt=%s, old_len=%s, new_len=%s): %s",
+                attempt_index + 1,
+                len(result.old_snippet or ""),
+                len(result.new_snippet or ""),
+                str(snippet_exc),
+            )
+            clean_patch = ""
+        logger.info(f"--> [errAgent AI] Generated Patch (attempt={attempt_index + 1}):\n{clean_patch}")
+
+        try:
+            if not clean_patch.strip():
+                raise ValueError("Patch rejected: deterministic snippet synthesis unavailable.")
+            if "--- /dev/null" in clean_patch:
+                raise ValueError("Patch rejected: LLM attempted to create a new file instead of modifying the existing one.")
+
+            _validate_patch_safety(clean_patch=clean_patch, target_file=target_file, existing_code=existing_code)
+            full_file_content, canonical_patch = _apply_patch_in_sandbox(
+                target_file=target_file,
+                existing_code=existing_code,
+                clean_patch=clean_patch,
+            )
+
+            original_chars = max(1, len(existing_code))
+            if len(full_file_content) < int(original_chars * 0.4):
+                raise ValueError("Patch rejected: patched file is unexpectedly small relative to original file.")
+
+            last_error = None
+            break
+        except Exception as patch_exc:
+            last_error = patch_exc
+            logger.error(
+                "--> [errAgent AI] Attempt %s patch validation/apply failed: %s",
+                attempt_index + 1,
+                str(patch_exc),
+            )
+
+    if last_error is not None or result is None:
+        raise ValueError(f"Patch generation failed after retry: {str(last_error) if last_error else 'unknown error'}")
+
+    # 4. Save to Database
+    db["analyses"].insert_one({
+        "incident_id": incident_id,
+        "root_cause_summary": result.root_cause_summary,
+        "severity": result.severity,
+        "suggested_fix": result.suggested_fix,
+        "confidence_score": 0.95,
+        "created_at": now,
+    })
+
+    remediation_doc = {
+        "incident_id": incident_id,
+        "status": "draft",
+        "base_file_sha256": hashlib.sha256(existing_code.encode("utf-8")).hexdigest(),
+        "base_file_bytes": len(existing_code.encode("utf-8")),
+        "code_patch": canonical_patch,
+        "code_patch_sha256": hashlib.sha256(canonical_patch.encode("utf-8")).hexdigest(),
+        "code_patch_bytes": len(canonical_patch.encode("utf-8")),
+        "full_file_content": full_file_content,
+        "full_file_content_sha256": hashlib.sha256(full_file_content.encode("utf-8")).hexdigest(),
+        "full_file_content_bytes": len(full_file_content.encode("utf-8")),
+        "content_source": "sandbox_applied",
+        "base_branch": result.base_branch,
+        "head_branch": resolved_head_branch,
+        "head_branch_original": result.head_branch,
+        "pr_title": result.pr_title,
+        "pr_body": result.pr_body,
+        "target_file_path": target_file,
+        "created_at": now,
+        "updated_at": now,
+    }
+    remediation_doc.update(remediation_extra)
+    db["remediations"].insert_one(dict(remediation_doc))
+
+    db["incidents"].update_one(
+        {"_id": incident_id},
+        {"$set": {"status": "fix_proposed", "updated_at": now}}
+    )
+
+    logger.info("--> [errAgent AI] Successfully applied patch and generated fix for incident: %s", incident_id)
+    return remediation_doc
+
+
 def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
     db = get_db()
     if db is None:
@@ -785,14 +963,14 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
 
     client = genai.Client(api_key=api_key)
     stack_trace = payload.get("stack_trace", "No stack trace provided.")
-    
+
     # ---------------------------------------------------------
     # 1. Fetch target file directly from GitHub (No local files)
     # ---------------------------------------------------------
     target_repo = str(payload.get("repository") or DEFAULT_TARGET_REPO).strip()
     target_file_candidates = _extract_target_file_candidates(stack_trace, payload)
     target_file = target_file_candidates[0]
-    
+
     existing_code = ""
     fetched_branch = ""
     branches_to_try = ["main", "master"]
@@ -844,158 +1022,16 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         )
         return
 
-    # 2. Build base prompt with format context
-    metadata = payload.get("metadata", {})
-    if not isinstance(metadata, dict):
-        metadata = {}
-    engineering_instructions = (
-        payload.get("engineering_instructions")
-        or metadata.get("engineering_instructions")
-        or ""
-    )
-
-    base_prompt = INCIDENT_ANALYSIS_PROMPT.format(
-        service_name=payload.get("service_name", "unknown-service"),
-        environment=payload.get("environment", "production"),
-        stack_trace=stack_trace,
-        git_diffs=payload.get("git_diffs", "No git diff context provided."),
-        metadata=metadata,
-        engineering_instructions=engineering_instructions,
-        target_file_path=target_file
-    )
-
-    # Append file contents safely via f-string
-    prompt = f"""{base_prompt}
---------------------------------------------------
-CURRENT CONTENT OF TARGET FILE ({target_file}):
-```python
-{existing_code}
-```
-    """
-    logger.info(f"--> [errAgent AI] Prompt sent to Gemini (first 500 chars):\n{prompt[:500]}...")
-
     try:
-        result: AIAnalysisSchema | None = None
-        now = datetime.now(timezone.utc)
-        full_file_content = existing_code
-        canonical_patch = clean_patch = ""
-        resolved_head_branch = ""
-        last_error: Exception | None = None
-        retry_suffix = """
-
-CRITICAL RETRY RULES:
-- Output a minimal patch with only localized hunks near the failing function.
-- Do not rewrite from top-of-file. Do not emit broad file-wide changes.
-- Keep patch to one target file only.
-    - old_snippet and new_snippet are required.
-    - old_snippet must be copied exactly from CURRENT CONTENT OF TARGET FILE.
-"""
-
-        for attempt_index in range(2):
-            prompt_to_use = prompt if attempt_index == 0 else f"{prompt}\n{retry_suffix}"
-            logger.info("--> [errAgent AI] Starting generation attempt=%s for incident=%s", attempt_index + 1, incident_id)
-            response = client.models.generate_content(
-                model=os.getenv("PATCHY_CODE_MODEL") or os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash"),
-                contents=prompt_to_use,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=AIAnalysisSchema,
-                    temperature=0.1,
-                ),
-            )
-
-            result = response.parsed
-            resolved_head_branch = _build_unique_head_branch(result.head_branch, incident_id)
-            try:
-                clean_patch = _build_patch_from_snippet_edit(
-                    target_file=target_file,
-                    existing_code=existing_code,
-                    old_snippet=result.old_snippet,
-                    new_snippet=result.new_snippet,
-                )
-                logger.info("--> [errAgent AI] Using deterministic snippet edit synthesis (attempt=%s).", attempt_index + 1)
-            except Exception as snippet_exc:
-                logger.warning(
-                    "--> [errAgent AI] Snippet synthesis unavailable (attempt=%s, old_len=%s, new_len=%s): %s",
-                    attempt_index + 1,
-                    len(result.old_snippet or ""),
-                    len(result.new_snippet or ""),
-                    str(snippet_exc),
-                )
-                clean_patch = ""
-            logger.info(f"--> [errAgent AI] Generated Patch (attempt={attempt_index + 1}):\n{clean_patch}")
-
-            try:
-                if not clean_patch.strip():
-                    raise ValueError("Patch rejected: deterministic snippet synthesis unavailable.")
-                if "--- /dev/null" in clean_patch:
-                    raise ValueError("Patch rejected: LLM attempted to create a new file instead of modifying the existing one.")
-
-                _validate_patch_safety(clean_patch=clean_patch, target_file=target_file, existing_code=existing_code)
-                full_file_content, canonical_patch = _apply_patch_in_sandbox(
-                    target_file=target_file,
-                    existing_code=existing_code,
-                    clean_patch=clean_patch,
-                )
-
-                original_chars = max(1, len(existing_code))
-                if len(full_file_content) < int(original_chars * 0.4):
-                    raise ValueError("Patch rejected: patched file is unexpectedly small relative to original file.")
-
-                last_error = None
-                break
-            except Exception as patch_exc:
-                last_error = patch_exc
-                logger.error(
-                    "--> [errAgent AI] Attempt %s patch validation/apply failed: %s",
-                    attempt_index + 1,
-                    str(patch_exc),
-                )
-
-        if last_error is not None or result is None:
-            raise ValueError(f"Patch generation failed after retry: {str(last_error) if last_error else 'unknown error'}")
-
-        # 4. Save to Database
-        db["analyses"].insert_one({
-            "incident_id": incident_id,
-            "root_cause_summary": result.root_cause_summary,
-            "severity": result.severity,
-            "suggested_fix": result.suggested_fix,
-            "confidence_score": 0.95,
-            "created_at": now,
-        })
-
-        db["remediations"].insert_one({
-            "incident_id": incident_id,
-            "status": "draft",
-            "target_repo": target_repo,
-            "base_file_branch": fetched_branch,
-            "base_file_sha256": hashlib.sha256(existing_code.encode("utf-8")).hexdigest(),
-            "base_file_bytes": len(existing_code.encode("utf-8")),
-            "code_patch": canonical_patch,
-            "code_patch_sha256": hashlib.sha256(canonical_patch.encode("utf-8")).hexdigest(),
-            "code_patch_bytes": len(canonical_patch.encode("utf-8")),
-            "full_file_content": full_file_content,
-            "full_file_content_sha256": hashlib.sha256(full_file_content.encode("utf-8")).hexdigest(),
-            "full_file_content_bytes": len(full_file_content.encode("utf-8")),
-            "content_source": "sandbox_applied",
-            "base_branch": result.base_branch,
-            "head_branch": resolved_head_branch,
-            "head_branch_original": result.head_branch,
-            "pr_title": result.pr_title,
-            "pr_body": result.pr_body,
-            "target_file_path": target_file,
-            "created_at": now,
-            "updated_at": now,
-        })
-
-        db["incidents"].update_one(
-            {"_id": incident_id},
-            {"$set": {"status": "fix_proposed", "updated_at": now}}
+        _run_analysis_with_source(
+            db,
+            client,
+            incident_id,
+            payload,
+            target_file,
+            existing_code,
+            remediation_extra={"target_repo": target_repo, "base_file_branch": fetched_branch},
         )
-
-        logger.info("--> [errAgent AI] Successfully applied patch and generated fix for incident: %s", incident_id)
-
     except Exception as exc:
         logger.error("--> [errAgent AI] Analysis pipeline failed for %s: %s", incident_id, str(exc))
         _upsert_remediation_failure(
@@ -1009,6 +1045,75 @@ CRITICAL RETRY RULES:
             {"_id": incident_id},
             {"$set": {"status": "analysis_failed", "updated_at": datetime.now(timezone.utc)}}
         )
+
+
+def run_ai_analysis_pipeline_local(incident_id: str, payload: dict) -> None:
+    """Local-dev-mode variant of ``run_ai_analysis_pipeline``: the target file's content is
+    supplied inline by the local erragent daemon (read directly off the developer's disk)
+    instead of being fetched from GitHub. Everything past sourcing the file is identical —
+    same Gemini prompt, same sandboxed patch validation — via ``_run_analysis_with_source``.
+    """
+    db = get_db()
+    if db is None:
+        logger.error("Database unavailable during local AI analysis for %s", incident_id)
+        return
+
+    db["incidents"].update_one(
+        {"_id": incident_id},
+        {"$set": {"status": "analyzing", "updated_at": datetime.now(timezone.utc)}}
+    )
+
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    target_file = str(metadata.get("target_file_path") or "").strip()
+    existing_code = metadata.get("inline_file_content")
+    expected_hash = str(metadata.get("inline_file_sha256") or "").strip()
+    local_project_root = str(metadata.get("local_project_root") or "").strip()
+
+    def _fail(reason: str) -> None:
+        logger.error("--> [errAgent AI local] %s (incident=%s)", reason, incident_id)
+        _upsert_remediation_failure(db, incident_id, reason, target_file=target_file)
+        db["incidents"].update_one(
+            {"_id": incident_id},
+            {"$set": {"status": "analysis_failed", "updated_at": datetime.now(timezone.utc)}}
+        )
+
+    if not target_file or not isinstance(existing_code, str) or not existing_code:
+        _fail("Local-dev incident is missing metadata.target_file_path or metadata.inline_file_content.")
+        return
+
+    actual_hash = hashlib.sha256(existing_code.encode("utf-8")).hexdigest()
+    if expected_hash and not hmac.compare_digest(actual_hash, expected_hash):
+        _fail("Local-dev incident inline_file_content failed integrity check (sha256 mismatch).")
+        return
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        _fail("GOOGLE_API_KEY is not configured.")
+        return
+
+    client = genai.Client(api_key=api_key)
+
+    try:
+        remediation_doc = _run_analysis_with_source(
+            db,
+            client,
+            incident_id,
+            payload,
+            target_file,
+            existing_code,
+            remediation_extra={
+                "remediation_kind": "local_patch",
+                "local_project_root": local_project_root,
+            },
+        )
+    except Exception as exc:
+        _fail(f"Analysis pipeline failed: {exc}")
+        return
+
+    from backend.services.patchy_local_patch import create_local_patch_proposal
+    create_local_patch_proposal(db, incident_id, remediation_doc)
 
 # ---------------------------------------------------------
 # 2. RUN HEALTH CHECKS FOR ALL SERVICES
