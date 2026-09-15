@@ -46,11 +46,59 @@ Keep the display name, Patchy alias, log service name, and repository name consi
 
 ## 2. Install target-app logging
 
-The integration handler lives at:
+**Preferred path: install `erragent-sdk`** ([sdk/](sdk/)), a proper installable package that
+replaces copy-pasting a handler file into every target repo:
 
-[integrations/erragent_handler.py](integrations/erragent_handler.py)
+```bash
+pip install erragent-sdk
+# or, from this monorepo before the first PyPI release: pip install -e /path/to/errAgent/sdk
+```
 
-Install it in the target application startup path:
+```python
+import erragent
+
+erragent.install()  # reads ERRAGENT_* env vars, installs logging handler(s) + exception hooks
+```
+
+That's the entire integration surface — no per-call-site instrumentation required. For a
+FastAPI/Starlette app, also seed request-scoped context automatically with one line:
+
+```python
+app.add_middleware(erragent.Middleware)
+```
+
+To eliminate hand-built context dicts at individual log call sites (a common source of
+integration bloat), wrap the surrounding operation once instead:
+
+```python
+with erragent.context(workflow_name="ingest", request_id=req_id, node="fetch_docs"):
+    logger.info("starting fetch")   # workflow_name/request_id/node attached automatically
+```
+
+See [sdk/README.md](sdk/README.md) for the full API (`erragent.report_incident(...)` for
+pre-formed incidents, local-dev remediation setup, etc.).
+
+Configure the target application environment — prefer per-app credentials over the legacy
+shared secret (see below):
+
+```env
+ERRAGENT_URL=https://<erragent-host>
+ERRAGENT_APP_ID=<app-id-registered-in-ingest_clients>
+ERRAGENT_APP_SECRET=<per-app-secret>
+ERRAGENT_SERVICE=<runtime-log-service-name>
+ERRAGENT_TIMEOUT_SECONDS=30
+```
+
+Register the app's `ERRAGENT_APP_ID`/`ERRAGENT_APP_SECRET` pair in errAgent's `ingest_clients`
+collection (`{app_id, secret, enabled: true, default_repo}`) rather than relying on a single
+shared secret across every integration — this is the standard credential model going forward.
+
+<details>
+<summary>Legacy path (copy-pasted handler, still supported)</summary>
+
+The original hand-copied handler still works and remains at
+[integrations/erragent_handler.py](integrations/erragent_handler.py) for existing integrations
+that haven't migrated yet:
 
 ```python
 import logging
@@ -60,8 +108,6 @@ logger = logging.getLogger("target-app")
 install_erragent_logging(logger)
 ```
 
-Configure the target application environment:
-
 ```env
 ERRAGENT_URL=https://<erragent-host>
 ERRAGENT_INGEST_SECRET=<shared-ingest-secret>
@@ -69,7 +115,11 @@ ERRAGENT_SERVICE=<runtime-log-service-name>
 ERRAGENT_TIMEOUT_SECONDS=30
 ```
 
-Important logging checks:
+New integrations should use `erragent-sdk` above instead — this path is kept only for backward
+compatibility and receives no new features.
+</details>
+
+Important logging checks (apply to either path):
 
 - Install the handler on the logger that actually receives application events.
 - If the app uses `propagate = False`, install it on that named logger rather than relying on the root logger.

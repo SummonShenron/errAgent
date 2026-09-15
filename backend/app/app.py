@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 from backend.schemas.incident_schemas import IncidentCreate, IncidentInDB, IncidentStatus, AuditLogEntry
+from backend.schemas.ingest_schemas import MachineIncidentIngest
 # Utility imports from your backend/utils directory
 from backend.utils.db_utils import get_db
 from backend.utils.app_utils import (
@@ -37,7 +38,7 @@ from backend.utils.isolation_auth import decode_access_token, get_current_user
 from backend.services.github_service import GitHubOpsService
 from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
 from backend.services.patchy_terminal import PatchyCommandError, _guided_test_flow, execute_patchy_command
-from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_plan_step_proposal, list_proposals
+from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_proposal, list_proposals
 from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
 from backend.services.patchy_flow_runner import execute_flow, execute_validation_audit
@@ -626,7 +627,7 @@ async def decline_patchy_proposal(
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     actor = current_user.get("username") or current_user.get("sub") or "operator"
     try:
-        return await asyncio.to_thread(decline_plan_step_proposal, db, proposal_id, actor)
+        return await asyncio.to_thread(decline_proposal, db, proposal_id, actor)
     except PatchyProposalError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -1350,7 +1351,7 @@ async def reanalyze_incident(
 # --- Generic Machine Ingest Webhook ---
 @app.post("/api/v1/webhooks/ingest", tags=["Webhooks"])
 async def handle_machine_ingest(
-    payload: Dict[str, Any],
+    payload: MachineIncidentIngest,
     background_tasks: BackgroundTasks,
     x_ingest_secret: str | None = Header(default=None),
     x_app_id: str | None = Header(default=None),
@@ -1360,20 +1361,21 @@ async def handle_machine_ingest(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     ingest_context = authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    payload_dict = payload.model_dump(exclude_none=True)
     logger.info(
         "called /api/v1/webhooks/ingest app_id=%s payload=%s",
         ingest_context.get("app_id"),
-        payload,
+        payload_dict,
     )
 
-    if SUPPRESS_DEBUG_INCIDENTS and is_synthetic_debug_incident(payload) and not debug_suppression_bypassed(payload):
+    if SUPPRESS_DEBUG_INCIDENTS and is_synthetic_debug_incident(payload_dict) and not debug_suppression_bypassed(payload_dict):
         logger.info("Ignoring synthetic debug incident from /api/erragent-debug")
         return {"status": "ignored_debug_event"}
 
     incident_id = ingest_machine_payload(
         db,
         background_tasks,
-        payload,
+        payload_dict,
         ingest_context["actor"],
         app_id=ingest_context.get("app_id"),
         app_default_repo=ingest_context.get("default_repo"),

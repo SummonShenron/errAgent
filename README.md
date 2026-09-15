@@ -329,8 +329,8 @@ Protected routes require the authentication or ingestion headers described by th
 
 A target app generally needs no Patchy-specific application code beyond structured error reporting. The integration contract is:
 
-1. Install the errAgent logging handler.
-2. Set `ERRAGENT_URL`, `ERRAGENT_INGEST_SECRET`, and a stable service name.
+1. `pip install erragent-sdk` ([sdk/](sdk/)) and call `erragent.install()` at startup — see [sdk/README.md](sdk/README.md). (The legacy copy-pasted handler at [integrations/erragent_handler.py](integrations/erragent_handler.py) still works for existing integrations.)
+2. Set `ERRAGENT_URL`, per-app `ERRAGENT_APP_ID`/`ERRAGENT_APP_SECRET` (preferred) or `ERRAGENT_INGEST_SECRET` (legacy), and a stable service name.
 3. Send structured error events to `/api/v1/logs`.
 4. Register its health URL and Patchy alias in errAgent.
 5. Map its service name to its GitHub repository when using analysis or test workflows.

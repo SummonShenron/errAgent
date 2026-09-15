@@ -418,10 +418,10 @@ async def approve_and_execute_pentest_sweep(
 
     return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal_id}))
 
-def decline_plan_step_proposal(db, proposal_id: str, actor: str) -> dict[str, Any]:
+def decline_proposal(db, proposal_id: str, actor: str) -> dict[str, Any]:
+    """Decline any proposal kind. Declining is a status-only transition, so it needs no
+    kind-specific logic — unlike approval, which dispatches to a kind-specific executor."""
     proposal = get_proposal(db, proposal_id)
-    if proposal.get("kind") != "plan_step":
-        raise PatchyProposalError("Only guided plan-step proposals can be declined")
     if proposal.get("status") != "awaiting_approval":
         raise PatchyProposalError(f"Proposal cannot be declined from status: {proposal.get('status', 'unknown')}")
 

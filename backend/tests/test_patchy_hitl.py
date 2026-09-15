@@ -3,7 +3,13 @@ from copy import deepcopy
 from datetime import timedelta
 
 import backend.services.patchy_hitl as hitl_module
-from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, create_probe_proposal, create_verification_workflow
+from backend.services.patchy_hitl import (
+    PatchyProposalError,
+    approve_and_execute_probe,
+    create_probe_proposal,
+    create_verification_workflow,
+    decline_proposal,
+)
 from backend.services.log_broker import LogBroker
 
 
@@ -96,6 +102,26 @@ def test_probe_requires_approval_before_execution(monkeypatch):
             raise AssertionError("Repeated approval should fail")
 
     asyncio.run(scenario())
+
+
+def test_decline_proposal_is_not_restricted_to_plan_step_kind():
+    # Regression test: decline_proposal (formerly decline_plan_step_proposal) used to hard-reject
+    # any proposal whose kind wasn't "plan_step", leaving every other kind (http_probe, pentest_sweep,
+    # local_patch, ...) permanently undeclinable via the API.
+    db = FakeDB()
+    proposal = create_probe_proposal("bty", "operator-1", db)
+    assert proposal["kind"] == "http_probe"
+
+    declined = decline_proposal(db, proposal["_id"], "operator-2")
+    assert declined["status"] == "declined"
+    assert declined["declined_by"] == "operator-2"
+
+    try:
+        decline_proposal(db, proposal["_id"], "operator-2")
+    except PatchyProposalError as exc:
+        assert "cannot be declined" in str(exc)
+    else:
+        raise AssertionError("Declining an already-declined proposal should fail")
 
 
 def test_verification_chains_latency_and_returns_report(monkeypatch):

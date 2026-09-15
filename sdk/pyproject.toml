@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "erragent-sdk"
+version = "0.1.0"
+description = "Client SDK for errAgent: structured error/log reporting, context propagation, and local-dev remediation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Unlicense" }
+dependencies = []
+
+[project.optional-dependencies]
+local = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "click>=8.1"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+erragent = "erragent.local.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
