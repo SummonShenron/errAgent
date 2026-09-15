@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -38,6 +39,22 @@ _ENV_FILE_OPTION = click.option(
 @click.group()
 def cli() -> None:
     """erragent-sdk local-dev tools."""
+
+
+def _resolve_app_executable(root: Path, command: str) -> str:
+    """Resolve the app command's executable the way a shell would if you typed it directly
+    from --root, including Windows PATHEXT resolution for an extensionless script path like
+    ``.venv\\Scripts\\uvicorn`` — subprocess.Popen(..., shell=False) does neither of these on
+    its own and raises FileNotFoundError for a bare extensionless path.
+    """
+    has_path_separator = os.sep in command or (os.altsep is not None and os.altsep in command)
+    if not has_path_separator:
+        return shutil.which(command) or command  # bare name (e.g. "uvicorn") — normal PATH search
+
+    candidate = Path(command)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return shutil.which(str(candidate)) or command
 
 
 @cli.command()
@@ -121,13 +138,14 @@ def dev(
         daemon_argv += ["--env-file", str(env_file)]
 
     click.echo(f"erragent dev: starting daemon on http://127.0.0.1:{port}")
-    daemon_process = subprocess.Popen(daemon_argv)
+    daemon_process = subprocess.Popen(daemon_argv, cwd=root)
 
     app_env = os.environ.copy()
     app_env.setdefault("ERRAGENT_LOCAL_URL", f"http://127.0.0.1:{port}")
 
+    resolved_argv = [_resolve_app_executable(root, app_command[0]), *app_command[1:]]
     click.echo(f"erragent dev: starting app command: {' '.join(app_command)}")
-    app_process = subprocess.Popen(list(app_command), env=app_env)
+    app_process = subprocess.Popen(resolved_argv, env=app_env, cwd=root)
 
     exit_code = 0
     try:
