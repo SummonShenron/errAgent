@@ -17,21 +17,36 @@ def test_default_health_check_interval_is_300_seconds():
 
 
 def test_list_services_includes_last_health_status(monkeypatch):
-    class FakeDB:
-        def __init__(self):
-            self.payloads = []
-
-        def __getitem__(self, key):
-            return self
+    class FakeCollection:
+        def __init__(self, documents):
+            self.documents = documents
 
         def find_one(self, *args, **kwargs):
-            return {
-                "timestamp": "2026-08-14T00:00:00Z",
-                "services": [
-                    {"service": "BTY Fitness", "status": "healthy", "latency_ms": 120},
-                    {"service": "SAAPP Widget", "status": "down", "latency_ms": None},
-                ],
+            return self.documents[0] if self.documents else None
+
+        def find(self, *args, **kwargs):
+            return list(self.documents)
+
+    class FakeDB:
+        def __init__(self):
+            self.collections = {
+                "health_snapshots": FakeCollection([
+                    {
+                        "timestamp": "2026-08-14T00:00:00Z",
+                        "services": [
+                            {"service": "BTY Fitness", "status": "healthy", "latency_ms": 120},
+                            {"service": "SAAPP Widget", "status": "down", "latency_ms": None},
+                        ],
+                    }
+                ]),
+                "service_registry": FakeCollection([
+                    {"_id": "svc_1", "service_name": "BTY Fitness", "short_alias": "bty", "url": "https://btyapp.onrender.com", "health_path": "/api/health"},
+                    {"_id": "svc_2", "service_name": "SAAPP Widget", "short_alias": "saapp", "url": "https://saapp.onrender.com", "health_path": "/api/health"},
+                ]),
             }
+
+        def __getitem__(self, key):
+            return self.collections[key]
 
     monkeypatch.setattr("backend.app.app.get_db", lambda: FakeDB())
     response = list_services()

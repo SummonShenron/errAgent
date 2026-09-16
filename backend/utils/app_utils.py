@@ -10,7 +10,7 @@ from urllib.error import HTTPError
 from datetime import datetime, timezone, timedelta
 import time
 from pymongo.errors import DuplicateKeyError
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import uuid4
 from bson import ObjectId
 from bson import ObjectId
@@ -38,42 +38,147 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 load_dotenv()
 
-SERVICES = [
-    {
-        "name": "BTY Fitness",
-        "url": "https://btyapp.onrender.com",
-        "health_path": "/api/health"
-    },
-    {
-        "name": "SAAPP Widget",
-        "url": "https://saapp.onrender.com",
-        "health_path": "/api/health"
+# --- Service registry (multi-tenancy Phase B) ---
+# Previously a hardcoded Python list (SERVICES) plus several independently-duplicated alias
+# maps scattered across patchy_hitl.py/patchy_terminal.py/production_ops.py. Now a Mongo-backed,
+# team-owned collection (service_registry) — see backend/utils/team_utils.py for the team model
+# this plugs into. A short in-process cache sits in front of it since canonicalize_service_name
+# is called on every ingested incident (a live Mongo round-trip per event would be wasteful).
+#
+# Document shape: {_id, team_id, service_name (display name, e.g. "BTY Fitness"),
+# canonical_key (dedup key, e.g. "btyapp"), short_alias (Patchy command alias, e.g. "bty"),
+# log_service_name (as it appears in the live log broker / ERRAGENT_SERVICE, e.g. "BTY"),
+# ingest_aliases (raw incoming service_name variants that canonicalize to canonical_key),
+# url, health_path, target_repo, app_id, created_by, created_at}
+_SERVICE_REGISTRY_CACHE: dict[str, Any] = {"loaded_at": 0.0, "docs": [], "db_id": None}
+_SERVICE_REGISTRY_CACHE_TTL_SECONDS = 5.0
+
+
+def _slugify_service_name(name: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return cleaned or "service"
+
+
+def load_service_registry(db=None, *, force: bool = False) -> list[Dict[str, Any]]:
+    """All registered services, cached briefly since this is on the incident-ingest hot path.
+
+    Invalidates automatically whenever the resolved db object's identity changes (not just on
+    TTL expiry) — this is what keeps the cache safe across tests, each of which typically
+    constructs its own fresh FakeDB instance, without requiring a manual cache reset.
+    """
+    now = time.monotonic()
+    resolved_db = db if db is not None else get_db()
+    db_id = id(resolved_db)
+    stale = db_id != _SERVICE_REGISTRY_CACHE["db_id"] or now - _SERVICE_REGISTRY_CACHE["loaded_at"] > _SERVICE_REGISTRY_CACHE_TTL_SECONDS
+    if force or stale:
+        raw_docs = list(resolved_db["service_registry"].find({})) if resolved_db is not None else []
+        # Defensive: the old, sparse service_registry shape ({service_name, target_repo}, no
+        # url/short_alias) predates this registry and may still have stray documents in it —
+        # skip anything that isn't a fully-registered service rather than KeyError downstream
+        # (e.g. in the health-check loop, which reads svc["url"] unconditionally).
+        _SERVICE_REGISTRY_CACHE["docs"] = [doc for doc in raw_docs if doc.get("url") and doc.get("short_alias")]
+        _SERVICE_REGISTRY_CACHE["loaded_at"] = now
+        _SERVICE_REGISTRY_CACHE["db_id"] = db_id
+    return _SERVICE_REGISTRY_CACHE["docs"]
+
+
+def get_service_by_alias(alias: str, db=None) -> Optional[Dict[str, Any]]:
+    """Look up a registered service by any name a caller might reasonably use for it — the
+    short Patchy command alias (e.g. "bty"), the canonical dedup key (e.g. "btyapp"), or one
+    of its raw ingest_aliases. Consolidates what used to be several independently-duplicated
+    alias maps across patchy_hitl.py/patchy_terminal.py/patchy_flow_runner.py/production_ops.py."""
+    alias = (alias or "").strip().lower()
+    if not alias:
+        return None
+    for service in load_service_registry(db):
+        candidates = {
+            str(service.get("short_alias") or "").lower(),
+            str(service.get("canonical_key") or "").lower(),
+            *(str(a).lower() for a in service.get("ingest_aliases") or []),
+        }
+        if alias in candidates:
+            return service
+    return None
+
+
+def create_service(
+    db,
+    *,
+    team_id: Any,
+    name: str,
+    short_alias: str,
+    url: str,
+    health_path: str = "/",
+    target_repo: Optional[str] = None,
+    ingest_aliases: Optional[list[str]] = None,
+    log_service_name: Optional[str] = None,
+    app_id: Optional[str] = None,
+    created_by: str,
+    canonical_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    name = (name or "").strip()
+    short_alias = (short_alias or "").strip().lower()
+    url = (url or "").strip()
+    if not name or not short_alias or not url:
+        raise HTTPException(status_code=400, detail="name, short_alias, and url are required.")
+    if db["service_registry"].find_one({"short_alias": short_alias}):
+        raise HTTPException(status_code=409, detail=f"A service with alias '{short_alias}' is already registered.")
+
+    now = datetime.now(timezone.utc)
+    document = {
+        "team_id": team_id,
+        "service_name": name,
+        "canonical_key": canonical_key or _slugify_service_name(name),
+        "short_alias": short_alias,
+        "log_service_name": log_service_name or short_alias.upper(),
+        "ingest_aliases": sorted({a.strip().lower() for a in (ingest_aliases or []) if a and a.strip()}),
+        "url": url.rstrip("/"),
+        "health_path": health_path or "/",
+        "target_repo": target_repo,
+        "app_id": app_id,
+        "created_by": created_by,
+        "created_at": now,
     }
-]
-
-# Canonical service names mapped from known aliases. Middleware payloads arrive
-# with inconsistent names ("BTY", "btyapp", etc.); collapsing them keeps
-# incident cards merged and lets the service_registry resolve the right repo.
-SERVICE_NAME_ALIASES = {
-    "bty": "btyapp",
-    "bty-fitness": "btyapp",
-    "bty fitness": "btyapp",
-    "bty-fitness-app": "btyapp",
-    "saapp": "saapp-widget",
-    "saapp-widget": "saapp-widget",
-}
+    result = db["service_registry"].insert_one(document)
+    document["_id"] = result.inserted_id
+    load_service_registry(db, force=True)
+    return document
 
 
-def canonicalize_service_name(name: Any) -> str:
+def list_services_for_user(db, current_user: Dict[str, Any]) -> list[Dict[str, Any]]:
+    from backend.utils.team_utils import get_user_team_slugs, is_global_admin
+
+    if is_global_admin(current_user):
+        return list(db["service_registry"].find({}))
+    slugs = get_user_team_slugs(current_user)
+    if not slugs:
+        return []
+    team_ids = [team["_id"] for team in db["teams"].find({"slug": {"$in": slugs}})]
+    return list(db["service_registry"].find({"team_id": {"$in": team_ids}}))
+
+
+def canonicalize_service_name(name: Any, db=None) -> str:
     """Normalize a raw service name to a canonical registry key."""
     if not isinstance(name, str):
         return "unknown-service"
     cleaned = " ".join(name.strip().split()).lower()
     if not cleaned:
         return "unknown-service"
-    canonical = SERVICE_NAME_ALIASES.get(cleaned, cleaned)
-    logger.info("[ingest] service_name canonicalized: raw=%r -> canonical=%r", name, canonical)
-    return canonical
+
+    for service in load_service_registry(db):
+        candidates = {
+            str(service.get("canonical_key") or "").lower(),
+            str(service.get("service_name") or "").lower(),
+            str(service.get("short_alias") or "").lower(),
+            *(str(alias).lower() for alias in service.get("ingest_aliases") or []),
+        }
+        if cleaned in candidates:
+            canonical = service.get("canonical_key") or cleaned
+            logger.info("[ingest] service_name canonicalized: raw=%r -> canonical=%r", name, canonical)
+            return canonical
+
+    logger.info("[ingest] service_name canonicalized: raw=%r -> canonical=%r (no registry match)", name, cleaned)
+    return cleaned
 
 
 def serialize_mongo_doc(value: Any) -> Any:
@@ -174,6 +279,7 @@ def _store_incident_and_queue_analysis(
     payload: Dict[str, Any],
     actor: str,
     incident_id: str | None = None,
+    team_id: Any = None,
 ) -> str:
     now = datetime.now(timezone.utc)
     incident_id = incident_id or f"inc_{int(now.timestamp() * 1000)}_{uuid4().hex[:8]}"
@@ -193,8 +299,13 @@ def _store_incident_and_queue_analysis(
         logger.info("Skipping duplicate incident ingest. fingerprint=%s existing_id=%s", fingerprint, existing_id)
         return str(existing_id)
 
+    from backend.utils.team_utils import get_bootstrap_team_id
+
+    resolved_team_id = team_id if team_id is not None else get_bootstrap_team_id(db)
+
     incident_doc = {
         "_id": incident_id,
+        "team_id": resolved_team_id,
         "service_name": payload.get("service_name", "unknown-service"),
         "environment": payload.get("environment", "production"),
         "error_message": payload.get("error_message", "Unhandled Exception"),
@@ -261,12 +372,19 @@ def authenticate_ingest_client(db, incoming_secret: str | None, app_id: str | No
       "actor": str,
       "app_id": str | None,
       "default_repo": str | None,
+      "team_id": Any,
     }
 
     Behavior:
-    - If x-app-id is provided, validate against ingest_clients collection.
-    - If no x-app-id, fallback to legacy shared secret for backward compatibility.
+    - If x-app-id is provided, validate against ingest_clients collection. Its team_id is used
+      as-is (None if the client predates multi-tenancy Phase C — _store_incident_and_queue_analysis
+      falls back to the bootstrap team in that case).
+    - If no x-app-id, fallback to legacy shared secret for backward compatibility. This path has
+      no natural per-client owner, so it's explicitly attributed to the bootstrap team rather than
+      left unowned (see team_utils.get_bootstrap_team_id).
     """
+    from backend.utils.team_utils import get_bootstrap_team_id
+
     if not incoming_secret:
         raise HTTPException(status_code=401, detail="Missing ingest secret")
 
@@ -280,6 +398,7 @@ def authenticate_ingest_client(db, incoming_secret: str | None, app_id: str | No
             "actor": f"MACHINE_INGEST:{app_id}",
             "app_id": app_id,
             "default_repo": client.get("default_repo"),
+            "team_id": client.get("team_id") or get_bootstrap_team_id(db),
         }
 
     if not INGEST_WEBHOOK_SECRET:
@@ -293,6 +412,7 @@ def authenticate_ingest_client(db, incoming_secret: str | None, app_id: str | No
         "actor": "MACHINE_INGEST",
         "app_id": None,
         "default_repo": None,
+        "team_id": get_bootstrap_team_id(db),
     }
 
 
@@ -405,6 +525,7 @@ def ingest_machine_payload(
     incident_id: str | None = None,
     app_id: str | None = None,
     app_default_repo: str | None = None,
+    team_id: Any = None,
 ) -> str:
     normalized_payload = dict(payload)
     normalized_payload["service_name"] = canonicalize_service_name(
@@ -429,6 +550,7 @@ def ingest_machine_payload(
         normalized_payload,
         actor,
         incident_id=incident_id,
+        team_id=team_id,
     )
 
 def _upsert_remediation_failure(
@@ -907,8 +1029,14 @@ CRITICAL RETRY RULES:
         "created_at": now,
     })
 
+    # Remediations always inherit their parent incident's team_id rather than resolving
+    # independently, so the hotfix approve/merge endpoints can pick the right team's GitHub
+    # credential (github_service_factory.py) without drifting from the incident's own owner.
+    parent_incident = db["incidents"].find_one({"_id": incident_id}, {"team_id": 1}) or {}
+
     remediation_doc = {
         "incident_id": incident_id,
+        "team_id": parent_incident.get("team_id"),
         "status": "draft",
         "base_file_sha256": hashlib.sha256(existing_code.encode("utf-8")).hexdigest(),
         "base_file_bytes": len(existing_code.encode("utf-8")),
@@ -1120,10 +1248,13 @@ def run_ai_analysis_pipeline_local(incident_id: str, payload: dict) -> None:
 # ---------------------------------------------------------
 
 def run_service_health_checks() -> list[dict]:
+    """Checks every registered service across every team — this is a system background
+    process (the scheduled health-monitor loop), not a per-user request, so it legitimately
+    needs cross-team visibility, the same way Global_Admins bypasses team scoping elsewhere."""
     results = []
 
-    for svc in SERVICES:
-        full_url = svc["url"] + svc.get("health_path", "/")
+    for svc in load_service_registry():
+        full_url = svc["url"].rstrip("/") + svc.get("health_path", "/")
         start = time.perf_counter()
 
         try:
@@ -1148,7 +1279,7 @@ def run_service_health_checks() -> list[dict]:
                 details = {}
 
             results.append({
-                "service": svc["name"],
+                "service": svc["service_name"],
                 "url": full_url,
                 "status": status,
                 "latency_ms": latency_ms,
@@ -1158,7 +1289,7 @@ def run_service_health_checks() -> list[dict]:
 
         except Exception as e:
             results.append({
-                "service": svc["name"],
+                "service": svc["service_name"],
                 "url": full_url,
                 "status": "down",
                 "latency_ms": None,

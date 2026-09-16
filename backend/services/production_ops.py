@@ -3,13 +3,13 @@ import os
 from typing import Any
 
 from backend.services.log_broker import LogBroker
-from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
-
-
-_SERVICE_ALIASES = {
-    "bty": "BTY Fitness",
-    "saapp": "SAAPP Widget",
-}
+from backend.utils.app_utils import (
+    build_health_report,
+    get_service_by_alias,
+    load_service_registry,
+    run_service_health_checks,
+    serialize_mongo_doc,
+)
 
 
 def _deployment_metadata(alias: str) -> dict[str, str]:
@@ -23,10 +23,11 @@ def _deployment_metadata(alias: str) -> dict[str, str]:
 
 
 def _service_aliases(target: str) -> list[str]:
+    registered_aliases = [service["short_alias"] for service in load_service_registry()]
     if target == "all":
-        return list(_SERVICE_ALIASES)
-    if target not in _SERVICE_ALIASES:
-        raise ValueError("Usage: ops status [all|bty|saapp]")
+        return registered_aliases
+    if target not in registered_aliases:
+        raise ValueError("Usage: ops status [all|<registered-service-alias>]")
     return [target]
 
 
@@ -42,7 +43,7 @@ async def collect_production_status(target: str, db, broker: LogBroker) -> dict[
 
     services = []
     for alias in aliases:
-        service_name = _SERVICE_ALIASES[alias]
+        service_name = get_service_by_alias(alias)["service_name"]
         service_health = health_by_name.get(service_name, {"service": service_name, "status": "unknown"})
         service_incidents = [
             incident for incident in active_incidents

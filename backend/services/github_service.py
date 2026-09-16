@@ -22,8 +22,11 @@ github_network_retry = retry(
 )
 
 class GitHubOpsService:
-    def __init__(self):
-        self.token = os.getenv("GITHUB_TOKEN")
+    def __init__(self, token: str | None = None):
+        # token=None keeps the pre-multi-tenancy behavior (read the shared env var) for any
+        # call site not yet migrated to a per-team credential; see github_service_factory.py
+        # for the per-team constructor used by hotfix/PR/merge endpoints.
+        self.token = token if token is not None else os.getenv("GITHUB_TOKEN")
         self.headers = {
             "Accept": "application/vnd.github+json"
         }

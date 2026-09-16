@@ -61,7 +61,22 @@ class FakeDB:
         self.collections = {
             "patchy_proposals": FakeCollection(),
             "incidents": FakeCollection(),
+            "service_registry": FakeCollection(),
         }
+        # Every test in this file drives Patchy commands against "bty" — seed the equivalent
+        # of the old hardcoded SERVICES entry as a registered service (Phase B: service registry
+        # migration) so alias resolution (get_service_by_alias) has something to find.
+        self.collections["service_registry"].insert_one({
+            "_id": "svc_bty",
+            "team_id": "team_test",
+            "service_name": "BTY Fitness",
+            "canonical_key": "btyapp",
+            "short_alias": "bty",
+            "log_service_name": "BTY",
+            "ingest_aliases": ["bty", "bty-fitness", "bty fitness", "bty-fitness-app"],
+            "url": "https://btyapp.onrender.com",
+            "health_path": "/api/health",
+        })
 
     def __getitem__(self, name):
         return self.collections[name]

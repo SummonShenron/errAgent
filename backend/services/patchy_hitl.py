@@ -8,7 +8,7 @@ import json
 import uuid
 import requests
 from backend.services.synthetic_adapters import SyntheticAdapterError, get_synthetic_adapter
-from backend.utils.app_utils import SERVICES, serialize_mongo_doc
+from backend.utils.app_utils import get_service_by_alias, load_service_registry, serialize_mongo_doc
 from backend.patchy_browser_agent.attacks.admin_content import test_admin_content
 from backend.services.patchy_planner import (
     PatchyPlanError,
@@ -23,28 +23,35 @@ class PatchyProposalError(ValueError):
     pass
 
 
-_SERVICE_ALIASES = {
-    "bty": "BTY Fitness",
-    "saapp": "SAAPP Widget",
-}
-
 SYNTHETIC_ENDPOINT_MAP = {
     "/api/consultations": "consultations",
     "/api/bookings": "bookings",
 }
 
-def _service_by_alias(alias: str) -> dict[str, Any]:
-    service_name = _SERVICE_ALIASES.get(alias.lower())
-    if not service_name:
-        raise PatchyProposalError("Usage: probe [bty|saapp]")
-    service = next((item for item in SERVICES if item["name"] == service_name), None)
+def _service_by_alias(alias: str, db=None, current_user: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resolve a service alias, optionally gated by team membership.
+
+    current_user is only supplied at the direct console entry points (patchy_terminal.py's
+    probe/synthetic/verify/pentest command handlers, called from app.py's run_patchy_command,
+    which has the authenticated user on hand). Internal replay paths (plan-step re-execution)
+    omit it and are trusted, since the plan/proposal was already shown to an operator for
+    approval when it was first created.
+    """
+    service = get_service_by_alias(alias, db=db)
     if not service:
-        raise PatchyProposalError(f"Service is not registered: {service_name}")
+        raise PatchyProposalError("Usage: probe [bty|saapp]")
+    if current_user is not None:
+        from backend.utils.team_utils import user_can_access_team_id
+
+        if not user_can_access_team_id(db, current_user, service.get("team_id")):
+            raise PatchyProposalError(f"You are not a member of the team that owns '{alias}'.")
+    service = dict(service)
+    service.setdefault("name", service.get("service_name"))  # back-compat key for display strings below
     return service
 
 
-def create_probe_proposal(alias: str, actor: str, db) -> dict[str, Any]:
-    service = _service_by_alias(alias)
+def create_probe_proposal(alias: str, actor: str, db, current_user: dict[str, Any] | None = None) -> dict[str, Any]:
+    service = _service_by_alias(alias, db, current_user)
     now = datetime.now(timezone.utc)
     proposal_id = f"patchy_{uuid4().hex}"
     url = service["url"].rstrip("/") + service.get("health_path", "/")
@@ -60,6 +67,7 @@ def create_probe_proposal(alias: str, actor: str, db) -> dict[str, Any]:
             "timeoutSeconds": 15,
             "allowedStatusCodes": list(range(200, 500)),
         },
+        "team_id": service.get("team_id"),
         "created_by": actor,
         "created_at": now,
         "updated_at": now,
@@ -68,8 +76,8 @@ def create_probe_proposal(alias: str, actor: str, db) -> dict[str, Any]:
     return serialize_mongo_doc(document)
 
 
-def create_synthetic_proposal(alias: str, actor: str, db) -> dict[str, Any]:
-    service = _service_by_alias(alias)
+def create_synthetic_proposal(alias: str, actor: str, db, current_user: dict[str, Any] | None = None) -> dict[str, Any]:
+    service = _service_by_alias(alias, db, current_user)
     now = datetime.now(timezone.utc)
     proposal = {
         "_id": f"synthetic_{uuid4().hex}",
@@ -84,6 +92,7 @@ def create_synthetic_proposal(alias: str, actor: str, db) -> dict[str, Any]:
             "assertions": ["HTTP status is 2xx", "response completes within timeout"],
         },
         "serviceAlias": alias.lower(),
+        "team_id": service.get("team_id"),
         "created_by": actor,
         "created_at": now,
         "updated_at": now,
@@ -92,8 +101,8 @@ def create_synthetic_proposal(alias: str, actor: str, db) -> dict[str, Any]:
     return serialize_mongo_doc(proposal)
 
 
-def create_verification_workflow(alias: str, actor: str, db) -> dict[str, Any]:
-    service = _service_by_alias(alias)
+def create_verification_workflow(alias: str, actor: str, db, current_user: dict[str, Any] | None = None) -> dict[str, Any]:
+    service = _service_by_alias(alias, db, current_user)
     workflow_id = f"verify_{uuid4().hex}"
     proposal = create_probe_proposal(alias, actor, db)
     db["patchy_proposals"].update_one(
@@ -139,6 +148,7 @@ def _create_latency_proposal(previous: dict[str, Any], actor: str, db) -> dict[s
         },
         "workflow": workflow,
         "previousProposalId": previous["_id"],
+        "team_id": previous.get("team_id"),
         "created_by": actor,
         "created_at": now,
         "updated_at": now,
@@ -154,8 +164,12 @@ def get_proposal(db, proposal_id: str) -> dict[str, Any]:
     return proposal
 
 
-def list_proposals(db, limit: int = 20) -> list[dict[str, Any]]:
-    proposals = list(db["patchy_proposals"].find({}).sort("created_at", -1).limit(limit))
+def list_proposals(db, limit: int = 20, team_ids: list[Any] | None = None) -> list[dict[str, Any]]:
+    """team_ids=None means unscoped (Global_Admins, or internal/system callers); an empty list
+    would incorrectly return everything via an empty $in, so callers must check membership
+    first and only pass a non-empty list here."""
+    query = {"team_id": {"$in": team_ids}} if team_ids is not None else {}
+    proposals = list(db["patchy_proposals"].find(query).sort("created_at", -1).limit(limit))
     return serialize_mongo_doc(proposals)
 
 
@@ -382,9 +396,13 @@ async def approve_and_execute_pentest_sweep(
     # FINALIZE & INCIDENT INGESTION
     # ========================================================================
     # Automatically log any discovered vulnerabilities into MongoDB incidents
+    from backend.utils.team_utils import get_bootstrap_team_id
+
+    incident_team_id = proposal.get("team_id") or get_bootstrap_team_id(db)
     for vuln in vulnerabilities:
         incident_doc = {
             "_id": f"incident_{uuid4().hex}",
+            "team_id": incident_team_id,
             "service_name": proposal["action"]["serviceName"],
             "repository": resolve_repository(proposal["action"]["serviceName"]),
             "status": "open",
@@ -475,9 +493,12 @@ async def approve_and_execute_probe(
         raise PatchyProposalError("Policy rejected non-GET probe")
 
 
+    # Cross-team allowlist by design: this only answers "is this URL known to errAgent at
+    # all," not "does this caller own it" — the per-team authorization gate lives elsewhere
+    # (proposal-creation-time team membership checks), not here.
     registered_urls = {
         service["url"].rstrip("/") + service.get("health_path", "/")
-        for service in SERVICES
+        for service in load_service_registry(db)
     }
     url = action.get("url")
     if url not in registered_urls:
@@ -574,7 +595,7 @@ async def approve_and_execute_probe(
 
 
     service_alias = workflow["serviceAlias"]
-    service_name = _SERVICE_ALIASES[service_alias]
+    service_name = get_service_by_alias(service_alias, db)["service_name"]
     incidents = list(
         db["incidents"].find(
             {
@@ -750,10 +771,12 @@ async def _approve_and_execute_plan_step(db, proposal: dict[str, Any], actor: st
 
     return serialize_mongo_doc(db["patchy_proposals"].find_one({"_id": proposal["_id"]}))
 
-def create_pentest_sweep_proposal(alias: str, actor: str, db, target: str = "full") -> dict[str, Any]:
+def create_pentest_sweep_proposal(
+    alias: str, actor: str, db, target: str = "full", current_user: dict[str, Any] | None = None
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     proposal_id = f"pentest_{uuid4().hex}"
-    service = _service_by_alias(alias)
+    service = _service_by_alias(alias, db, current_user)
 
     # Synthetic-only is TRUE only for public sweeps
     synthetic_only = target in ("public",)
@@ -783,6 +806,7 @@ def create_pentest_sweep_proposal(alias: str, actor: str, db, target: str = "ful
             "assertions": [],
         },
 
+        "team_id": service.get("team_id"),
         "created_by": actor,
         "created_at": now,
         "updated_at": now,

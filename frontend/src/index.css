@@ -100,9 +100,9 @@ button {
 }
 
 .app-shell {
-	max-width: 1200px;
+	max-width: 100%;
 	margin: 0 auto;
-	padding: 28px 20px 32px;
+	padding: 28px 28px 32px;
 }
 
 .topbar {
@@ -246,8 +246,20 @@ button {
 
 .dashboard-grid {
 	display: grid;
-	grid-template-columns: 1fr 1.2fr;
+	grid-template-columns: minmax(240px, 0.85fr) minmax(260px, 1fr) minmax(300px, 1.15fr) minmax(340px, 1.35fr);
+	grid-template-rows: auto auto;
+	grid-template-areas:
+		"health  patchy  incidents details"
+		"console console incidents details";
 	gap: 18px;
+	margin-bottom: 1.5rem;
+}
+
+/* Incidents/Details span both rows and grow independently; the log console sits under
+   Health+Patchy so it never gets pushed down the page when Incidents/Details grow taller. */
+.inline-log-panel {
+	margin-top: 0;
+	min-height: 0;
 }
 
 .panel {
@@ -356,22 +368,22 @@ button {
     align-items: center !important;
   }
 
-  /* 5. Spread the 3 console buttons across a full-width row */
+  /* 5. Stack the console buttons one per row instead of cramming them into a grid/row */
   .topbar-actions {
-    display: flex !important;
-    flex-direction: row !important;
+    display: grid !important;
+    grid-template-columns: 1fr !important;
     width: 100% !important;
-    gap: 6px !important;
+    gap: 8px !important;
   }
 
-  /* 6. Equal-width 3D console buttons */
+  /* 6. Equal-size 3D console buttons */
   .console-launch {
-    flex: 1 1 0% !important;
+    width: 100% !important;
     min-width: 0 !important;
     justify-content: center !important;
     text-align: center !important;
-    padding: 8px 4px !important;
-    font-size: 0.65rem !important;
+    padding: 10px 6px !important;
+    font-size: 0.75rem !important;
     white-space: nowrap !important;
   }
 }
@@ -717,9 +729,27 @@ button {
 	color: #93a5be;
 }
 
+@media (max-width: 1400px) {
+	.dashboard-grid {
+		grid-template-columns: 1fr 1fr;
+		grid-template-rows: auto auto auto;
+		grid-template-areas:
+			"health  patchy"
+			"console console"
+			"incidents details";
+	}
+}
+
 @media (max-width: 900px) {
 	.dashboard-grid {
 		grid-template-columns: 1fr;
+		grid-template-rows: auto auto auto auto auto;
+		grid-template-areas:
+			"health"
+			"patchy"
+			"console"
+			"incidents"
+			"details";
 	}
 
 	.detail-grid {
@@ -1056,23 +1086,11 @@ button {
   margin-bottom: 12px;
 }
 
-.health-actions button {
-  position: relative;
-  overflow: hidden; /* Clips bottom gradient bar to button's border-radius */
-  padding: 10px 18px 14px 18px; /* Slightly more bottom padding to account for the lip */
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 8px;
-  color: #e2e8f0;
-  font-family: inherit;
-  font-weight: 600;
-  cursor: pointer;
-  transition: transform 0.1s ease, background-color 0.15s ease;
-}
-
 /* 3D Gradient Bottom Lip */
 .health-actions button {
   position: relative;
+  overflow: hidden;
+  font-family: inherit;
   /* Gradient background applied to the button body */
   background: linear-gradient(135deg, #1d4ed8, #0ea5e9);
   color: #ffffff;
@@ -1081,7 +1099,6 @@ button {
   border-radius: 24px;
   padding: 10px 18px 14px 18px;
   cursor: pointer;
-  
   /* Inset shadow darkens the bottom edge of the gradient for 3D depth */
   box-shadow: inset 0 -4px 0 0 rgba(0, 0, 0, 0.35);
   transition: transform 0.1s ease, box-shadow 0.1s ease, filter 0.15s ease;
@@ -1314,7 +1331,7 @@ button {
 	z-index: 3000;
 	display: grid;
 	place-items: center;
-	padding: 24px;
+	padding: 0;
 	background: rgba(1, 4, 13, 0.82);
 	backdrop-filter: blur(6px);
 }
@@ -1322,11 +1339,11 @@ button {
 .live-console {
 	display: grid;
 	grid-template-rows: auto auto minmax(280px, 1fr) auto;
-	width: min(1100px, 100%);
-	height: min(760px, calc(100vh - 48px));
+	width: 100%;
+	height: 100dvh;
 	min-height: 0;
-	border: 1px solid #26364a;
-	border-radius: 8px;
+	border: 0;
+	border-radius: 0;
 	background: #050912;
 	box-shadow: 0 28px 80px rgba(0, 0, 0, 0.65);
 	overflow: hidden;
@@ -1362,10 +1379,11 @@ button {
 }
 
 .console-icon-button:hover {
-	border-bottom: 6px solid #34506f;
+	border-bottom: 6px solid #38bdf8;
+	border-color: #38bdf8;
 }
 .console-icon-button:active {
-	border-bottom: 1px solid #34506f;
+	border-bottom: 1px solid #38bdf8;
 }
 
 .console-retry-button {
@@ -1507,8 +1525,14 @@ button {
 	background: #02050b;
 	font-family: Consolas, "Courier New", monospace;
 	font-size: 0.82rem;
+	border-bottom: 4px solid #1d2938;
 }
 
+.console-viewport:hover {
+	border-bottom: 8px solid #34506f;
+	transition: transform all 0.3s ease;
+	transform: translateY(-4px);
+}
 .console-empty {
 	display: grid;
 	place-items: center;
@@ -1556,12 +1580,161 @@ button {
 	background: #09111d;
 	color: #64748b;
 	font-size: 0.72rem;
+	transition: transform all 0.3s ease;
+	border-bottom: 4px solid #1d2938;
+}
+.console-footer:hover {
+	transform: translateY(-4px);
+	border-top: 8px solid #34506f;
 }
 
 .patchy-terminal {
 	grid-template-rows: auto minmax(360px, 1fr) auto;
-	width: min(1120px, 100%);
-	height: min(760px, calc(100vh - 48px));
+	width: 100%;
+	height: 100dvh;
+	border: 0;
+	border-radius: 0;
+}
+
+.live-console-embedded {
+	grid-template-rows: auto auto minmax(0, 1fr) auto;
+	width: 100%;
+	height: 420px;
+	align-self: start;
+	border: 1px solid #1d2a3f;
+	border-radius: 14px;
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.1),
+		0 8px 0 0 #0d162b,
+		0 10px 15px rgba(0, 0, 0, 0.4);
+		transition: transform all 0.3s ease;
+}
+.live-console-embedded:hover {
+	transform: translateY(-4px);
+	border-bottom: 8px solid #2563eb !important;
+	border: 1px solid #2563eb;
+	transition: transform all 0.3s ease;
+}
+
+.team-settings-body {
+	padding: 16px;
+	font-family: inherit;
+	font-size: 0.85rem;
+	display: flex;
+	flex-direction: column;
+	gap: 20px;
+}
+
+.team-settings-section h3 {
+	margin: 0 0 6px;
+	font-size: 0.78rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: #93a4c3;
+}
+
+.team-settings-status {
+	margin: 0 0 10px;
+	color: #cbd5e1;
+}
+
+.team-settings-hint {
+	margin: 0;
+	color: #64748b;
+	font-size: 0.8rem;
+}
+
+.team-settings-notice {
+	padding: 8px 12px;
+	border-radius: 6px;
+	background: rgba(37, 99, 235, 0.12);
+	border: 1px solid #233045;
+	color: #93c5fd;
+	font-size: 0.8rem;
+}
+
+.team-settings-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.team-settings-input {
+	width: 220px;
+	max-width: 100%;
+	flex: 0 1 auto;
+	padding: 6px 10px;
+	font-size: 0.85rem;
+	border-bottom: 4px solid #1d2938 !important;
+	transition: transform all 0.3s ease;
+	border-radius: 8px;
+	background: radial-gradient(circle at 22% 8%, #131c2e 0%, #070d1b 38%, #02050c 100%);
+	color: white; 
+}
+.team-settings-input:hover {
+	transform: translateY(-8px);
+	border: 1px solid #38bdf8;
+	border-bottom: 8px solid #38bdf8 !important;
+	transition: transform all 0.3s ease;
+}
+
+.team-settings-input:active {
+	transform: translateY(-4px);
+	border-bottom: 1px solid #38bdf8 !important;
+	transition: transform all 0.3s ease;
+}
+.team-settings-input:focus {
+	outline: none;
+}
+
+.team-settings-member-list {
+	list-style: none;
+	margin: 0 0 12px;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.team-settings-member-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 10px;
+	border: 1px solid #1d2938;
+	border-radius: 6px;
+	background: #060b14;
+}
+
+.team-settings-member-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: #e2e8f0;
+}
+
+.team-settings-role-badge {
+	font-size: 0.68rem;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	padding: 2px 8px;
+	border-radius: 999px;
+	border: 1px solid #253247;
+	color: #94a3b8;
+}
+
+.team-settings-role-manager {
+	color: #facc15;
+	border-color: rgba(250, 204, 21, 0.4);
+	background: rgba(250, 204, 21, 0.08);
+}
+
+.team-settings-member-actions {
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
 }
 
 .incident-guide-backdrop { z-index: 20; }
@@ -2178,7 +2351,6 @@ button {
 .patchy-terminal-quick button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 @media (max-width: 760px) {
-	.topbar-actions { align-items: flex-end; flex-direction: column-reverse; }
 	.console-backdrop { padding: 0; }
 	.live-console { width: 100%; height: 100dvh; border: 0; border-radius: 0; }
 	.console-toolbar { grid-template-columns: 1fr 1fr; align-items: end; }
@@ -2189,6 +2361,17 @@ button {
 	.patchy-terminal-mascot { flex-direction: row; border-right: 0; border-bottom: 1px solid #1d2938; }
 	.patchy-terminal-bot { width: 72px; height: 72px; }
 	.patchy-approval-panel { grid-template-columns: 1fr; align-items: stretch; }
+
+	/* The embedded dashboard log panel keeps its own rounded/bordered card look (unlike the
+	   full-screen modal consoles above) but needs a shorter, narrower-friendly layout on mobile. */
+	.live-console-embedded {
+		height: 320px;
+		border-radius: 10px;
+	}
+	.live-console-embedded .console-header { padding: 10px 12px; }
+	.live-console-embedded .console-header h2 { font-size: 1rem; }
+	.live-console-embedded .console-toolbar { padding: 8px 10px; }
+	.live-console-embedded .console-line { grid-template-columns: 56px 40px minmax(0, 1fr); gap: 6px; padding: 6px 8px; font-size: 0.75rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -23,7 +23,7 @@ from backend.services.synthetic_adapters import SyntheticAdapterError, create_qu
 from backend.services.patchy_flow_runner import PatchyFlowError, create_email_validation_proposal, create_flow_plan, create_flow_proposal, create_leakage_validation_proposal, create_validation_proposal, list_flow_plans
 from backend.services.analyze_test_failure import analyze_test_failure
 from backend.services.patchy_discovery import discover_endpoints_command
-from backend.utils.app_utils import SERVICES, build_health_report, run_service_health_checks, serialize_mongo_doc
+from backend.utils.app_utils import build_health_report, get_service_by_alias, run_service_health_checks, serialize_mongo_doc
 from backend.services.log_broker import LogEventInput
 
 COMMAND_HELP = (
@@ -65,16 +65,11 @@ COMMAND_HELP = (
     ("clear", "Clear the terminal screen locally"),
 )
 
-_SERVICE_ALIASES = {
-    "bty": "BTY Fitness",
-    "saapp": "SAAPP Widget",
-}
-
-_LOG_SERVICE_ALIASES = {
-    "bty": "BTY",
-    "saapp": "SAAPP",
-    "erragent": "errAgent",
-}
+# errAgent monitors itself; it's not a registered target service, so it stays a hardcoded
+# alias rather than living in the service_registry. Every other alias resolves dynamically via
+# get_service_by_alias() against the DB-backed registry (see app_utils.py, Phase B).
+_ERRAGENT_LOG_ALIAS = "erragent"
+_ERRAGENT_LOG_SERVICE_NAME = "errAgent"
 
 
 
@@ -233,13 +228,13 @@ def _parse_compact_flow_actions(tokens: list[str]) -> list[dict[str, Any]]:
     return actions
 
 
-async def _run_health(target: str) -> dict[str, Any]:
+async def _run_health(target: str, db=None) -> dict[str, Any]:
     results = await asyncio.to_thread(run_service_health_checks)
     if target != "all":
-        service_name = _SERVICE_ALIASES.get(target)
-        if not service_name:
-            raise PatchyCommandError("Usage: health [all|bty|saapp]")
-        results = [result for result in results if result.get("service") == service_name]
+        service = get_service_by_alias(target, db=db)
+        if not service:
+            raise PatchyCommandError("Usage: health [all|<registered-service-alias>]")
+        results = [result for result in results if result.get("service") == service["service_name"]]
 
     report = build_health_report(results)
     lines = [
@@ -257,12 +252,18 @@ async def _run_health(target: str) -> dict[str, Any]:
 async def _run_logs(broker: LogBroker, args: list[str]) -> dict[str, Any]:
     service_arg = args[0].lower() if args else "all"
     level = args[1].lower() if len(args) > 1 else None
-    if service_arg not in {"all", *_LOG_SERVICE_ALIASES.keys()}:
-        raise PatchyCommandError("Usage: logs [all|bty|saapp|erragent] [info|warn|error]")
     if level not in {None, "info", "warn", "error"}:
         raise PatchyCommandError("Log level must be info, warn, or error")
 
-    service = None if service_arg == "all" else _LOG_SERVICE_ALIASES[service_arg]
+    if service_arg == "all":
+        service = None
+    elif service_arg == _ERRAGENT_LOG_ALIAS:
+        service = _ERRAGENT_LOG_SERVICE_NAME
+    else:
+        matched = get_service_by_alias(service_arg)
+        if not matched:
+            raise PatchyCommandError("Usage: logs [all|erragent|<registered-service-alias>] [info|warn|error]")
+        service = matched.get("log_service_name") or matched["service_name"]
     entries = await broker.get_history(service=service, level=level, limit=50)
     lines = [
         f"{entry['timestamp']} [{entry['level'].upper()}] {entry['service']}: {entry['message'].splitlines()[0]}"
@@ -353,7 +354,13 @@ async def execute_patchy_command(
     db,
     broker: LogBroker,
     actor: str = "operator",
+    current_user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """current_user is only passed at the top-level console call (app.py's run_patchy_command);
+    it gates the direct proposal-creating commands (probe/synthetic/verify/pentest) by team
+    membership. Internal recursion (guide/next/investigate replaying a plan step's command)
+    omits it deliberately — that proposal was already created and shown to an operator for
+    approval, so re-checking membership there is redundant, not a bypass."""
     try:
         parts = shlex.split(command_text.strip())
     except ValueError as exc:
@@ -1016,7 +1023,10 @@ async def execute_patchy_command(
             )
         if len(args) != 1:
             raise PatchyCommandError("Usage: probe [bty|saapp]")
-        proposal = create_probe_proposal(args[0], actor, db)
+        try:
+            proposal = create_probe_proposal(args[0], actor, db, current_user=current_user)
+        except PatchyProposalError as exc:
+            raise PatchyCommandError(str(exc)) from exc
         action = proposal["action"]
         return _response(
             "approval_required",
@@ -1065,7 +1075,7 @@ async def execute_patchy_command(
         if len(args) != 1:
             raise PatchyCommandError("Usage: synthetic [bty|saapp] or synthetic ask sonic <question> [--production-read-only]")
         try:
-            proposal = create_synthetic_proposal(args[0], actor, db)
+            proposal = create_synthetic_proposal(args[0], actor, db, current_user=current_user)
         except PatchyProposalError as exc:
             raise PatchyCommandError(str(exc)) from exc
         action = proposal["action"]
@@ -1085,7 +1095,10 @@ async def execute_patchy_command(
     if command == "verify":
         if len(args) != 1:
             raise PatchyCommandError("Usage: verify [bty|saapp]")
-        proposal = create_verification_workflow(args[0], actor, db)
+        try:
+            proposal = create_verification_workflow(args[0], actor, db, current_user=current_user)
+        except PatchyProposalError as exc:
+            raise PatchyCommandError(str(exc)) from exc
         action = proposal["action"]
         return _response(
             "approval_required",
@@ -1190,7 +1203,7 @@ async def execute_patchy_command(
         target = args[2].lower() if len(args) >= 3 else "full"
 
         try:
-            proposal = create_pentest_sweep_proposal(alias, actor, db, target)
+            proposal = create_pentest_sweep_proposal(alias, actor, db, target, current_user=current_user)
         except PatchyProposalError as exc:
             raise PatchyCommandError(str(exc)) from exc
 

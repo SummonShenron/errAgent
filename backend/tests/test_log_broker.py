@@ -28,9 +28,20 @@ def test_erragent_self_monitor_records_and_deduplicates(monkeypatch):
         def insert_one(self, document):
             self.documents.append(document)
 
+        def find(self, query, **_kwargs):
+            return list(self.documents)
+
     class DB:
         def __init__(self):
-            self.collections = {"incidents": Collection(), "audit_logs": Collection()}
+            self.collections = {
+                "incidents": Collection(),
+                "audit_logs": Collection(),
+                "service_registry": Collection(),
+                "teams": Collection(),
+            }
+            # Bootstrap team, so _record_erragent_exception's team_id stamping (multi-tenancy
+            # Phase C) has a fallback owner to resolve, same as the real seeded database.
+            self.collections["teams"].insert_one({"_id": "team_test", "slug": "core"})
 
         def __getitem__(self, name):
             return self.collections[name]
@@ -274,33 +285,18 @@ def test_error_log_creates_incident_but_info_and_warning_do_not(monkeypatch):
     assert incident["metadata"]["node"] == "reasoner"
 
 
-def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
+def test_workflow_tagged_log_is_persisted_for_replay_eligibility(monkeypatch):
+    # The replay-back feature (GET/POST /api/v1/replay, /api/v1/replay/runs) was removed —
+    # it queried the logs collection with no team scoping, so any signed-in user could read
+    # another team's captured workflow internals. This test now only covers what remains:
+    # /api/v1/logs still persists workflow/request/node-tagged log events (that persistence is
+    # independently useful, e.g. for future team-scoped tooling), it just no longer exposes a
+    # way to read them back via a dedicated replay endpoint.
     stored_logs = []
-
-    class FakeCursor(list):
-        def sort(self, *_args):
-            return self
-
-        def limit(self, count):
-            return FakeCursor(self[:count])
 
     class FakeCollection:
         def insert_one(self, document):
             stored_logs.append(document)
-
-        def find(self, query, *_args):
-            requested_id = query["context.requestId"]
-            matches = [
-                document
-                for document in stored_logs
-                if document["context"].get("workflowName") == query["context.workflowName"]
-                and (
-                    isinstance(requested_id, dict)
-                    and bool(document["context"].get("requestId"))
-                    or document["context"].get("requestId") == requested_id
-                )
-            ]
-            return FakeCursor(matches)
 
     class FakeDB:
         def __getitem__(self, _name):
@@ -310,7 +306,7 @@ def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
     monkeypatch.setattr(
         app_module,
         "authenticate_ingest_client",
-        lambda *_args: {"actor": "MACHINE_INGEST", "app_id": None, "default_repo": None},
+        lambda *_args: {"actor": "MACHINE_INGEST", "app_id": None, "default_repo": None, "team_id": None},
     )
     app_module.app.dependency_overrides[app_module.get_current_user] = lambda: {"sub": "operator"}
     client = TestClient(app_module.app)
@@ -334,32 +330,6 @@ def test_replay_tagged_log_is_persisted_and_replayed(monkeypatch):
         )
         assert ingest_response.status_code == 202
         assert ingest_response.json()["persistedReplayEvents"] == 1
-
-        replay_response = client.post(
-            "/api/v1/replay",
-            json={"workflowName": "sonic_assistant", "requestId": "req_test_123"},
-        )
-        assert replay_response.status_code == 200
-        assert replay_response.json()["timeline"][0]["node"] == "retriever"
-        assert replay_response.json()["timeline"][0]["output"] == {"documents": 3}
-
-        get_replay_response = client.get(
-            "/api/v1/replay",
-            params={"workflowName": "sonic_assistant", "requestId": "req_test_123"},
-        )
-        assert get_replay_response.status_code == 200
-        assert get_replay_response.json()["timeline"] == replay_response.json()["timeline"]
-
-        runs_response = client.get(
-            "/api/v1/replay/runs",
-            params={"workflowName": "sonic_assistant"},
-        )
-        assert runs_response.status_code == 200
-        runs = runs_response.json()["runs"]
-        assert len(runs) == 1
-        assert runs[0]["requestId"] == "req_test_123"
-        assert runs[0]["nodeName"] == "retriever"
-        assert runs[0]["nodeCount"] == 1
-        assert isinstance(runs[0]["latestTimestamp"], str)
+        assert stored_logs[0]["context"]["node"] == "retriever"
     finally:
         app_module.app.dependency_overrides.clear()

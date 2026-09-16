@@ -1,4 +1,5 @@
 import os
+import base64
 import hmac
 import json
 import hashlib
@@ -20,10 +21,13 @@ from backend.schemas.ingest_schemas import MachineIncidentIngest
 # Utility imports from your backend/utils directory
 from backend.utils.db_utils import get_db
 from backend.utils.app_utils import (
-    SERVICES,
     build_health_report,
     build_incident_fingerprint,
     canonicalize_service_name,
+    create_service,
+    get_service_by_alias,
+    list_services_for_user,
+    load_service_registry,
     require_sentry_secret,
     resolve_commit_file_content,
     run_ai_analysis_pipeline,
@@ -36,6 +40,7 @@ from backend.utils.app_utils import (
 )
 from backend.utils.isolation_auth import decode_access_token, get_current_user
 from backend.services.github_service import GitHubOpsService
+from backend.services.github_service_factory import get_github_service_for_team
 from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
 from backend.services.patchy_terminal import PatchyCommandError, _guided_test_flow, execute_patchy_command
 from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_proposal, list_proposals
@@ -45,6 +50,22 @@ from backend.services.patchy_test_generator import PatchyGeneratedTestError, app
 from backend.services.patchy_flow_runner import execute_flow, execute_validation_audit
 from backend.services.circuit_architect import CircuitArchitectRequest, CircuitArchitectResponse, create_circuit_architect_response
 from backend.middleware.rbac import require_role
+from backend.utils.team_utils import (
+    add_team_member,
+    clear_team_github_pat,
+    create_team,
+    get_bootstrap_team_id,
+    get_user_team_ids,
+    get_user_team_slugs,
+    is_global_admin,
+    is_team_manager,
+    list_team_members,
+    list_teams_for_user,
+    remove_team_member,
+    set_team_github_pat,
+    set_team_member_role,
+    user_can_access_team_id,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ErrAgent Logger")
@@ -64,6 +85,50 @@ INCIDENT_DEDUPE_WINDOW_SECONDS = int(os.getenv("INCIDENT_DEDUPE_WINDOW_SECONDS",
 HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "300"))
 HEALTH_SNAPSHOT_RETENTION_DAYS = int(os.getenv("HEALTH_SNAPSHOT_RETENTION_DAYS", "14"))
 LAST_ALERTED_DOWN_SERVICES: set[str] = set()
+
+# --- SSE event-stream tickets (multi-tenancy Phase C) ---
+# The browser's native EventSource API can't send an Authorization header, so /api/v1/events
+# can't be gated with the usual Depends(get_current_user). Instead the frontend fetches a
+# short-TTL signed ticket (Bearer-authenticated, via /api/v1/events/ticket) encoding the
+# caller's team scope, then opens EventSource(.../events?ticket=...). The ticket is
+# HMAC-signed and time-boxed (not database-tracked single-use — a replay within the ~60s
+# window is a minor residual risk, mitigated by the short TTL and HTTPS transport already
+# required in production).
+EVENTS_TICKET_SECRET = os.getenv("EVENTS_TICKET_SECRET") or INGEST_WEBHOOK_SECRET or ""
+EVENTS_TICKET_TTL_SECONDS = 60
+
+
+def _mint_events_ticket(db, current_user: dict) -> str:
+    if not EVENTS_TICKET_SECRET:
+        raise HTTPException(status_code=503, detail="Event stream ticketing is not configured.")
+    team_ids: list[str] | None
+    if is_global_admin(current_user):
+        team_ids = None  # None == unscoped
+    else:
+        team_ids = [str(tid) for tid in get_user_team_ids(db, current_user)]
+    payload = {
+        "team_ids": team_ids,
+        "exp": int(datetime.now(timezone.utc).timestamp()) + EVENTS_TICKET_TTL_SECONDS,
+    }
+    raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+    signature = hmac.new(EVENTS_TICKET_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    return f"{raw}.{signature}"
+
+
+def _validate_events_ticket(ticket: str | None) -> dict[str, Any] | None:
+    if not EVENTS_TICKET_SECRET or not ticket or "." not in ticket:
+        return None
+    raw, _, signature = ticket.rpartition(".")
+    expected_signature = hmac.new(EVENTS_TICKET_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("exp", 0) < datetime.now(timezone.utc).timestamp():
+        return None
+    return payload
 
 
 def _record_erragent_exception(
@@ -105,7 +170,8 @@ def _record_erragent_exception(
     incident_id = f"self_{int(now.timestamp() * 1000)}_{uuid4().hex[:8]}"
     incident_doc = {
         "_id": incident_id,
-        "service_name": canonicalize_service_name("errAgent"),
+        "team_id": get_bootstrap_team_id(db),
+        "service_name": canonicalize_service_name("errAgent", db=db),
         "environment": payload["environment"],
         "error_message": payload["error_message"],
         "stack_trace": stack_trace,
@@ -359,18 +425,17 @@ def health_check():
 @app.post("/api/v1/health/check")
 def manual_health_check(payload: dict = Body(...)):
     logger.info("Received payload: %s", payload)
+    db = get_db()
 
     service_name = payload.get("service")
     logger.info("Service name: %s", service_name)
-
-    logger.info("SERVICES registry: %s", SERVICES)
 
     if service_name == "all":
         results = run_service_health_checks()
         return {"results": results}
 
     # single service
-    svc = next((s for s in SERVICES if s["name"] == service_name), None)
+    svc = next((s for s in load_service_registry(db) if s["service_name"] == service_name), None)
     if not svc:
         raise HTTPException(status_code=404, detail="Service not found")
 
@@ -389,7 +454,7 @@ def full_health_check():
     report = build_health_report(results)
 
     # store snapshot in Mongo
-    if db:
+    if db is not None:
         db["health_snapshots"].insert_one({
             "timestamp": datetime.now(timezone.utc),
             "overall_status": report["overall_status"],
@@ -412,9 +477,9 @@ def list_services():
                     latest_status_by_service[service["service"]] = service
 
     services_payload = []
-    for svc in SERVICES:
-        entry = dict(svc)
-        last_status = latest_status_by_service.get(svc["name"], {})
+    for svc in load_service_registry(db):
+        entry = serialize_mongo_doc(dict(svc))
+        last_status = latest_status_by_service.get(svc["service_name"], {})
         last_ts = latest_snapshot.get("timestamp") if isinstance(latest_snapshot, dict) else None
         entry["status"] = last_status.get("status", "unknown")
         entry["latency_ms"] = last_status.get("latency_ms")
@@ -424,21 +489,40 @@ def list_services():
 
     return {"services": services_payload}
 
+@app.get("/api/v1/events/ticket")
+async def mint_events_ticket(current_user: dict = Depends(get_current_user)):
+    """Bearer-authenticated: mints a short-TTL signed ticket encoding the caller's team scope,
+    since EventSource (used by GET /api/v1/events below) can't send an Authorization header."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    return {"ticket": _mint_events_ticket(db, current_user), "expiresInSeconds": EVENTS_TICKET_TTL_SECONDS}
+
+
 @app.get("/api/v1/events")
-async def incident_events():
+async def incident_events(ticket: str | None = Query(default=None)):
+    ticket_payload = _validate_events_ticket(ticket)
+    if ticket_payload is None:
+        raise HTTPException(status_code=401, detail="Missing or expired event stream ticket. Fetch one from /api/v1/events/ticket.")
+    scoped_team_ids = ticket_payload.get("team_ids")  # None == unscoped (Global_Admins)
+
     def incident_signature() -> str:
         db = get_db()
         if db is None:
             return "database-unavailable"
 
+        query: dict[str, Any] = {}
+        if scoped_team_ids is not None:
+            query = {"team_id": {"$in": [ObjectId(tid) if ObjectId.is_valid(tid) else tid for tid in scoped_team_ids]}}
+
         latest = db["incidents"].find_one(
-            {},
+            query,
             {"_id": 1, "status": 1, "updated_at": 1, "created_at": 1},
             sort=[("updated_at", -1), ("created_at", -1)],
         ) or {}
         return json.dumps(
             {
-                "count": db["incidents"].count_documents({}),
+                "count": db["incidents"].count_documents(query),
                 "id": str(latest.get("_id", "")),
                 "status": latest.get("status", ""),
                 "updated": str(latest.get("updated_at") or latest.get("created_at") or ""),
@@ -483,7 +567,7 @@ async def run_patchy_command(
 
     try:
         actor = current_user.get("username") or current_user.get("sub") or "operator"
-        return await execute_patchy_command(payload.command, db, log_broker, actor=actor)
+        return await execute_patchy_command(payload.command, db, log_broker, actor=actor, current_user=current_user)
     except PatchyCommandError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -497,7 +581,12 @@ async def get_patchy_proposals(current_user: dict = Depends(get_current_user)):
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
-    return {"proposals": list_proposals(db)}
+    if is_global_admin(current_user):
+        return {"proposals": list_proposals(db)}
+    team_ids = get_user_team_ids(db, current_user)
+    if not team_ids:
+        return {"proposals": []}
+    return {"proposals": list_proposals(db, team_ids=team_ids)}
 
 
 async def _run_test_guide_until_handoff(db, actor: str, incident_id: str) -> dict[str, Any]:
@@ -768,6 +857,7 @@ async def ingest_logs(
                     ingest_context["actor"],
                     app_id=ingest_context.get("app_id"),
                     app_default_repo=ingest_context.get("default_repo"),
+                    team_id=ingest_context.get("team_id"),
                 )
             )
 
@@ -815,6 +905,7 @@ async def ingest_client_error(
         ingest_context["actor"],
         app_id=ingest_context.get("app_id"),
         app_default_repo=ingest_context.get("default_repo"),
+        team_id=ingest_context.get("team_id"),
     )
     return {"status": "accepted", "incident_id": incident_id}
 
@@ -853,57 +944,6 @@ async def live_logs(
     finally:
         await log_broker.unsubscribe(queue)
 
-# --- REPLAY ENDPOINT ---
-@app.post("/api/v1/replay", tags=["Replay"])
-async def replay_workflow(
-    payload: dict = Body(...),
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Replays a workflow execution using logged node inputs.
-    Required fields:
-      - workflowName
-      - requestId
-    """
-    db = get_db()
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection unavailable.")
-
-    workflow_name = payload.get("workflowName")
-    request_id = payload.get("requestId")
-
-    if not workflow_name or not request_id:
-        raise HTTPException(status_code=400, detail="workflowName and requestId are required")
-
-    # 1. Fetch logs for this workflow run
-    logs = list(
-        db["logs"].find({
-            "context.workflowName": workflow_name,
-            "context.requestId": request_id
-        }).sort("timestamp", 1)
-    )
-
-    if not logs:
-        raise HTTPException(status_code=404, detail="No logs found for this workflow run")
-
-    # 2. Build replay timeline
-    timeline = []
-    for entry in logs:
-        ctx = entry.get("context", {})
-        timeline.append({
-            "node": ctx.get("node") or "unknown-node",
-            "input": ctx.get("input") if isinstance(ctx.get("input"), dict) else {},
-            "output": ctx.get("output") if isinstance(ctx.get("output"), dict) else {},
-            "timestamp": entry.get("timestamp")
-        })
-
-    # 3. Return replay timeline
-    return {
-        "workflowName": workflow_name,
-        "requestId": request_id,
-        "timeline": timeline
-    }
-
 # --- SAAPP Integration Endpoints ---
 @app.get("/ops/context")
 async def get_ops_context():
@@ -916,97 +956,218 @@ async def get_ops_context():
         "riskScore": 0.0
     }
 
-@app.get("/api/v1/replay", tags=["Replay"])
-async def get_replay(
-    workflowName: str = Query(..., min_length=1),
-    requestId: str = Query(..., min_length=1),
+# --- TEAMS (multi-tenancy foundation; Phase A, manager tier + GitHub credential; Phase C/D) ---
+class CreateTeamRequest(BaseModel):
+    name: str
+    slug: str
+
+
+class AddTeamMemberRequest(BaseModel):
+    clerk_id: str | None = None
+    email: str | None = None
+    role: str = "member"
+
+
+class SetMemberRoleRequest(BaseModel):
+    role: str
+
+
+class SetGithubCredentialRequest(BaseModel):
+    pat: str
+
+
+def _require_team_manager_or_admin(current_user: dict, slug: str) -> None:
+    if not is_team_manager(current_user, slug):
+        raise HTTPException(status_code=403, detail=f"You must be a manager of team '{slug}' to do that.")
+
+
+@app.post("/api/v1/admin/teams", tags=["Teams"])
+async def create_team_route(
+    payload: CreateTeamRequest,
+    current_user: dict = Depends(require_role("Global_Admins")),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    return create_team(
+        db, name=payload.name, slug=payload.slug, created_by=actor, creator_clerk_id=current_user.get("sub")
+    )
+
+
+@app.post("/api/v1/admin/teams/{slug}/members", tags=["Teams"])
+async def add_team_member_route(
+    slug: str,
+    payload: AddTeamMemberRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Retrieves a persisted workflow timeline using query parameters."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    _require_team_manager_or_admin(current_user, slug)
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    return add_team_member(
+        db, slug=slug, target_clerk_id=payload.clerk_id, target_email=payload.email,
+        added_by=actor, role=payload.role,
+    )
+
+
+@app.put("/api/v1/admin/teams/{slug}/members/{clerk_id}", tags=["Teams"])
+async def set_team_member_role_route(
+    slug: str,
+    clerk_id: str,
+    payload: SetMemberRoleRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    _require_team_manager_or_admin(current_user, slug)
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    return set_team_member_role(
+        db, slug=slug, target_clerk_id=clerk_id, target_email=None, role=payload.role, updated_by=actor
+    )
+
+
+@app.delete("/api/v1/admin/teams/{slug}/members/{clerk_id}", tags=["Teams"])
+async def remove_team_member_route(
+    slug: str,
+    clerk_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    _require_team_manager_or_admin(current_user, slug)
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    return remove_team_member(db, slug=slug, target_clerk_id=clerk_id, target_email=None, removed_by=actor)
+
+
+@app.get("/api/v1/admin/teams/{slug}/members", tags=["Teams"])
+async def list_team_members_route(slug: str, current_user: dict = Depends(get_current_user)):
+    """Any member of the team (not just managers) can see the roster; non-members get 403."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    if not is_global_admin(current_user) and slug not in get_user_team_slugs(current_user):
+        raise HTTPException(status_code=403, detail=f"You are not a member of team '{slug}'.")
+    return {"members": list_team_members(db, slug)}
+
+
+@app.get("/api/v1/admin/teams", tags=["Teams"])
+async def list_teams_route(current_user: dict = Depends(get_current_user)):
+    """Global_Admins sees every team; everyone else sees only their own — team names are
+    metadata other teams shouldn't casually enumerate. Each entry also carries whether the
+    caller manages it, so the frontend knows whether to show edit controls."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    teams = list_teams_for_user(db, current_user)
+    for team in teams:
+        team["can_manage"] = is_team_manager(current_user, team["slug"])
+    return {"teams": teams}
+
+
+@app.put("/api/v1/teams/{slug}/github-credential", tags=["Teams"])
+async def set_team_github_credential_route(
+    slug: str,
+    payload: SetGithubCredentialRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    _require_team_manager_or_admin(current_user, slug)
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    return set_team_github_pat(db, slug=slug, pat=payload.pat, set_by=actor)
+
+
+@app.delete("/api/v1/teams/{slug}/github-credential", tags=["Teams"])
+async def clear_team_github_credential_route(
+    slug: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    _require_team_manager_or_admin(current_user, slug)
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    return clear_team_github_pat(db, slug=slug, cleared_by=actor)
+
+
+# --- SERVICE REGISTRY (multi-tenancy Phase B) ---
+class CreateServiceRequest(BaseModel):
+    team_slug: str
+    name: str
+    short_alias: str
+    url: str
+    health_path: str = "/"
+    target_repo: str | None = None
+    ingest_aliases: List[str] = []
+    log_service_name: str | None = None
+    app_id: str | None = None
+
+
+@app.post("/api/v1/services", tags=["Services"])
+async def create_service_route(
+    payload: CreateServiceRequest,
+    current_user: dict = Depends(get_current_user),
+):
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
-    logs = list(
-        db["logs"].find({
-            "context.workflowName": workflowName,
-            "context.requestId": requestId,
-        }).sort("timestamp", 1)
+    team_slug = payload.team_slug.strip().lower()
+    if not is_global_admin(current_user) and team_slug not in get_user_team_slugs(current_user):
+        raise HTTPException(status_code=403, detail=f"You are not a member of team '{team_slug}'.")
+
+    team = db["teams"].find_one({"slug": team_slug})
+    if not team:
+        raise HTTPException(status_code=404, detail=f"Team not found: {team_slug}")
+
+    actor = current_user.get("username") or current_user.get("sub") or "operator"
+    service = create_service(
+        db,
+        team_id=team["_id"],
+        name=payload.name,
+        short_alias=payload.short_alias,
+        url=payload.url,
+        health_path=payload.health_path,
+        target_repo=payload.target_repo,
+        ingest_aliases=payload.ingest_aliases,
+        log_service_name=payload.log_service_name,
+        app_id=payload.app_id,
+        created_by=actor,
     )
-    if not logs:
-        raise HTTPException(status_code=404, detail="No logs found for this workflow run")
-
-    timeline = []
-    for entry in logs:
-        context = entry.get("context", {})
-        timeline.append({
-            "node": context.get("node") or "unknown-node",
-            "input": context.get("input") if isinstance(context.get("input"), dict) else {},
-            "output": context.get("output") if isinstance(context.get("output"), dict) else {},
-            "timestamp": entry.get("timestamp"),
-        })
-
-    return {
-        "workflowName": workflowName,
-        "requestId": requestId,
-        "timeline": timeline,
-    }
+    return serialize_mongo_doc(service)
 
 
-@app.get("/api/v1/replay/runs", tags=["Replay"])
-async def list_replay_runs(
-    workflowName: str = Query(..., min_length=1),
-    current_user: dict = Depends(get_current_user),
-):
-    """Lists recent persisted request IDs for a workflow."""
+@app.get("/api/v1/services", tags=["Services"])
+async def list_services_route(current_user: dict = Depends(get_current_user)):
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
-
-    entries = list(
-        db["logs"].find(
-            {
-                "context.workflowName": workflowName,
-                "context.requestId": {"$exists": True, "$ne": ""},
-            },
-            {
-                "_id": 0,
-                "context.requestId": 1,
-                "context.node": 1,
-                "timestamp": 1,
-            },
-        ).sort("timestamp", -1).limit(1000)
-    )
-
-    runs: dict[str, dict[str, Any]] = {}
-    for entry in entries:
-        context = entry.get("context", {})
-        request_id = context.get("requestId")
-        if not isinstance(request_id, str) or not request_id:
-            continue
-        run = runs.setdefault(
-            request_id,
-            {
-                "requestId": request_id,
-                "nodeName": context.get("node") or "unknown-node",
-                "latestTimestamp": entry.get("timestamp"),
-                "nodeCount": 0,
-            },
-        )
-        run["nodeCount"] += 1
-
-    return {"workflowName": workflowName, "runs": list(runs.values())}
+    return {"services": serialize_mongo_doc(list_services_for_user(db, current_user))}
 
 
 # --- 2. LIST ALL INCIDENTS ---
 @app.get("/api/v1/incidents", response_model=List[Dict[str, Any]], tags=["Incidents"])
 async def list_incidents(current_user: dict = Depends(get_current_user)):
-    """Fetches all incidents from MongoDB, ordered by most recent."""
+    """Fetches incidents from MongoDB, scoped to the caller's teams (Global_Admins sees all),
+    ordered by most recent."""
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
-    
-    incidents = list(db["incidents"].find({}).sort("created_at", -1))
+
+    if is_global_admin(current_user):
+        query: dict[str, Any] = {}
+    else:
+        team_ids = get_user_team_ids(db, current_user)
+        if not team_ids:
+            return []
+        query = {"team_id": {"$in": team_ids}}
+
+    incidents = list(db["incidents"].find(query).sort("created_at", -1))
     return serialize_mongo_doc(incidents)
 
 
@@ -1016,6 +1177,9 @@ async def get_incident_detail(incident_id: str, current_user: dict = Depends(get
     """
     Joins and returns the complete context for an incident:
     Raw Error Log + AI Root Cause Analysis + Pending Remediation Action
+
+    Returns 404 (not 403) for an incident outside the caller's team scope, so a non-member
+    can't distinguish "doesn't exist" from "exists but isn't yours" by probing IDs.
     """
     db = get_db()
     if db is None:
@@ -1023,6 +1187,8 @@ async def get_incident_detail(incident_id: str, current_user: dict = Depends(get
 
     incident = db["incidents"].find_one({"_id": incident_id})
     if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found.")
+    if not user_can_access_team_id(db, current_user, incident.get("team_id")):
         raise HTTPException(status_code=404, detail="Incident not found.")
 
     analysis = db["analyses"].find_one({"incident_id": incident_id}, sort=[("updated_at", -1), ("created_at", -1)]) or {}
@@ -1045,11 +1211,13 @@ async def ingest_incident(
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    operator_team_ids = get_user_team_ids(db, current_user)
     incident_id = ingest_machine_payload(
         db,
         background_tasks,
         payload,
         current_user.get("username", "INGESTION_WEBHOOK"),
+        team_id=operator_team_ids[0] if operator_team_ids else None,
     )
 
     return {"status": "created", "incident_id": incident_id}
@@ -1112,13 +1280,17 @@ async def approve_and_execute_hotfix(
             "pr_url": remediation.get("pr_url")
         }
 
+    # Resolve the owning team's own GitHub credential — never a shared/global token — so a
+    # commit for one team's incident can never land using another team's PAT.
+    team_github_service = get_github_service_for_team(db, remediation.get("team_id"))
+
     # 2. Execute GitHub API call
     repo = remediation["target_repo"]
     title = remediation["pr_title"]
     body = remediation["pr_body"]
     head = remediation["head_branch"]
     base = remediation["base_branch"]
-    
+
     # Always commit full file content and reject diff-like payloads.
     file_path = remediation.get("target_file_path", "main.py")
     file_content = resolve_commit_file_content(remediation)
@@ -1149,9 +1321,9 @@ async def approve_and_execute_hotfix(
         },
         "timestamp": datetime.now(timezone.utc),
     })
-    
+
     # Step A: Create the branch and commit the code fix first
-    commit_result = await github_service.create_branch_and_commit(
+    commit_result = await team_github_service.create_branch_and_commit(
         repo=repo,
         base_branch=base,
         new_branch=head,
@@ -1163,9 +1335,9 @@ async def approve_and_execute_hotfix(
     )
 
     logger.info(f"Opening GitHub PR for {repo} ({head} -> {base})...")
-    
+
     # Step B: Open the Pull Request successfully
-    gh_response = await github_service.create_pull_request(
+    gh_response = await team_github_service.create_pull_request(
         repo=repo, title=title, body=body, head=head, base=base
     )
 
@@ -1225,13 +1397,15 @@ async def approve_and_create_pr(
     if not remediation:
         raise HTTPException(status_code=404, detail="No remediation draft found.")
 
+    team_github_service = get_github_service_for_team(db, remediation.get("team_id"))
+
     repo = remediation["target_repo"]
     title = remediation["pr_title"]
     body = remediation["pr_body"]
     head = remediation["head_branch"]
     base = remediation["base_branch"]
     file_path = remediation.get("target_file_path", "main.py")
-    
+
     # Always commit full file content and reject diff-like payloads.
     file_content = resolve_commit_file_content(remediation)
     file_content_bytes = len(file_content.encode("utf-8"))
@@ -1248,8 +1422,8 @@ async def approve_and_create_pr(
     )
 
     # 1. Push branch & commit full file content
-    commit_result = await github_service.create_branch_and_commit(
-        repo=repo, base_branch=base, new_branch=head, 
+    commit_result = await team_github_service.create_branch_and_commit(
+        repo=repo, base_branch=base, new_branch=head,
         file_path=file_path,
         file_content=file_content,
         expected_base_file_sha256=remediation.get("base_file_sha256"),
@@ -1258,7 +1432,7 @@ async def approve_and_create_pr(
     )
 
     # 2. Open PR
-    gh_response = await github_service.create_pull_request(repo=repo, title=title, body=body, head=head, base=base)
+    gh_response = await team_github_service.create_pull_request(repo=repo, title=title, body=body, head=head, base=base)
     if gh_response.get("status_code") not in [200, 201]:
         error_msg = gh_response.get("data", {}).get("message", "Failed to create PR.")
         raise HTTPException(status_code=400, detail=f"GitHub API Error: {error_msg}")
@@ -1309,6 +1483,8 @@ async def merge_hotfix_pr(
     if not remediation:
         raise HTTPException(status_code=404, detail="No remediation found for this incident.")
 
+    team_github_service = get_github_service_for_team(db, remediation.get("team_id"))
+
     test_plan_id = remediation.get("test_plan_id")
     if test_plan_id:
         test_plan = db["patchy_test_plans"].find_one({"_id": test_plan_id})
@@ -1324,7 +1500,7 @@ async def merge_hotfix_pr(
         head_branch = remediation.get("head_branch")
         repo = remediation.get("target_repo")
         if head_branch and repo:
-            pr_lookup = await github_service.find_open_pull_request(repo=repo, head=head_branch)
+            pr_lookup = await team_github_service.find_open_pull_request(repo=repo, head=head_branch)
             if pr_lookup.get("status_code") == 200:
                 pr_data = pr_lookup["data"]
                 pr_number = pr_data.get("number")
@@ -1346,7 +1522,7 @@ async def merge_hotfix_pr(
     
 
     # Execute Merge via GitHub API
-    merge_response = await github_service.merge_pull_request(repo=repo, pull_number=pr_number)
+    merge_response = await team_github_service.merge_pull_request(repo=repo, pull_number=pr_number)
     if merge_response.get("status_code") not in [200, 201]:
         error_msg = merge_response.get("data", {}).get("message", "Merge failed.")
         raise HTTPException(status_code=400, detail=f"GitHub Merge Error: {error_msg}")
@@ -1462,6 +1638,7 @@ async def handle_machine_ingest(
         ingest_context["actor"],
         app_id=ingest_context.get("app_id"),
         app_default_repo=ingest_context.get("default_repo"),
+        team_id=ingest_context.get("team_id"),
     )
     return {"status": "accepted", "incident_id": incident_id}
 

@@ -309,7 +309,7 @@ POST /api/v1/patchy/proposals/{proposal_id}/approve
 POST /api/v1/patchy/proposals/{proposal_id}/decline
 ```
 
-### Ingestion and replay
+### Ingestion
 
 ```text
 POST /api/v1/logs
@@ -318,9 +318,6 @@ POST /api/v1/webhooks/ingest
 POST /api/v1/webhooks/sentry
 POST /api/v1/webhooks/vercel
 POST /api/v1/webhooks/render
-POST /api/v1/replay
-GET  /api/v1/replay
-GET  /api/v1/replay/runs
 ```
 
 Protected routes require the authentication or ingestion headers described by the deployment configuration. See [PATCHY_TERMINAL.md](PATCHY_TERMINAL.md) for the complete command reference and [NEW_APP_ONBOARDING.md](NEW_APP_ONBOARDING.md) for integrating another application.

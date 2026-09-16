@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 # patchy_discovery.py
 import httpx
 from backend.services.patchy_errors import PatchyCommandError
-from backend.utils.app_utils import SERVICES, SERVICE_NAME_ALIASES
+from backend.utils.app_utils import get_service_by_alias, load_service_registry
 import logging
 from backend.patchy_browser_agent.saapp_runner import run_sonic_discovery_suite
 
@@ -89,19 +89,21 @@ def _dedupe_and_classify(endpoints: list[dict]) -> list[dict]:
 async def _resolve_service_from_target(db, target: str) -> dict:
     # alias case: 'bty', 'saapp', 'sonic'
     alias = target.lower()
-    if alias in SERVICE_NAME_ALIASES:
-        name = SERVICE_NAME_ALIASES[alias]
-        for svc in SERVICES:
-            if svc.get("name") == name:
-                return svc
+    matched = get_service_by_alias(alias)
+    if matched:
+        service = dict(matched)
+        service.setdefault("name", service.get("service_name"))
+        return service
 
     # URL case
     parsed = urlparse(target)
     if parsed.scheme and parsed.netloc:
         # try to match by URL
-        for svc in SERVICES:
+        for svc in load_service_registry():
             if svc.get("url") and parsed.netloc in svc["url"]:
-                return svc
+                service = dict(svc)
+                service.setdefault("name", service.get("service_name"))
+                return service
         # fallback: synthetic service object
         return {
             "name": parsed.netloc,

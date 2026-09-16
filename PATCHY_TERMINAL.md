@@ -5,7 +5,7 @@ Patchy Terminal is errAgent's authenticated operations console. It uses a strict
 
 ## Open the terminal
 
-Sign in to errAgent and select **Patchy** beside **Replay Workflow** and **Console**.
+Sign in to errAgent and select **Patchy Terminal** from the console toolbar.
 
 ## Validated hotfix workflow
 
