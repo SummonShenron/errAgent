@@ -25,9 +25,10 @@ import httpx
 from dotenv import load_dotenv
 
 from backend.utils.app_utils import (
-    SERVICES,
     build_incident_fingerprint,
     canonicalize_service_name,
+    get_service_by_alias,
+    load_service_registry,
     _resolve_target_repository,
     serialize_mongo_doc,
 )
@@ -42,11 +43,6 @@ class PatchyFlowError(ValueError):
     pass
 
 
-_SERVICE_ALIASES = {
-    "bty": "BTY Fitness",
-    "btyapp": "BTY Fitness",
-    "saapp": "SAAPP Widget",
-}
 
 _ACTION_TYPES = {"GET", "POST", "PUT", "PATCH", "DELETE", "fuzz", "assert_status", "assert_json", "assert_body"}
 _TEMPLATE_PATTERN = re.compile(r"\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}")
@@ -108,6 +104,11 @@ def _record_database_leak_incident(
     finding: str = "database detail leakage",
 ) -> str | None:
     """Persist one redacted security finding; never attempts database discovery."""
+    from backend.utils.team_utils import get_bootstrap_team_id
+
+    service_doc = get_service_by_alias(flow.get("alias") or "", db=db) or {}
+    incident_team_id = service_doc.get("team_id") or get_bootstrap_team_id(db)
+
     excerpt = _redact_finding_text(response_text)
     payload = {
         "service_name": flow["service"],
@@ -141,6 +142,7 @@ def _record_database_leak_incident(
     incident_id = f"security_{int(now.timestamp() * 1000)}_{uuid4().hex[:8]}"
     incident = {
         "_id": incident_id,
+        "team_id": incident_team_id,
         "service_name": canonicalize_service_name(flow["service"]),
         "environment": "production",
         "error_message": payload["error_message"],
@@ -214,14 +216,11 @@ def _resolve_auth_headers(auth: dict[str, Any]) -> dict[str, str]:
     return {}
 
 
-def _service_base_url(alias: str) -> tuple[str, str]:
-    service_name = _SERVICE_ALIASES.get(alias.lower())
-    if not service_name:
-        raise PatchyFlowError(f"Unknown service alias: {alias}. Known: {', '.join(sorted(_SERVICE_ALIASES))}")
-    service = next((item for item in SERVICES if item["name"] == service_name), None)
+def _service_base_url(alias: str, db=None) -> tuple[str, str]:
+    service = get_service_by_alias(alias, db=db)
     if not service:
-        raise PatchyFlowError(f"Service is not registered: {service_name}")
-    return service_name, service["url"].rstrip("/")
+        raise PatchyFlowError(f"Unknown service alias: {alias}")
+    return service["service_name"], service["url"].rstrip("/")
 
 
 def _validate_step(step: dict[str, Any], index: int) -> dict[str, Any]:
@@ -351,7 +350,7 @@ def _render_template(value: Any, variables: dict[str, Any]) -> Any:
 
 
 def create_flow_plan(alias: str, name: str, actions: list[dict[str, Any]], actor: str, db, auth: Any = None) -> dict[str, Any]:
-    service_name, base_url = _service_base_url(alias)
+    service_name, base_url = _service_base_url(alias, db)
     if not isinstance(name, str) or not name.strip():
         raise PatchyFlowError("Flow name is required")
     name = name.strip()[:80]
@@ -408,10 +407,10 @@ def create_flow_plan(alias: str, name: str, actions: list[dict[str, Any]], actor
 def list_flow_plans(db, alias: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
     query: dict[str, Any] = {}
     if alias:
-        service_name = _SERVICE_ALIASES.get(alias.lower())
-        if not service_name:
+        service = get_service_by_alias(alias, db=db)
+        if not service:
             raise PatchyFlowError(f"Unknown service alias: {alias}")
-        query["service"] = service_name
+        query["service"] = service["service_name"]
     flows = list(db["patchy_flow_plans"].find(query).sort("created_at", -1).limit(limit))
     return serialize_mongo_doc(flows)
 
@@ -443,6 +442,7 @@ def create_flow_proposal(flow_id: str, actor: str, db) -> dict[str, Any]:
     request_steps = [step for step in flow["steps"] if step["type"] in {"GET", "POST", "PUT", "PATCH", "DELETE", "fuzz"}]
     auth_label = (flow.get("auth") or {}).get("type", "none")
     has_fuzz = bool(flow.get("has_fuzz") or any(step["type"] == "fuzz" for step in flow["steps"]))
+    service_doc = get_service_by_alias(flow.get("alias") or "", db=db) or {}
     proposal = {
         "_id": proposal_id,
         "kind": "synthetic_flow",
@@ -458,6 +458,7 @@ def create_flow_proposal(flow_id: str, actor: str, db) -> dict[str, Any]:
         },
         "flowId": flow_id,
         "service": flow["service"],
+        "team_id": service_doc.get("team_id"),
         "created_by": actor,
         "created_at": now,
         "updated_at": now,
@@ -476,10 +477,11 @@ def create_flow_proposal(flow_id: str, actor: str, db) -> dict[str, Any]:
 
 
 def create_validation_proposal(alias: str, actor: str, db) -> dict[str, Any]:
-    service_name, base_url = _service_base_url(alias)
+    service_name, base_url = _service_base_url(alias, db)
     flows = list(db["patchy_flow_plans"].find({"service": service_name, "has_fuzz": True}).limit(10))
     if not flows:
         raise PatchyFlowError(f"No validation fuzz flows are registered for {service_name}")
+    service_doc = get_service_by_alias(alias, db=db) or {}
     now = datetime.now(timezone.utc)
     proposal = {
         "_id": f"validation_{uuid4().hex}",
@@ -496,6 +498,7 @@ def create_validation_proposal(alias: str, actor: str, db) -> dict[str, Any]:
         },
         "service": service_name,
         "flowIds": [flow["_id"] for flow in flows],
+        "team_id": service_doc.get("team_id"),
         "created_by": actor,
         "created_at": now,
         "updated_at": now,
@@ -513,7 +516,7 @@ def create_email_validation_proposal(
 ) -> dict[str, Any]:
     """Create the common email-validation flow without requiring JSON authoring."""
     flow_name = f"email-validation-{endpoint.strip('/').replace('/', '-') or 'root'}"
-    existing = db["patchy_flow_plans"].find_one({"service": _service_base_url(alias)[0], "name": flow_name})
+    existing = db["patchy_flow_plans"].find_one({"service": _service_base_url(alias, db)[0], "name": flow_name})
     if existing:
         flow_id = existing["_id"]
     else:
@@ -563,7 +566,7 @@ def create_leakage_validation_proposal(
 ) -> dict[str, Any]:
     """Create a bounded response-leakage probe without enumerating database data."""
     flow_name = f"database-leakage-{endpoint.strip('/').replace('/', '-') or 'root'}"
-    service_name = _service_base_url(alias)[0]
+    service_name = _service_base_url(alias, db)[0]
     existing = db["patchy_flow_plans"].find_one({"service": service_name, "name": flow_name})
     if existing:
         return create_flow_proposal(existing["_id"], actor, db)
@@ -908,7 +911,7 @@ async def execute_validation_audit(db, proposal_id: str, actor: str) -> dict[str
     flows = [get_flow_plan(db, flow_id) for flow_id in proposal["flowIds"]]
     health_result: dict[str, Any]
     try:
-        service = next(item for item in SERVICES if item["name"] == proposal["service"])
+        service = next(item for item in load_service_registry(db) if item["service_name"] == proposal["service"])
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             health_response = await client.get(f"{service['url'].rstrip('/')}{service.get('health_path', '/')}")
         health_result = {

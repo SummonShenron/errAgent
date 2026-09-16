@@ -80,6 +80,32 @@ class FakeDB:
             "patchy_proposals": FakeCollection(),
             "incidents": FakeCollection(),
             "audit_logs": FakeCollection(),
+            # Phase B: services moved from a hardcoded SERVICES constant into this registry —
+            # seed the two aliases this test file exercises ("bty", "saapp").
+            "service_registry": FakeCollection([
+                {
+                    "_id": "svc_bty",
+                    "team_id": "team_test",
+                    "service_name": "BTY Fitness",
+                    "canonical_key": "btyapp",
+                    "short_alias": "bty",
+                    "log_service_name": "BTY",
+                    "ingest_aliases": ["bty", "btyapp"],
+                    "url": "https://btyapp.onrender.com",
+                    "health_path": "/api/health",
+                },
+                {
+                    "_id": "svc_saapp",
+                    "team_id": "team_test",
+                    "service_name": "SAAPP Widget",
+                    "canonical_key": "saapp-widget",
+                    "short_alias": "saapp",
+                    "log_service_name": "SAAPP",
+                    "ingest_aliases": ["saapp"],
+                    "url": "https://saapp.onrender.com",
+                    "health_path": "/api/health",
+                },
+            ]),
         }
 
     def __getitem__(self, name):

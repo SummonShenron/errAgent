@@ -94,7 +94,8 @@ async def get_current_user(request: Request) -> dict:
     db = get_db()
     if db is not None:
         clerk_id = payload.get("sub")
-        email = payload.get("email", f"{clerk_id}@example.com")
+        raw_email = payload.get("email")  # None unless Clerk's session token actually carries it
+        email = raw_email or f"{clerk_id}@example.com"
 
         # Search for existing user profile in directory
         user_doc = db["directory"].find_one({
@@ -111,7 +112,7 @@ async def get_current_user(request: Request) -> dict:
                 "clerk_id": clerk_id,
                 "email": email,
                 "full_name": payload.get("full_name") or payload.get("name") or "errAgent Operator",
-                "groups": ["Developers"], 
+                "groups": ["Developers"],
                 "created_at": datetime.now(timezone.utc)
             }
             res = db["directory"].insert_one(user_doc)
@@ -119,10 +120,32 @@ async def get_current_user(request: Request) -> dict:
         else:
             user_doc["_id"] = str(user_doc["_id"])
 
+            # Sync-on-login: the JWT is the source of truth for identity claims once Clerk
+            # actually supplies them. Without this, an account auto-provisioned before a claim
+            # (e.g. email) was added to the session token stays stuck on its placeholder
+            # user_<id>@example.com / generic "errAgent Operator" name forever. Only ever
+            # overwrite with a genuine claim value — never with the synthesized placeholder or
+            # the "errAgent Operator" default — so a token that's momentarily missing a claim
+            # can't regress already-good stored data.
+            raw_full_name = payload.get("full_name") or payload.get("name")
+            updates = {}
+            if raw_email and raw_email != user_doc.get("email"):
+                updates["email"] = raw_email
+            if raw_full_name and raw_full_name != user_doc.get("full_name"):
+                updates["full_name"] = raw_full_name
+            if updates and clerk_id:
+                db["directory"].update_one({"clerk_id": clerk_id}, {"$set": updates})
+                user_doc.update(updates)
+                logger.info(
+                    "Synced directory profile from JWT for clerk_id=%s: %s",
+                    clerk_id, list(updates.keys()),
+                )
+
         # Attach directory DB fields (groups, db id) directly onto returned user payload
         payload["groups"] = user_doc.get("groups", [])
         payload["directory_id"] = user_doc.get("_id")
         payload["full_name"] = user_doc.get("full_name")
+        payload["email"] = user_doc.get("email")
 
     return payload
 

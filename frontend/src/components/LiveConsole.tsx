@@ -19,9 +19,11 @@ type StreamMessage =
 
 type LiveConsoleProps = {
   open: boolean;
-  onClose: () => void;
+  onClose?: () => void;
   apiBaseUrl: string;
   getToken: () => Promise<string | null>;
+  /** Render inline in the page flow (no backdrop/close button) instead of as a modal. */
+  embedded?: boolean;
 };
 
 const MAX_RENDERED_LOGS = 1000;
@@ -45,7 +47,7 @@ function formatTimestamp(timestamp: string) {
     : date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsoleProps) {
+export function LiveConsole({ open, onClose, apiBaseUrl, getToken, embedded = false }: LiveConsoleProps) {
   const [service, setService] = useState('SAAPP');
   const [level, setLevel] = useState<LevelFilter>('all');
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -138,19 +140,23 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
   }, [logs, paused]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || embedded) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') onClose?.();
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose, open]);
+  }, [embedded, onClose, open]);
 
   if (!open) return null;
 
-  return (
-    <div className="console-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="live-console" role="dialog" aria-modal="true" aria-labelledby="live-console-title">
+  const body = (
+    <section
+      className={embedded ? 'live-console live-console-embedded' : 'live-console'}
+      role={embedded ? undefined : 'dialog'}
+      aria-modal={embedded ? undefined : true}
+      aria-labelledby="live-console-title"
+    >
         <header className="console-header">
           <div>
             <p className="eyebrow">Ecosystem telemetry</p>
@@ -171,7 +177,9 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
               <span aria-hidden="true">↻</span>
               Retry
             </button>
-            <button type="button" className="console-icon-button" onClick={onClose} title="Close console" aria-label="Close console">×</button>
+            {!embedded && (
+              <button type="button" className="console-icon-button" onClick={onClose} title="Close console" aria-label="Close console">×</button>
+            )}
           </div>
         </header>
 
@@ -237,7 +245,14 @@ export function LiveConsole({ open, onClose, apiBaseUrl, getToken }: LiveConsole
           <span>{logs.length} buffered lines</span>
           <span>Last 500 loaded on connect</span>
         </footer>
-      </section>
+    </section>
+  );
+
+  if (embedded) return body;
+
+  return (
+    <div className="console-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose?.()}>
+      {body}
     </div>
   );
 }

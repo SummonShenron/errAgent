@@ -5,8 +5,8 @@ import { CodeDiffView } from './components/CodeDiffView';
 import { useDynamicFavicon } from './hooks/useDynamicFavicon';
 import { PatchyEmptyState } from './components/PatchyEmptyState';
 import { LiveConsole } from './components/LiveConsole';
-import { ReplayConsole } from './components/ReplayConsole';
 import { PatchyTerminal } from './components/PatchyTerminal';
+import { TeamSettings } from './components/TeamSettings';
 
 const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL =
@@ -173,8 +173,8 @@ export default function App() {
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [incidentTab, setIncidentTab] = useState<'open' | 'resolved'>('open');
   const [consoleOpen, setConsoleOpen] = useState(false);
-  const [replayOpen, setReplayOpen] = useState(false);
   const [patchyTerminalOpen, setPatchyTerminalOpen] = useState(false);
+  const [teamSettingsOpen, setTeamSettingsOpen] = useState(false);
   const [incidentGuideOpen, setIncidentGuideOpen] = useState(false);
   const visibleIncidents = incidents.filter((incident) => {
     const status = (incident.status || 'open').toLowerCase();
@@ -319,7 +319,14 @@ export default function App() {
 
     fetchIncidents();
 
-    const source = new EventSource(`${API_BASE_URL}/events`);
+    // EventSource can't send an Authorization header, so the stream is gated by a short-TTL
+    // signed ticket fetched over a normal Bearer-authenticated request instead (see
+    // GET /api/v1/events/ticket). The ticket only needs to be valid for the connection
+    // handshake, but native EventSource auto-reconnect would replay the same (by-then-expired)
+    // URL, so reconnects are driven manually with a freshly minted ticket each time.
+    let source: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
     const refreshIncidents = () => {
       fetchIncidents();
@@ -329,15 +336,45 @@ export default function App() {
       }
     };
 
-    source.addEventListener('incidents', refreshIncidents);
+    const connect = async () => {
+      if (cancelled) return;
+      try {
+        const token = await getTokenRef.current();
+        if (!token || cancelled) return;
+        const response = await fetch(`${API_BASE_URL}/events/ticket`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error('Failed to mint event stream ticket');
+        const { ticket } = (await response.json()) as { ticket: string };
+        if (cancelled) return;
 
-    source.onerror = () => {
-      console.warn('Incident event stream disconnected; browser will retry.');
+        source = new EventSource(`${API_BASE_URL}/events?ticket=${encodeURIComponent(ticket)}`);
+        source.addEventListener('incidents', refreshIncidents);
+        source.onerror = () => {
+          console.warn('Incident event stream disconnected; reconnecting with a fresh ticket.');
+          source?.close();
+          source = null;
+          if (!cancelled) {
+            reconnectTimer = setTimeout(connect, 3000);
+          }
+        };
+      } catch (err) {
+        console.error('Error opening incident event stream:', err);
+        if (!cancelled) {
+          reconnectTimer = setTimeout(connect, 5000);
+        }
+      }
     };
 
+    connect();
+
     return () => {
-      source.removeEventListener('incidents', refreshIncidents);
-      source.close();
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (source) {
+        source.removeEventListener('incidents', refreshIncidents);
+        source.close();
+      }
     };
   }, [fetchIncidents, fetchIncidentDetail, isSignedIn]);
 
@@ -554,7 +591,11 @@ export default function App() {
             <span aria-hidden="true">$</span>
             Patchy Terminal
           </button>
-          <button type="button" className="console-launch" onClick={() => setReplayOpen(true)}># Replay Workflow</button>
+          <SignedIn>
+            <button type="button" className="console-launch" onClick={() => setTeamSettingsOpen(true)}>
+              Team Settings
+            </button>
+          </SignedIn>
           <button type="button" className="console-launch" onClick={() => setConsoleOpen(true)}>
             <span aria-hidden="true">&gt;_</span>
             Log Console
@@ -584,15 +625,15 @@ export default function App() {
         apiBaseUrl={API_BASE_URL}
         getToken={getToken}
       />
-      <ReplayConsole
-        open={replayOpen}
-        onClose={() => setReplayOpen(false)}
-        apiBaseUrl={API_BASE_URL}
-        getToken={getToken}
-      />
       <LiveConsole
         open={consoleOpen}
         onClose={() => setConsoleOpen(false)}
+        apiBaseUrl={API_BASE_URL}
+        getToken={getToken}
+      />
+      <TeamSettings
+        open={teamSettingsOpen}
+        onClose={() => setTeamSettingsOpen(false)}
         apiBaseUrl={API_BASE_URL}
         getToken={getToken}
       />
@@ -642,8 +683,8 @@ export default function App() {
       </section>
 
       {/* Split Top Grid: Health Panel & Patchy Assistant Side-by-Side */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', marginBottom: '1.5rem' }}>
-        <div className="health-panel" style={{ margin: 0 }}>
+      <main className="dashboard-grid">
+        <div className="health-panel" style={{ margin: 0, gridArea: 'health' }}>
           <h2>Connected Apps Health</h2>
 
           <div className="health-actions">
@@ -690,13 +731,17 @@ export default function App() {
           )}
         </div>
 
-        <div className="patchy-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: '1rem' }}>
+        <div className="patchy-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: '1rem', gridArea: 'patchy' }}>
           <PatchyEmptyState activeIncidentsCount={activeIncidentsCount} tab={incidentTab} status={activeIncident?.status} />
         </div>
-      </div>
 
-      <main className="dashboard-grid">
-        <section className="panel">
+        <SignedIn>
+          <section className="inline-log-panel" style={{ gridArea: 'console' }}>
+            <LiveConsole open embedded apiBaseUrl={API_BASE_URL} getToken={getToken} />
+          </section>
+        </SignedIn>
+
+        <section className="panel" style={{ gridArea: 'incidents' }}>
           <div className="panel-header incident-panel-header">
             <h2>Ingested Incidents</h2>
             <span className="count-pill">{visibleIncidents.length}</span>
@@ -803,7 +848,7 @@ export default function App() {
           )}
         </section>
 
-        <section className="panel detail-panel">
+        <section className="panel detail-panel" style={{ gridArea: 'details' }}>
           <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2>Incident Details</h2>
             {selectedIncident && (
