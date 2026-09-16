@@ -741,7 +741,7 @@ export default function App() {
           </section>
         </SignedIn>
 
-        <section className="panel" style={{ gridArea: 'incidents' }}>
+        <section className="panel incident-panel" style={{ gridArea: 'incidents' }}>
           <div className="panel-header incident-panel-header">
             <h2>Ingested Incidents</h2>
             <span className="count-pill">{visibleIncidents.length}</span>
@@ -764,6 +764,7 @@ export default function App() {
             </button>
           </div>
 
+          <div className="incident-panel-body">
           {loading ? (
             <p className="muted">Loading incidents from backend...</p>
           ) : visibleIncidents.length === 0 ? (
@@ -846,6 +847,7 @@ export default function App() {
               })}
             </ul>
           )}
+          </div>
         </section>
 
         <section className="panel detail-panel" style={{ gridArea: 'details' }}>
