@@ -392,7 +392,25 @@ button {
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
-	max-height: 75vh;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+/* Incidents/Details both span the Health+Patchy / Console rows (see .dashboard-grid's
+   grid-template-areas) and stretch to match that combined height exactly. min-height: 0 stops
+   their own content from inflating the grid's auto row tracks — without it, a long incident
+   list would push the whole left column (and the fixed-height console) taller too. The header
+   and tab strip stay pinned; only .incident-panel-body scrolls. */
+.incident-panel {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	overflow: hidden;
+}
+
+.incident-panel-body {
+	flex: 1;
+	min-height: 0;
 	overflow-y: auto;
 	overscroll-behavior: contain;
 }
@@ -987,6 +1005,14 @@ button {
 	.detail-panel {
 		max-height: none;
 		overflow: visible;
+	}
+
+	.incident-panel {
+		overflow: visible;
+	}
+
+	.incident-panel-body {
+		overflow-y: visible;
 	}
 
 	.panel {
