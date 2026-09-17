@@ -159,6 +159,8 @@ export default function App() {
   const { principal, getToken, isSignedIn } = useAppUser();
   const getTokenRef = useRef(getToken);
   const selectedIncidentIdRef = useRef<string | null>(null);
+  const leftStackRef = useRef<HTMLDivElement>(null);
+  const [leftStackHeight, setLeftStackHeight] = useState<number | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<IncidentDetailResponse | null>(null);
@@ -308,6 +310,22 @@ export default function App() {
   useEffect(() => {
     fetchServices();
   }, [fetchServices]);
+
+  // CSS grid stretch alone can't cap the Incidents/Details panels to the left column's height:
+  // an `auto`-sized grid row measures every sibling's full (unclipped) content height before
+  // stretch/overflow ever apply, so a long incident list grows the whole row instead of
+  // scrolling inside it. Measuring the left column directly and applying it as a hard max-height
+  // sidesteps that — the panels scroll their own content once genuinely capped.
+  useEffect(() => {
+    const node = leftStackRef.current;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height;
+      if (height) setLeftStackHeight(height);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -684,7 +702,8 @@ export default function App() {
 
       {/* Split Top Grid: Health Panel & Patchy Assistant Side-by-Side */}
       <main className="dashboard-grid">
-        <div className="health-panel" style={{ margin: 0, gridArea: 'health' }}>
+        <div className="left-stack" ref={leftStackRef}>
+        <div className="health-panel" style={{ margin: 0 }}>
           <h2>Connected Apps Health</h2>
 
           <div className="health-actions">
@@ -731,17 +750,18 @@ export default function App() {
           )}
         </div>
 
-        <div className="patchy-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: '1rem', gridArea: 'patchy' }}>
+        <div className="patchy-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, padding: '1rem' }}>
           <PatchyEmptyState activeIncidentsCount={activeIncidentsCount} tab={incidentTab} status={activeIncident?.status} />
         </div>
 
         <SignedIn>
-          <section className="inline-log-panel" style={{ gridArea: 'console' }}>
+          <section className="inline-log-panel">
             <LiveConsole open embedded apiBaseUrl={API_BASE_URL} getToken={getToken} />
           </section>
         </SignedIn>
+        </div>
 
-        <section className="panel incident-panel" style={{ gridArea: 'incidents' }}>
+        <section className="panel incident-panel" style={leftStackHeight ? { maxHeight: leftStackHeight } : undefined}>
           <div className="panel-header incident-panel-header">
             <h2>Ingested Incidents</h2>
             <span className="count-pill">{visibleIncidents.length}</span>
@@ -850,7 +870,7 @@ export default function App() {
           </div>
         </section>
 
-        <section className="panel detail-panel" style={{ gridArea: 'details' }}>
+        <section className="panel detail-panel" style={leftStackHeight ? { maxHeight: leftStackHeight } : undefined}>
           <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2>Incident Details</h2>
             {selectedIncident && (

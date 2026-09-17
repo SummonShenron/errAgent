@@ -261,11 +261,11 @@ export function TeamSettings({ open, onClose, apiBaseUrl, getToken }: TeamSettin
                       value={patInput}
                       onChange={(e) => setPatInput(e.target.value)}
                     />
-                    <button type="button" onClick={handleSetPat} disabled={savingPat || !patInput.trim()}>
+                    <button className="team-settings-button" type="button" onClick={handleSetPat} disabled={savingPat || !patInput.trim()}>
                       {selectedTeam.github_configured ? "Rotate" : "Set"}
                     </button>
                     {selectedTeam.github_configured && (
-                      <button type="button" onClick={handleClearPat} disabled={savingPat}>
+                      <button className="team-settings-button-secondary" type="button" onClick={handleClearPat} disabled={savingPat}>
                         Clear
                       </button>
                     )}
@@ -284,13 +284,13 @@ export function TeamSettings({ open, onClose, apiBaseUrl, getToken }: TeamSettin
                       <span className={`team-settings-role-badge team-settings-role-${member.role}`}>{member.role}</span>
                       {selectedTeam.can_manage && (
                         <span className="team-settings-member-actions">
-                          <button
+                          <button className="team-settings-button"
                             type="button"
                             onClick={() => handleSetRole(member, member.role === "manager" ? "member" : "manager")}
                           >
                             {member.role === "manager" ? "Demote" : "Promote"}
                           </button>
-                          <button type="button" onClick={() => handleRemoveMember(member)}>
+                          <button className="team-settings-button-secondary" type="button" onClick={() => handleRemoveMember(member)}>
                             Remove
                           </button>
                         </span>
@@ -308,11 +308,11 @@ export function TeamSettings({ open, onClose, apiBaseUrl, getToken }: TeamSettin
                       value={newMemberId}
                       onChange={(e) => setNewMemberId(e.target.value)}
                     />
-                    <select value={newMemberRole} onChange={(e) => setNewMemberRole(e.target.value as "member" | "manager")}>
-                      <option value="member">Member</option>
-                      <option value="manager">Manager</option>
+                    <select className="team-settings-input" value={newMemberRole} onChange={(e) => setNewMemberRole(e.target.value as "member" | "manager")}>
+                      <option className="team-settings-input" value="member">Member</option>
+                      <option className="team-settings-input" value="manager">Manager</option>
                     </select>
-                    <button type="button" onClick={handleAddMember} disabled={addingMember || !newMemberId.trim()}>
+                    <button className="team-settings-button" type="button" onClick={handleAddMember} disabled={addingMember || !newMemberId.trim()}>
                       Add
                     </button>
                   </div>
