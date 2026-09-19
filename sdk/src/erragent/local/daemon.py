@@ -25,6 +25,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -74,8 +75,33 @@ async def _cloud_request(config: ErrAgentConfig, method: str, path: str, body: d
     return await asyncio.to_thread(_cloud_request_sync, config, method, path, body)
 
 
+def _install_benign_reset_filter(loop: asyncio.AbstractEventLoop) -> None:
+    """Silence the Windows-only ``ConnectionResetError: [WinError 10054]`` that
+    ``ProactorEventLoop`` logs as an "exception in callback" whenever a client (typically the
+    app's own ``--reload``-restarted process, mid-request to us) disappears out from under an
+    open connection. It's inherent to ``ProactorEventLoop`` tearing down a socket after the
+    peer is already gone — harmless and not something we can prevent, just noisy — so this
+    filters that exact shape out while still forwarding every other event-loop exception to
+    the default handler.
+    """
+
+    def _handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        exception = context.get("exception")
+        if isinstance(exception, ConnectionResetError) and getattr(exception, "winerror", None) == 10054:
+            return
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _install_benign_reset_filter(asyncio.get_running_loop())
+    yield
+
+
 def create_app(root: Path, poll_interval: float = 2.0, poll_timeout: float = 180.0) -> FastAPI:
-    app = FastAPI(title="erragent local daemon")
+    app = FastAPI(title="erragent local daemon", lifespan=_lifespan)
     resolved_root = root.resolve()
 
     @app.get("/health")

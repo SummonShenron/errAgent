@@ -34,6 +34,54 @@ class _Recorder:
         raise AssertionError(f"unexpected call: {method} {path}")
 
 
+class _FakeLoop:
+    def __init__(self):
+        self.handler = None
+        self.default_calls = []
+
+    def set_exception_handler(self, handler):
+        self.handler = handler
+
+    def default_exception_handler(self, context):
+        self.default_calls.append(context)
+
+
+def test_benign_reset_filter_swallows_winerror_10054_connection_reset():
+    loop = _FakeLoop()
+    daemon._install_benign_reset_filter(loop)
+
+    exception = ConnectionResetError()
+    exception.winerror = 10054
+    loop.handler(loop, {"message": "Exception in callback", "exception": exception})
+
+    assert loop.default_calls == []
+
+
+def test_benign_reset_filter_forwards_other_exceptions_to_default_handler():
+    loop = _FakeLoop()
+    daemon._install_benign_reset_filter(loop)
+
+    exception = ValueError("something unrelated broke")
+    context = {"message": "Exception in callback", "exception": exception}
+    loop.handler(loop, context)
+
+    assert loop.default_calls == [context]
+
+
+def test_benign_reset_filter_forwards_connection_reset_with_different_winerror():
+    # Only the specific WinError 10054 shape is benign noise from a --reload-killed connection;
+    # any other ConnectionResetError should still surface normally.
+    loop = _FakeLoop()
+    daemon._install_benign_reset_filter(loop)
+
+    exception = ConnectionResetError()
+    exception.winerror = 10053  # a different error code, not the one we're filtering
+    context = {"message": "Exception in callback", "exception": exception}
+    loop.handler(loop, context)
+
+    assert loop.default_calls == [context]
+
+
 async def test_handle_error_event_reports_to_cloud_even_when_env_sets_local_url(tmp_path, monkeypatch, caplog):
     # Regression: the daemon loads the same .env as the app it's serving. That .env sets
     # ERRAGENT_LOCAL_URL (to tell the *app* to route through the daemon instead of the cloud
