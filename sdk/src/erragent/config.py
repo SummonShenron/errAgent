@@ -47,11 +47,19 @@ def resolve_cloud_credentials(cloud: CloudConfig) -> tuple[str | None, str | Non
     return None, cloud.ingest_secret
 
 
-def load_config() -> ErrAgentConfig:
+def load_config(*, ignore_local_only: bool = False) -> ErrAgentConfig:
     """Resolve SDK configuration from ``ERRAGENT_*`` environment variables.
 
     Returns a config with ``cloud``/``local`` populated only when their required variables
     are present, so callers can decide which handler(s), if any, to install.
+
+    ``ignore_local_only`` exists for the local daemon (see ``local/daemon.py``): the daemon
+    reads the *same* ``.env`` as the app it's serving, which sets ``ERRAGENT_LOCAL_URL`` (and
+    thus defaults ``local_only`` to true) to tell the *app* to stop reporting to the cloud
+    directly and route through the daemon instead. That signal isn't about the daemon itself —
+    the daemon is the thing that's supposed to always talk to the cloud (it's the one doing the
+    analysis forwarding) — so without this flag the daemon silently inherits the app's
+    local-only setting and refuses to report anything.
     """
     service = os.getenv("ERRAGENT_SERVICE")
     timeout_seconds = float(os.getenv("ERRAGENT_TIMEOUT_SECONDS", "30"))
@@ -74,7 +82,7 @@ def load_config() -> ErrAgentConfig:
     app_id = os.getenv("ERRAGENT_APP_ID")
     app_secret = os.getenv("ERRAGENT_APP_SECRET")
     ingest_secret = os.getenv("ERRAGENT_INGEST_SECRET")
-    if cloud_url and service and not local_only and (ingest_secret or (app_id and app_secret)):
+    if cloud_url and service and (ignore_local_only or not local_only) and (ingest_secret or (app_id and app_secret)):
         cloud = CloudConfig(
             url=cloud_url,
             service=service,

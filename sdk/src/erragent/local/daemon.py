@@ -96,7 +96,7 @@ def create_app(root: Path, poll_interval: float = 2.0, poll_timeout: float = 180
 
 
 async def _handle_error_event(root: Path, event: LogEvent, poll_interval: float, poll_timeout: float) -> None:
-    config = load_config()
+    config = load_config(ignore_local_only=True)
     if config.cloud is None:
         logger.error(
             "No cloud credentials configured (ERRAGENT_URL + ERRAGENT_INGEST_SECRET or "

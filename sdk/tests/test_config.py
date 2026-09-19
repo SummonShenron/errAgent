@@ -86,3 +86,19 @@ def test_local_only_irrelevant_when_local_url_not_set(monkeypatch):
     assert config.local_only is False
     assert config.cloud is not None
     assert config.local is None
+
+
+def test_ignore_local_only_still_populates_cloud_config(monkeypatch):
+    # Regression: the local daemon reads the same .env as the app it's serving, which sets
+    # ERRAGENT_LOCAL_URL (defaulting local_only to true) to tell the *app* to stop reporting
+    # to the cloud directly. The daemon itself must ignore that — it's the thing responsible
+    # for forwarding to the cloud for analysis — or it silently refuses to report anything
+    # despite valid ERRAGENT_URL/ERRAGENT_INGEST_SECRET being present.
+    _set_common_env(monkeypatch)
+    monkeypatch.setenv("ERRAGENT_LOCAL_URL", "http://127.0.0.1:8765")
+    monkeypatch.delenv("ERRAGENT_LOCAL_ONLY", raising=False)
+
+    config = load_config(ignore_local_only=True)
+
+    assert config.local_only is True
+    assert config.cloud is not None

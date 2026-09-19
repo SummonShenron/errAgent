@@ -7,6 +7,9 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import click
@@ -57,6 +60,36 @@ def _resolve_app_executable(root: Path, command: str) -> str:
     return shutil.which(str(candidate)) or command
 
 
+def _wait_for_daemon_health(
+    daemon_process: "subprocess.Popen[bytes]", port: int, timeout: float = 10.0
+) -> tuple[bool, int | None]:
+    """Poll the daemon's own /health endpoint until it answers, the process exits, or timeout.
+
+    Without this, `erragent dev` would spawn the daemon and immediately move on to starting
+    your app regardless of whether the daemon actually came up — a port conflict, a missing
+    dependency, or any other startup crash would go completely unreported, and your app would
+    run for the rest of the session silently reporting to a daemon that was never there.
+
+    Returns (healthy, exit_code). exit_code is only set when the process has already exited
+    (a fast crash); it's None both on success and on a plain timeout (still running, never
+    answered — e.g. bound to the wrong interface).
+    """
+    deadline = time.monotonic() + timeout
+    url = f"http://127.0.0.1:{port}/health"
+    while time.monotonic() < deadline:
+        exit_code = daemon_process.poll()
+        if exit_code is not None:
+            return False, exit_code
+        try:
+            with urllib.request.urlopen(url, timeout=1) as response:  # noqa: S310 - localhost only
+                if response.status == 200:
+                    return True, None
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+        time.sleep(0.2)
+    return False, None
+
+
 @cli.command()
 @_ROOT_OPTION
 @_PORT_OPTION
@@ -99,12 +132,19 @@ def serve(root: Path, port: int, poll_interval: float, poll_timeout: float, env_
 
 @cli.command(
     context_settings={"ignore_unknown_options": True},
-    help="Run the local daemon and your app's start command together, in one terminal.\n\n"
+    help="Run the local daemon alongside your app's start command with one wrapper command.\n\n"
     "Example: erragent dev --root . -- uvicorn app:app --reload\n\n"
+    "IMPORTANT: the -- before your app command is required, not optional — without it, any "
+    "option your app command shares with `erragent dev` itself (most commonly --port) gets "
+    "parsed as this command's own option instead of being passed through to your app.\n\n"
     "Starts `erragent serve` as its own OS process (so your app's --reload only ever restarts "
     "your app, never the daemon — embedding it in the same process would kill/restart it on "
-    "every reload, losing any in-progress analysis or approval prompt), sets ERRAGENT_LOCAL_URL "
-    "for the app command automatically, and stops the daemon when the app exits or you Ctrl+C.",
+    "every reload, losing any in-progress analysis or approval prompt), in its own console "
+    "window on Windows (so its approval prompts stay visible instead of buried in your app's "
+    "--reload log spam). Waits for the daemon's /health endpoint before starting your app, and "
+    "fails loudly instead of silently continuing if the daemon never comes up. Sets "
+    "ERRAGENT_LOCAL_URL for the app command automatically, and stops the daemon when the app "
+    "exits or you Ctrl+C.",
 )
 @_ROOT_OPTION
 @_PORT_OPTION
@@ -137,8 +177,34 @@ def dev(
     if env_file:
         daemon_argv += ["--env-file", str(env_file)]
 
+    # New console window on Windows so the daemon's approval prompts stay visible instead of
+    # interleaved with your app's own (often noisy, --reload-heavy) output. No equivalent flag
+    # exists in subprocess.Popen for POSIX — spawning a genuinely separate terminal there means
+    # shelling out to a specific terminal emulator, which has no reliable cross-distro/cross-app
+    # default, so this stays a shared-console fallback on non-Windows platforms.
+    daemon_creationflags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+
     click.echo(f"erragent dev: starting daemon on http://127.0.0.1:{port}")
-    daemon_process = subprocess.Popen(daemon_argv, cwd=root)
+    daemon_process = subprocess.Popen(daemon_argv, cwd=root, creationflags=daemon_creationflags)
+
+    healthy, exit_code = _wait_for_daemon_health(daemon_process, port)
+    if not healthy:
+        if exit_code is not None:
+            click.echo(
+                f"erragent dev: daemon exited immediately (code {exit_code}) — not starting your app. "
+                f"Run `erragent serve --root {root} --port {port}` directly to see the actual error.",
+                err=True,
+            )
+        else:
+            click.echo(
+                f"erragent dev: daemon did not respond on http://127.0.0.1:{port}/health within 10s "
+                "— not starting your app. Check the daemon's own console window for what's wrong "
+                f"(or run `erragent serve --root {root} --port {port}` directly to see it inline).",
+                err=True,
+            )
+            daemon_process.terminate()
+        sys.exit(1)
+    click.echo("erragent dev: daemon is healthy")
 
     app_env = os.environ.copy()
     app_env.setdefault("ERRAGENT_LOCAL_URL", f"http://127.0.0.1:{port}")
