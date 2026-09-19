@@ -34,6 +34,38 @@ class _Recorder:
         raise AssertionError(f"unexpected call: {method} {path}")
 
 
+async def test_handle_error_event_reports_to_cloud_even_when_env_sets_local_url(tmp_path, monkeypatch, caplog):
+    # Regression: the daemon loads the same .env as the app it's serving. That .env sets
+    # ERRAGENT_LOCAL_URL (to tell the *app* to route through the daemon instead of the cloud
+    # directly), which used to also make the daemon itself think it was in local-only mode and
+    # skip cloud reporting entirely — even with valid ERRAGENT_URL/ERRAGENT_INGEST_SECRET set.
+    monkeypatch.setenv("ERRAGENT_SERVICE", "svc")
+    monkeypatch.setenv("ERRAGENT_URL", "https://erragent.example")
+    monkeypatch.setenv("ERRAGENT_INGEST_SECRET", "secret")
+    monkeypatch.setenv("ERRAGENT_LOCAL_URL", "http://127.0.0.1:8765")
+    monkeypatch.delenv("ERRAGENT_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("ERRAGENT_APP_ID", raising=False)
+    monkeypatch.delenv("ERRAGENT_APP_SECRET", raising=False)
+
+    target = tmp_path / "app.py"
+    target.write_text("print('broken')\n", encoding="utf-8")
+
+    recorder = _Recorder()
+    recorder.approve_response = {}
+    monkeypatch.setattr(daemon, "_cloud_request", recorder)
+    monkeypatch.setattr(
+        daemon, "resolve_target_file", lambda root, message, context: ("app.py", target)
+    )
+
+    event = daemon.LogEvent(service="svc", level="error", message="boom")
+    with caplog.at_level("ERROR"):
+        await daemon._handle_error_event(tmp_path, event, poll_interval=0.01, poll_timeout=0.01)
+
+    assert "No cloud credentials configured" not in caplog.text
+    ingest_calls = [c for c in recorder.calls if c[1] == "/api/v1/webhooks/ingest"]
+    assert len(ingest_calls) == 1
+
+
 async def test_apply_proposal_writes_file_and_acks_success(tmp_path, monkeypatch):
     target = tmp_path / "app.py"
     original = "print('broken')\n"
