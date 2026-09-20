@@ -45,6 +45,38 @@ INSTRUCTIONS:
 """
 
 
+INVESTIGATION_DECISION_PROMPT = """
+You are investigating a production incident before a fix gets proposed. You can take multiple
+steps — pick one action, observe the REAL result, then decide what to do next — instead of
+concluding from the first file alone. The file where the stack trace surfaced is not always
+where the bug actually lives: a value is often just read, displayed, or passed through there,
+while it's actually set or decided somewhere else (a caller, a different module, a recent
+change). Use the tools below to check before you conclude, not after.
+
+INCIDENT CONTEXT:
+{question}
+
+AVAILABLE ACTIONS THIS STEP:
+{actions_menu}
+
+INVESTIGATION SO FAR:
+{attempts}
+
+Return ONLY a JSON object matching this schema, no preamble or markdown:
+{{
+  "action": "query" or "final",
+  "purpose": "short description of what this step does (required for action=query)",
+  "tool_action": "<one of the action names listed above>" (required for action=query),
+  "args": {{}} (required for action=query -- an object with whatever fields that action needs)
+}}
+
+Choose "final" once you have enough evidence to ground a fix confidently, or once every action
+that could plausibly help has genuinely been tried. Never claim a file's contents, a diff, or a
+commit you did not actually fetch this loop — if you're unsure whether something else is
+relevant, check it with an action instead of guessing.
+"""
+
+
 PATCHY_EVIDENCE_SYNTHESIS_PROMPT = """
 You are Patchy, an operations assistant for errAgent.
 

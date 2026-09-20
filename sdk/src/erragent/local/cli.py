@@ -104,6 +104,13 @@ def serve(root: Path, port: int, poll_interval: float, poll_timeout: float, env_
     cloud exactly as before; this daemon additionally reads local source, gets it analyzed,
     and walks you through approving a fix before writing anything to disk.
 
+    When run in a real interactive terminal, this console also accepts plain-English
+    investigation requests typed directly into it — no error needs to be thrown. Type a
+    description of something that isn't working and press Enter; errAgent locates the
+    relevant local file itself (including uncommitted edits) and proposes a fix through the
+    same diff-and-approve flow. These stay private to this CLI session and never appear on
+    the shared team dashboard.
+
     The daemon needs its own cloud credentials (ERRAGENT_URL + ERRAGENT_INGEST_SECRET, or
     ERRAGENT_APP_ID/ERRAGENT_APP_SECRET) to forward locally-detected errors for analysis — the
     same values your target app already has in its own .env work here too.
@@ -141,10 +148,11 @@ def serve(root: Path, port: int, poll_interval: float, poll_timeout: float, env_
     "your app, never the daemon — embedding it in the same process would kill/restart it on "
     "every reload, losing any in-progress analysis or approval prompt), in its own console "
     "window on Windows (so its approval prompts stay visible instead of buried in your app's "
-    "--reload log spam). Waits for the daemon's /health endpoint before starting your app, and "
-    "fails loudly instead of silently continuing if the daemon never comes up. Sets "
-    "ERRAGENT_LOCAL_URL for the app command automatically, and stops the daemon when the app "
-    "exits or you Ctrl+C.",
+    "--reload log spam) — and you can type a plain-English description of something that isn't "
+    "working directly into that window to have it investigated, no error required. Waits for "
+    "the daemon's /health endpoint before starting your app, and fails loudly instead of "
+    "silently continuing if the daemon never comes up. Sets ERRAGENT_LOCAL_URL for the app "
+    "command automatically, and stops the daemon when the app exits or you Ctrl+C.",
 )
 @_ROOT_OPTION
 @_PORT_OPTION

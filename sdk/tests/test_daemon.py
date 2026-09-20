@@ -236,3 +236,126 @@ def test_health_endpoint(tmp_path):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["root"] == str(tmp_path.resolve())
+
+
+class _FakeCloud:
+    """Minimal stateful fake of the cloud endpoints touched during a free-text investigation
+    (submit -> service a pending local-tool request -> poll -> approve/decline), so the full
+    flow can be exercised without a real backend."""
+
+    def __init__(self, incident_id="inc-freetext-1"):
+        self.incident_id = incident_id
+        self.pending_tool_request = None
+        self.tool_results = []
+        self.proposal = None
+        self.decline_calls = 0
+        self._next_request_id = 0
+
+    def queue_tool_request(self, tool_action, args):
+        self._next_request_id += 1
+        self.pending_tool_request = {"_id": f"req-{self._next_request_id}", "tool_action": tool_action, "args": args}
+
+    async def __call__(self, config, method, path, body=None):
+        if method == "POST" and path == "/api/v1/webhooks/ingest":
+            return {"incident_id": self.incident_id}
+        if method == "GET" and path == f"/api/v1/local-patch/{self.incident_id}/pending-tool-request":
+            return {"request": self.pending_tool_request}
+        if method == "POST" and path == f"/api/v1/local-patch/{self.incident_id}/tool-result":
+            assert self.pending_tool_request is not None
+            assert body["request_id"] == self.pending_tool_request["_id"]
+            self.tool_results.append((body["request_id"], body["observation"]))
+            self.pending_tool_request = None
+            return {"status": "accepted"}
+        if method == "GET" and path == f"/api/v1/local-patch/by-incident/{self.incident_id}":
+            return {"proposal": self.proposal} if self.proposal else {}
+        if method == "POST" and path.endswith("/decline"):
+            self.decline_calls += 1
+            return {}
+        raise AssertionError(f"unexpected call: {method} {path}")
+
+
+def _set_freetext_env(monkeypatch):
+    monkeypatch.setenv("ERRAGENT_SERVICE", "svc")
+    monkeypatch.setenv("ERRAGENT_URL", "https://erragent.example")
+    monkeypatch.setenv("ERRAGENT_INGEST_SECRET", "secret")
+    monkeypatch.delenv("ERRAGENT_LOCAL_URL", raising=False)
+    monkeypatch.delenv("ERRAGENT_LOCAL_ONLY", raising=False)
+    monkeypatch.delenv("ERRAGENT_APP_ID", raising=False)
+    monkeypatch.delenv("ERRAGENT_APP_SECRET", raising=False)
+
+
+async def test_service_pending_tool_request_services_read_local_file(tmp_path, monkeypatch):
+    (tmp_path / "app.py").write_text("value = None\n", encoding="utf-8")
+    fake_cloud = _FakeCloud()
+    fake_cloud.queue_tool_request("read_local_file", {"path": "app.py"})
+    monkeypatch.setattr(daemon, "_cloud_request", fake_cloud)
+
+    await daemon._service_pending_tool_request(_config(), tmp_path, fake_cloud.incident_id)
+
+    assert fake_cloud.tool_results == [("req-1", "value = None\n")]
+    assert fake_cloud.pending_tool_request is None
+
+
+async def test_service_pending_tool_request_services_list_local_tree(tmp_path, monkeypatch):
+    (tmp_path / "app.py").write_text("", encoding="utf-8")
+    fake_cloud = _FakeCloud()
+    fake_cloud.queue_tool_request("list_local_tree", {})
+    monkeypatch.setattr(daemon, "_cloud_request", fake_cloud)
+
+    await daemon._service_pending_tool_request(_config(), tmp_path, fake_cloud.incident_id)
+
+    assert fake_cloud.tool_results == [("req-1", "app.py")]
+
+
+async def test_service_pending_tool_request_is_a_noop_when_nothing_pending(tmp_path, monkeypatch):
+    fake_cloud = _FakeCloud()
+    monkeypatch.setattr(daemon, "_cloud_request", fake_cloud)
+
+    await daemon._service_pending_tool_request(_config(), tmp_path, fake_cloud.incident_id)
+
+    assert fake_cloud.tool_results == []
+
+
+async def test_handle_freetext_investigation_services_tool_request_before_declining(tmp_path, monkeypatch):
+    # End-to-end shape of the bridge: a tool request queued before the proposal is ready must
+    # be answered before _poll_for_proposal ever hands back that proposal.
+    (tmp_path / "signup.py").write_text("redirect = None\n", encoding="utf-8")
+    _set_freetext_env(monkeypatch)
+
+    fake_cloud = _FakeCloud()
+    fake_cloud.queue_tool_request("read_local_file", {"path": "signup.py"})
+    fake_cloud.proposal = {
+        "_id": "proposal-1",
+        "status": "awaiting_approval",
+        "action": {"target_file_path": "signup.py", "diff_preview": "diff", "pr_title": "Fix redirect"},
+    }
+    monkeypatch.setattr(daemon, "_cloud_request", fake_cloud)
+    monkeypatch.setattr(daemon, "prompt_approval", lambda **kwargs: False)
+
+    await daemon._handle_freetext_investigation(
+        tmp_path, "signup doesn't redirect", poll_interval=0.01, poll_timeout=1.0
+    )
+
+    assert fake_cloud.tool_results == [("req-1", "redirect = None\n")]
+    assert fake_cloud.decline_calls == 1
+
+
+async def test_handle_freetext_investigation_refuses_target_file_escaping_root(tmp_path, monkeypatch):
+    _set_freetext_env(monkeypatch)
+    fake_cloud = _FakeCloud()
+    fake_cloud.proposal = {
+        "_id": "proposal-1",
+        "status": "awaiting_approval",
+        "action": {"target_file_path": "../../etc/passwd", "diff_preview": "diff", "pr_title": "t"},
+    }
+    monkeypatch.setattr(daemon, "_cloud_request", fake_cloud)
+    approval_calls = []
+    monkeypatch.setattr(daemon, "prompt_approval", lambda **kwargs: approval_calls.append(kwargs) or False)
+
+    await daemon._handle_freetext_investigation(
+        tmp_path, "something's broken", poll_interval=0.01, poll_timeout=1.0
+    )
+
+    # Must never even show a diff for a path that escapes the project root.
+    assert approval_calls == []
+    assert fake_cloud.decline_calls == 0
