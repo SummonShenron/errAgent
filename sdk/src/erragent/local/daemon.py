@@ -14,6 +14,13 @@ Binds to 127.0.0.1 only. Exposes a ``POST /api/v1/logs`` endpoint compatible wit
    response blindly) and the local file's current hash against the hash from analysis time
    (refuses to overwrite a file that changed since analysis), then does an atomic write.
 5. Reports the outcome back to the cloud so the proposal/incident status reflects reality.
+
+When stdin is a real interactive terminal (not a test run or piped/redirected input — see the
+``isatty()`` check in ``create_app``), the daemon also reads plain-English investigation
+requests typed directly into its own console window: no error or stack trace needed. The cloud
+side locates the relevant file itself via a live tool-bridge back to this daemon (see
+``_service_pending_tool_request`` and ``backend/services/patchy_local_investigation.py`` on the
+cloud side) before proposing a fix through the exact same poll/approve/apply flow.
 """
 
 from __future__ import annotations
@@ -23,6 +30,8 @@ import hashlib
 import json
 import logging
 import os
+import sys
+import threading
 import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
@@ -35,6 +44,7 @@ from pydantic import BaseModel
 from ..client import _cloud_headers
 from ..config import ErrAgentConfig, load_config
 from .approve_cli import prompt_approval
+from .local_tools import list_local_tree, read_local_file
 from .stackwalk import resolve_target_file
 
 logger = logging.getLogger("erragent.local.daemon")
@@ -96,13 +106,35 @@ def _install_benign_reset_filter(loop: asyncio.AbstractEventLoop) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    _install_benign_reset_filter(asyncio.get_running_loop())
-    yield
+    loop = asyncio.get_running_loop()
+    _install_benign_reset_filter(loop)
+
+    stop_event = threading.Event()
+    reader_thread: threading.Thread | None = None
+    # Skip in any non-interactive context (pytest, a piped/redirected stdin, CI) — reading
+    # stdin there would either hang or immediately EOF-loop for no benefit. This also keeps
+    # tests that spin the app up via TestClient safe with zero special-casing.
+    if sys.stdin is not None and sys.stdin.isatty():
+        reader_thread = threading.Thread(
+            target=_run_stdin_investigation_reader,
+            args=(loop, app.state.root, app.state.poll_interval, app.state.poll_timeout, stop_event),
+            daemon=True,
+            name="erragent-stdin-investigator",
+        )
+        reader_thread.start()
+
+    try:
+        yield
+    finally:
+        stop_event.set()
 
 
 def create_app(root: Path, poll_interval: float = 2.0, poll_timeout: float = 180.0) -> FastAPI:
     app = FastAPI(title="erragent local daemon", lifespan=_lifespan)
     resolved_root = root.resolve()
+    app.state.root = resolved_root
+    app.state.poll_interval = poll_interval
+    app.state.poll_timeout = poll_timeout
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -171,7 +203,7 @@ async def _handle_error_event(root: Path, event: LogEvent, poll_interval: float,
 
     logger.info("Local error reported (incident %s). Analyzing...", incident_id)
 
-    proposal = await _poll_for_proposal(config, incident_id, poll_interval, poll_timeout)
+    proposal = await _poll_for_proposal(config, root, incident_id, poll_interval, poll_timeout)
     if proposal is None or proposal.get("status") != "awaiting_approval":
         return
 
@@ -198,11 +230,175 @@ async def _handle_error_event(root: Path, event: LogEvent, poll_interval: float,
     await _apply_proposal(config, root, target_file_path, absolute_path, proposal["_id"])
 
 
+async def _handle_freetext_investigation(
+    root: Path, description: str, poll_interval: float, poll_timeout: float
+) -> None:
+    """Entry point for a plain-English investigation typed into the daemon's own console (see
+    ``_run_stdin_investigation_reader``) — no error, no stack trace. Unlike
+    ``_handle_error_event``, the target file isn't known up front: the cloud-side investigation
+    loop locates it itself via ``_service_pending_tool_request`` (called from every
+    ``_poll_for_proposal`` iteration below), and reports which file it settled on inside the
+    proposal it returns.
+    """
+    config = load_config(ignore_local_only=True)
+    if config.cloud is None:
+        logger.error(
+            "No cloud credentials configured (ERRAGENT_URL + ERRAGENT_INGEST_SECRET or "
+            "ERRAGENT_APP_ID/ERRAGENT_APP_SECRET) — cannot investigate this."
+        )
+        return
+
+    incident_payload = {
+        "service_name": "local-dev",
+        "environment": "development",
+        "error_message": description,
+        "stack_trace": "",
+        "metadata": {
+            "source": "local_dev_daemon_freetext",
+            "local_dev": True,
+            "user_reported_description": description,
+            "local_project_root": str(root),
+        },
+    }
+
+    try:
+        response = await _cloud_request(config, "POST", "/api/v1/webhooks/ingest", incident_payload)
+    except Exception as exc:
+        logger.error("Failed to submit investigation to errAgent: %s", exc)
+        return
+
+    incident_id = response.get("incident_id")
+    if not incident_id:
+        logger.error("errAgent did not return an incident_id: %s", response)
+        return
+
+    logger.info("Investigation submitted (incident %s). Looking into it...", incident_id)
+
+    proposal = await _poll_for_proposal(config, root, incident_id, poll_interval, poll_timeout)
+    if proposal is None or proposal.get("status") != "awaiting_approval":
+        return
+
+    target_file_path = proposal.get("action", {}).get("target_file_path")
+    if not target_file_path:
+        logger.error("Proposal is missing its target file path; cannot apply.")
+        return
+    absolute_path = (root / target_file_path).resolve()
+    try:
+        absolute_path.relative_to(root.resolve())
+    except ValueError:
+        logger.error("Refusing to proceed: proposed file path escaped the project root.")
+        return
+
+    approved = await asyncio.to_thread(
+        prompt_approval,
+        target_file_path=target_file_path,
+        diff=proposal.get("action", {}).get("diff_preview", ""),
+        pr_title=proposal.get("action", {}).get("pr_title", ""),
+    )
+
+    if not approved:
+        try:
+            await _cloud_request(config, "POST", f"/api/v1/local-patch/{proposal['_id']}/decline")
+        except Exception as exc:
+            logger.error("Failed to record decline: %s", exc)
+        logger.info("Fix declined; no changes written.")
+        return
+
+    await _apply_proposal(config, root, target_file_path, absolute_path, proposal["_id"])
+
+
+def _run_stdin_investigation_reader(
+    loop: asyncio.AbstractEventLoop,
+    root: Path,
+    poll_interval: float,
+    poll_timeout: float,
+    stop_event: threading.Event,
+) -> None:
+    """Runs on a plain background thread (reading stdin blocks) for the lifetime of the
+    daemon. Each typed line is scheduled onto the daemon's real event loop via
+    ``run_coroutine_threadsafe`` so ``_handle_freetext_investigation`` can use the same
+    asyncio-based HTTP/polling machinery as everything else here, without blocking this thread
+    from immediately going back to reading the next line. ``busy`` (not ``stop_event``, which
+    only guards against starting new work after shutdown begins) is what actually prevents two
+    investigations from running at once — a second line typed while one is in flight is
+    rejected with an inline message rather than queued.
+    """
+    busy = threading.Event()
+
+    def _on_done(future: "asyncio.Future[None]") -> None:
+        busy.clear()
+        exc = future.exception()
+        if exc is not None:
+            logger.error("Investigation failed: %s", exc)
+
+    print(
+        "\n[errAgent] Type a description of something that isn't working to investigate it — "
+        "no error needed. Press Enter to submit.\n"
+    )
+    while not stop_event.is_set():
+        try:
+            line = input()
+        except EOFError:
+            return
+
+        description = line.strip()
+        if not description:
+            continue
+        if busy.is_set():
+            print("[errAgent] Still investigating the previous request — please wait.")
+            continue
+
+        busy.set()
+        future = asyncio.run_coroutine_threadsafe(
+            _handle_freetext_investigation(root, description, poll_interval, poll_timeout), loop
+        )
+        future.add_done_callback(_on_done)
+
+
+async def _service_pending_tool_request(config: ErrAgentConfig, root: Path, incident_id: str) -> None:
+    """Checked on every ``_poll_for_proposal`` iteration: if the cloud-side investigation loop
+    is waiting on a local file read or tree listing (see
+    ``backend/services/patchy_local_investigation.py`` on the cloud side), answer it here
+    before continuing to poll for the proposal itself. A no-op when nothing is pending —
+    called unconditionally so error-triggered incidents pay no extra cost beyond one cheap
+    GET per poll cycle that always comes back empty for them today."""
+    try:
+        response = await _cloud_request(config, "GET", f"/api/v1/local-patch/{incident_id}/pending-tool-request")
+    except Exception as exc:
+        logger.error("Failed to check for a pending local tool request: %s", exc)
+        return
+
+    request = response.get("request")
+    if not request:
+        return
+
+    tool_action = request.get("tool_action")
+    args = request.get("args") or {}
+    if tool_action == "read_local_file":
+        observation = read_local_file(root, args.get("path", ""))
+    elif tool_action == "list_local_tree":
+        observation = list_local_tree(root)
+    else:
+        observation = f"ERROR: unrecognized tool_action '{tool_action}'"
+
+    try:
+        await _cloud_request(
+            config,
+            "POST",
+            f"/api/v1/local-patch/{incident_id}/tool-result",
+            {"request_id": request.get("_id"), "observation": observation},
+        )
+    except Exception as exc:
+        logger.error("Failed to report local tool result: %s", exc)
+
+
 async def _poll_for_proposal(
-    config: ErrAgentConfig, incident_id: str, poll_interval: float, poll_timeout: float
+    config: ErrAgentConfig, root: Path, incident_id: str, poll_interval: float, poll_timeout: float
 ) -> dict[str, Any] | None:
     elapsed = 0.0
     while elapsed < poll_timeout:
+        await _service_pending_tool_request(config, root, incident_id)
+
         try:
             status = await _cloud_request(config, "GET", f"/api/v1/local-patch/by-incident/{incident_id}")
         except Exception as exc:

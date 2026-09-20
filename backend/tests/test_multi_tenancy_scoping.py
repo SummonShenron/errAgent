@@ -51,17 +51,32 @@ class FakeCollection:
         return Cursor(deepcopy(doc) for doc in self.documents if self._matches(doc, query))
 
     @staticmethod
+    def _get(doc, dotted_key):
+        """Resolves a Mongo-style dotted key ("metadata.source") into nested dicts, same as a
+        real Mongo query would — plain keys with no "." behave exactly as before."""
+        value = doc
+        for part in dotted_key.split("."):
+            if not isinstance(value, dict):
+                return None
+            value = value.get(part)
+        return value
+
+    @staticmethod
     def _matches(doc, query):
         for key, value in query.items():
+            actual = FakeCollection._get(doc, key)
             if isinstance(value, dict) and "$in" in value:
-                if doc.get(key) not in value["$in"]:
+                if actual not in value["$in"]:
                     return False
             elif isinstance(value, dict) and "$gte" in value:
-                if doc.get(key) is None or doc.get(key) < value["$gte"]:
+                if actual is None or actual < value["$gte"]:
                     return False
-            elif isinstance(value, dict) and "$in" not in value and "$gte" not in value:
+            elif isinstance(value, dict) and "$ne" in value:
+                if actual == value["$ne"]:
+                    return False
+            elif isinstance(value, dict) and not ({"$in", "$gte", "$ne"} & value.keys()):
                 continue
-            elif doc.get(key) != value:
+            elif actual != value:
                 return False
         return True
 
@@ -267,3 +282,103 @@ def test_events_ticket_global_admin_is_unscoped(monkeypatch):
     ticket = app_module._mint_events_ticket(db, admin)
     payload = app_module._validate_events_ticket(ticket)
     assert payload["team_ids"] is None
+
+
+# --- CLI-typed free-text investigations: dispatch routing + dashboard isolation ---
+
+def test_store_incident_routes_freetext_investigation_to_its_own_pipeline():
+    from backend.utils import app_utils as app_utils_module
+
+    db = FakeDB()
+    _seed_bootstrap_team(db)
+    background_tasks = BackgroundTasks()
+    payload = {
+        "service_name": "local-app",
+        "stack_trace": "",
+        "metadata": {
+            "local_dev": True,
+            "user_reported_description": "the login page isn't redirecting after signup",
+            "local_project_root": "/home/dev/local-app",
+        },
+    }
+
+    _store_incident_and_queue_analysis(db, background_tasks, payload, "actor")
+
+    assert background_tasks.tasks[0].func is app_utils_module.run_ai_analysis_pipeline_local_investigate
+
+
+def test_store_incident_routes_error_triggered_local_incident_unchanged():
+    from backend.utils import app_utils as app_utils_module
+
+    db = FakeDB()
+    _seed_bootstrap_team(db)
+    background_tasks = BackgroundTasks()
+    payload = {
+        "service_name": "local-app",
+        "stack_trace": 'File "app.py", line 1',
+        "metadata": {
+            "local_dev": True,
+            "target_file_path": "app.py",
+            "inline_file_content": "value = None\n",
+        },
+    }
+
+    _store_incident_and_queue_analysis(db, background_tasks, payload, "actor")
+
+    assert background_tasks.tasks[0].func is app_utils_module.run_ai_analysis_pipeline_local
+
+
+def test_store_incident_routes_production_incident_unchanged():
+    from backend.utils import app_utils as app_utils_module
+
+    db = FakeDB()
+    _seed_bootstrap_team(db)
+    background_tasks = BackgroundTasks()
+    payload = {"service_name": "bty", "error_message": "boom", "stack_trace": "trace"}
+
+    _store_incident_and_queue_analysis(db, background_tasks, payload, "actor")
+
+    assert background_tasks.tasks[0].func is app_utils_module.run_ai_analysis_pipeline
+
+
+def test_list_incidents_excludes_freetext_investigations_for_team_member(monkeypatch):
+    import backend.app.app as app_module
+
+    db = FakeDB()
+    db["teams"].insert_one({"_id": "team-1", "slug": "acme"})
+    db["incidents"].insert_one({
+        "_id": "inc-real", "team_id": "team-1", "metadata": {}, "created_at": datetime.now(timezone.utc),
+    })
+    db["incidents"].insert_one({
+        "_id": "inc-freetext", "team_id": "team-1",
+        "metadata": {"source": "local_dev_daemon_freetext"},
+        "created_at": datetime.now(timezone.utc),
+    })
+    monkeypatch.setattr(app_module, "get_db", lambda: db)
+    member = {"groups": ["team:acme"]}
+
+    import asyncio
+    result = asyncio.run(app_module.list_incidents(current_user=member))
+
+    assert {doc["_id"] for doc in result} == {"inc-real"}
+
+
+def test_list_incidents_excludes_freetext_investigations_for_global_admin(monkeypatch):
+    import backend.app.app as app_module
+
+    db = FakeDB()
+    db["incidents"].insert_one({
+        "_id": "inc-real", "team_id": "team-1", "metadata": {}, "created_at": datetime.now(timezone.utc),
+    })
+    db["incidents"].insert_one({
+        "_id": "inc-freetext", "team_id": "team-1",
+        "metadata": {"source": "local_dev_daemon_freetext"},
+        "created_at": datetime.now(timezone.utc),
+    })
+    monkeypatch.setattr(app_module, "get_db", lambda: db)
+    admin = {"groups": ["Global_Admins"]}
+
+    import asyncio
+    result = asyncio.run(app_module.list_incidents(current_user=admin))
+
+    assert {doc["_id"] for doc in result} == {"inc-real"}

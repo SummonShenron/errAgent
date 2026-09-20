@@ -21,6 +21,7 @@ from backend.schemas.ingest_schemas import MachineIncidentIngest
 # Utility imports from your backend/utils directory
 from backend.utils.db_utils import get_db
 from backend.utils.app_utils import (
+    FREETEXT_INVESTIGATION_SOURCE_TAG,
     build_health_report,
     build_incident_fingerprint,
     canonicalize_service_name,
@@ -45,6 +46,7 @@ from backend.services.log_broker import InternalLogHandler, LogEventInput, insta
 from backend.services.patchy_terminal import PatchyCommandError, _guided_test_flow, execute_patchy_command
 from backend.services.patchy_hitl import PatchyProposalError, approve_and_execute_probe, decline_proposal, list_proposals
 from backend.services.patchy_local_patch import approve_local_patch, ack_local_patch, get_local_patch_status
+from backend.services.patchy_local_investigation import get_pending_tool_request, submit_tool_result
 from backend.services.patchy_test_runner import PatchyTestExecutionError, approve_and_dispatch_test_plan, get_test_execution_status
 from backend.services.patchy_test_generator import PatchyGeneratedTestError, approve_and_commit_generated_test
 from backend.services.patchy_flow_runner import execute_flow, execute_validation_audit
@@ -514,6 +516,9 @@ async def incident_events(ticket: str | None = Query(default=None)):
         query: dict[str, Any] = {}
         if scoped_team_ids is not None:
             query = {"team_id": {"$in": [ObjectId(tid) if ObjectId.is_valid(tid) else tid for tid in scoped_team_ids]}}
+        # Same exclusion as list_incidents — a CLI-typed free-text investigation must never
+        # surface as a live "new incident" event either, not just be absent from the list.
+        query["metadata.source"] = {"$ne": FREETEXT_INVESTIGATION_SOURCE_TAG}
 
         latest = db["incidents"].find_one(
             query,
@@ -802,6 +807,44 @@ async def ack_local_patch_route(
         )
     except PatchyProposalError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class LocalToolResult(BaseModel):
+    request_id: str
+    observation: str
+
+
+@app.get("/api/v1/local-patch/{incident_id}/pending-tool-request", tags=["Patchy"])
+async def get_pending_tool_request_route(
+    incident_id: str,
+    x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
+):
+    """Polled by the local erragent daemon while it's waiting on a proposal — lets the
+    cloud-side investigation loop (which has no filesystem access) ask the daemon to read a
+    specific local file or list the local tree, and get the answer without a new transport.
+    See backend/services/patchy_local_investigation.py."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    request = await asyncio.to_thread(get_pending_tool_request, db, incident_id)
+    return {"request": serialize_mongo_doc(request) if request else None}
+
+
+@app.post("/api/v1/local-patch/{incident_id}/tool-result", tags=["Patchy"])
+async def submit_tool_result_route(
+    incident_id: str,
+    payload: LocalToolResult,
+    x_ingest_secret: str | None = Header(default=None),
+    x_app_id: str | None = Header(default=None),
+):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    authenticate_ingest_client(db, x_ingest_secret, x_app_id)
+    await asyncio.to_thread(submit_tool_result, db, incident_id, payload.request_id, payload.observation)
+    return {"status": "accepted"}
 
 
 @app.post("/api/v1/logs", status_code=status.HTTP_202_ACCEPTED, tags=["Logs"])
@@ -1166,6 +1209,11 @@ async def list_incidents(current_user: dict = Depends(get_current_user)):
         if not team_ids:
             return []
         query = {"team_id": {"$in": team_ids}}
+
+    # CLI-typed free-text investigations are "propose a fix for a described issue," not a
+    # genuine incident — they stay isolated to the CLI session that started them and never
+    # appear on the shared team dashboard. See FREETEXT_INVESTIGATION_SOURCE_TAG.
+    query["metadata.source"] = {"$ne": FREETEXT_INVESTIGATION_SOURCE_TAG}
 
     incidents = list(db["incidents"].find(query).sort("created_at", -1))
     return serialize_mongo_doc(incidents)

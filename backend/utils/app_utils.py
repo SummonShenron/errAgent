@@ -20,6 +20,14 @@ from typing import Dict, Any
 from pydantic import BaseModel, Field
 from backend.utils.db_utils import get_db
 from backend.prompts.constraints import INCIDENT_ANALYSIS_PROMPT
+from backend.services.github_service_factory import get_github_service_for_team
+from backend.services.patchy_investigation import (
+    InvestigationTools,
+    build_github_investigation_tools,
+    format_attempts,
+    run_investigation_loop,
+)
+from backend.services.patchy_local_investigation import build_local_bridge_investigation_tools
 from google import genai
 from google.genai import types
 import subprocess
@@ -27,6 +35,12 @@ import tempfile
 from dotenv import load_dotenv
 
 logger = logging.getLogger("errAgent Logger")
+# Tag stamped on every CLI-typed, no-stack-trace incident (see run_ai_analysis_pipeline_local_investigate
+# below and the local daemon's stdin-reader). These are "propose a fix for a described issue," not a
+# genuine production incident, so every dashboard-facing query excludes this tag — see list_incidents
+# and the SSE incident_signature query in app.py. The incident/proposal documents are otherwise
+# completely normal; they're just invisible to team-facing views.
+FREETEXT_INVESTIGATION_SOURCE_TAG = "local_dev_daemon_freetext"
 DEFAULT_TARGET_REPO = os.getenv("DEFAULT_TARGET_REPO", "SummonShenron/SAAPP")
 MAX_PATCH_CHANGE_RATIO = float(os.getenv("MAX_PATCH_CHANGE_RATIO", "0.2"))
 MAX_PATCH_CHANGED_LINES = int(os.getenv("MAX_PATCH_CHANGED_LINES", "120"))
@@ -349,11 +363,19 @@ def _store_incident_and_queue_analysis(
     })
     incident_metadata = payload.get("metadata")
     is_local_dev = isinstance(incident_metadata, dict) and bool(incident_metadata.get("local_dev"))
-    background_tasks.add_task(
-        run_ai_analysis_pipeline_local if is_local_dev else run_ai_analysis_pipeline,
-        incident_id,
-        payload,
+    is_freetext_investigation = (
+        is_local_dev
+        and isinstance(incident_metadata, dict)
+        and not incident_metadata.get("target_file_path")
+        and bool(incident_metadata.get("user_reported_description"))
     )
+    if is_freetext_investigation:
+        pipeline = run_ai_analysis_pipeline_local_investigate
+    elif is_local_dev:
+        pipeline = run_ai_analysis_pipeline_local
+    else:
+        pipeline = run_ai_analysis_pipeline
+    background_tasks.add_task(pipeline, incident_id, payload)
     return incident_id
 
 
@@ -898,6 +920,7 @@ def _run_analysis_with_source(
     target_file: str,
     existing_code: str,
     remediation_extra: dict,
+    investigation_tools: "InvestigationTools | None" = None,
 ) -> dict:
     """Shared tail of the analysis pipeline: prompt Gemini, validate/apply the patch in a
     sandbox, and persist analyses/remediations/incident status. Everything from here on is
@@ -905,6 +928,13 @@ def _run_analysis_with_source(
     ``run_ai_analysis_pipeline`` and ``run_ai_analysis_pipeline_local`` share this. Raises on
     failure — callers are responsible for the surrounding try/except and failure bookkeeping,
     since they know the source-specific context (target_repo vs. local_project_root) to record.
+
+    ``investigation_tools``, when given (only by ``run_ai_analysis_pipeline`` — the local-dev
+    path never passes it, so its behavior is unchanged), lets the model read other files, diff
+    branches, or check commit history before a fix is proposed, instead of only ever seeing the
+    one auto-detected file. See ``backend/services/patchy_investigation.py``. This runs once,
+    up front, to enrich the prompt — the patch itself is still produced by the same
+    schema-validated Gemini call this function always made.
 
     Returns the remediation dict that was written (pre-insert, so it has no Mongo ``_id`` — look
     it up by ``incident_id`` if a caller needs the persisted copy).
@@ -929,6 +959,47 @@ def _run_analysis_with_source(
         target_file_path=target_file
     )
 
+    investigation_context = ""
+    if investigation_tools is not None:
+        investigation_model = os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash")
+
+        def _generate_investigation_text(step_prompt: str) -> str:
+            step_response = client.models.generate_content(
+                model=investigation_model,
+                contents=step_prompt,
+                config=types.GenerateContentConfig(temperature=0.1),
+            )
+            return step_response.text or ""
+
+        investigation_question = (
+            f"Service: {payload.get('service_name', 'unknown-service')}\n"
+            f"Stack trace:\n{stack_trace}\n\n"
+            f"Auto-detected file: {target_file} (its content is already given to you separately "
+            "as context for the eventual fix — use the actions below only to look at OTHER "
+            "files, diffs, or commit history, not to re-fetch this same file)."
+        )
+        try:
+            loop_result = run_investigation_loop(
+                question=investigation_question,
+                tools=investigation_tools,
+                generate_text=_generate_investigation_text,
+            )
+        except Exception:
+            logger.exception(
+                "--> [errAgent AI] Investigation loop failed for %s; continuing with single-file "
+                "analysis only.",
+                incident_id,
+            )
+            loop_result = {"attempts": []}
+        if loop_result["attempts"]:
+            investigation_context = (
+                "\n--------------------------------------------------\n"
+                "ADDITIONAL CONTEXT GATHERED BY INVESTIGATION (other files/diffs/commits looked "
+                "at before proposing this fix — treat this the same as the target file's own "
+                "content, not as a suggestion to re-verify):\n"
+                + format_attempts(loop_result["attempts"])
+            )
+
     # Append file contents safely via f-string
     prompt = f"""{base_prompt}
 --------------------------------------------------
@@ -936,6 +1007,7 @@ CURRENT CONTENT OF TARGET FILE ({target_file}):
 ```python
 {existing_code}
 ```
+{investigation_context}
     """
     logger.info(f"--> [errAgent AI] Prompt sent to Gemini (first 500 chars):\n{prompt[:500]}...")
 
@@ -1150,6 +1222,25 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
         )
         return
 
+    # Investigation tools need the incident's team to resolve the right GitHub credential —
+    # gracefully degrade to single-file analysis (today's behavior) rather than failing the
+    # whole analysis when a team hasn't configured a PAT yet, since the initial file fetch
+    # above uses unauthenticated raw.githubusercontent.com and doesn't require one.
+    investigation_tools = None
+    incident_for_team = db["incidents"].find_one({"_id": incident_id}, {"team_id": 1}) or {}
+    team_id = incident_for_team.get("team_id")
+    try:
+        github_service_for_investigation = get_github_service_for_team(db, team_id)
+        investigation_tools = build_github_investigation_tools(
+            github_service_for_investigation, target_repo, fetched_branch or "main"
+        )
+    except HTTPException:
+        logger.info(
+            "--> [errAgent AI] No GitHub credential configured for team %r — proceeding with "
+            "single-file analysis only.",
+            team_id,
+        )
+
     try:
         _run_analysis_with_source(
             db,
@@ -1159,6 +1250,7 @@ def run_ai_analysis_pipeline(incident_id: str, payload: dict) -> None:
             target_file,
             existing_code,
             remediation_extra={"target_repo": target_repo, "base_file_branch": fetched_branch},
+            investigation_tools=investigation_tools,
         )
     except Exception as exc:
         logger.error("--> [errAgent AI] Analysis pipeline failed for %s: %s", incident_id, str(exc))
@@ -1235,6 +1327,117 @@ def run_ai_analysis_pipeline_local(incident_id: str, payload: dict) -> None:
                 "remediation_kind": "local_patch",
                 "local_project_root": local_project_root,
             },
+        )
+    except Exception as exc:
+        _fail(f"Analysis pipeline failed: {exc}")
+        return
+
+    from backend.services.patchy_local_patch import create_local_patch_proposal
+    create_local_patch_proposal(db, incident_id, remediation_doc)
+
+
+def run_ai_analysis_pipeline_local_investigate(incident_id: str, payload: dict) -> None:
+    """CLI-typed, no-stack-trace variant: a developer described a symptom in plain English
+    (``metadata.user_reported_description``) instead of an error being thrown, so there's no
+    stack trace to parse a target file from. Uses the local tool-bridge
+    (``backend/services/patchy_local_investigation.py``) to have the model locate the relevant
+    file itself — ``list_local_tree``/``read_local_file``, answered live by the developer's own
+    daemon — before handing off to the exact same ``_run_analysis_with_source`` call every
+    other pipeline already uses, once a real target file and its content are known.
+    """
+    db = get_db()
+    if db is None:
+        logger.error("Database unavailable during local investigation for %s", incident_id)
+        return
+
+    db["incidents"].update_one(
+        {"_id": incident_id},
+        {"$set": {"status": "analyzing", "updated_at": datetime.now(timezone.utc)}}
+    )
+
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    description = str(metadata.get("user_reported_description") or "").strip()
+    local_project_root = str(metadata.get("local_project_root") or "").strip()
+
+    def _fail(reason: str) -> None:
+        logger.error("--> [errAgent AI local investigate] %s (incident=%s)", reason, incident_id)
+        _upsert_remediation_failure(db, incident_id, reason, target_file="")
+        db["incidents"].update_one(
+            {"_id": incident_id},
+            {"$set": {"status": "analysis_failed", "updated_at": datetime.now(timezone.utc)}}
+        )
+
+    if not description:
+        _fail("Free-text investigation is missing metadata.user_reported_description.")
+        return
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        _fail("GOOGLE_API_KEY is not configured.")
+        return
+
+    client = genai.Client(api_key=api_key)
+    tools = build_local_bridge_investigation_tools(db, incident_id)
+    investigation_model = os.getenv("PATCHY_REASONING_MODEL", "gemini-3.5-flash")
+
+    def _generate_investigation_text(step_prompt: str) -> str:
+        step_response = client.models.generate_content(
+            model=investigation_model,
+            contents=step_prompt,
+            config=types.GenerateContentConfig(temperature=0.1),
+        )
+        return step_response.text or ""
+
+    locate_question = (
+        f"A developer described a problem with their local project (root: "
+        f"{local_project_root or 'unknown'}), with no error or stack trace to go on:\n\n"
+        f"\"{description}\"\n\n"
+        "Use the actions below to locate the ONE file that most directly needs to change to "
+        "address this. Your LAST successful read_local_file call before you conclude is "
+        "treated as the file you're proposing to fix — so don't conclude until you've actually "
+        "read the real file you mean, not just seen its name in a tree listing."
+    )
+
+    try:
+        loop_result = run_investigation_loop(
+            question=locate_question,
+            tools=tools,
+            generate_text=_generate_investigation_text,
+        )
+    except Exception as exc:
+        _fail(f"Investigation failed: {exc}")
+        return
+
+    target_file = None
+    existing_code = None
+    for attempt in reversed(loop_result["attempts"]):
+        if attempt.get("tool_action") == "read_local_file" and not attempt.get("observation", "").startswith("ERROR"):
+            target_file = attempt.get("args", {}).get("path")
+            existing_code = attempt.get("observation")
+            break
+
+    if not target_file or not existing_code:
+        _fail(
+            "Could not identify a specific file from that description — try naming a feature, "
+            "page, or file explicitly."
+        )
+        return
+
+    try:
+        remediation_doc = _run_analysis_with_source(
+            db,
+            client,
+            incident_id,
+            payload,
+            target_file,
+            existing_code,
+            remediation_extra={
+                "remediation_kind": "local_patch",
+                "local_project_root": local_project_root,
+            },
+            investigation_tools=tools,
         )
     except Exception as exc:
         _fail(f"Analysis pipeline failed: {exc}")

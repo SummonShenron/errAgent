@@ -118,6 +118,72 @@ class GitHubOpsService:
             return result
 
     @github_network_retry
+    async def list_repository_tree(self, repo: str, branch: str = "main") -> dict:
+        """Fetch every file path in the repo. Unlike fetch_repository_context (which is
+        narrowed to test-file discovery for the test-planning flow and must keep that exact
+        return shape for its existing callers), this returns the full tree so an investigation
+        loop can locate arbitrary source files it wasn't told about up front."""
+        self._require_token()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            raise HTTPException(status_code=400, detail="Invalid GitHub repository format.")
+        if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch) or branch.startswith(("/", "-")) or ".." in branch:
+            raise HTTPException(status_code=400, detail="Invalid GitHub branch format.")
+
+        cache_key = f"repo_tree:{repo}:{branch}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            tree_res = await client.get(
+                f"{self.api_base}/repos/{repo}/git/trees/{branch}",
+                headers=self.headers,
+                params={"recursive": "1"},
+            )
+            tree_res.raise_for_status()
+            tree = tree_res.json().get("tree", [])
+            files = [
+                item["path"] for item in tree
+                if item.get("type") == "blob"
+                and not any(exclude in item.get("path", "") for exclude in ("node_modules", "dist", "__pycache__"))
+            ][:400]
+            result = {"branch": branch, "files": files}
+            self._cache_set(cache_key, result)
+            return result
+
+    @github_network_retry
+    async def list_commits(self, repo: str, branch: str, limit: int = 10) -> dict:
+        """List recent commit messages for a branch (read-only investigation tool)."""
+        self._require_token()
+        if not re.fullmatch(r"[A-Za-z0-9_.\-/]+", branch) or branch.startswith(("/", "-")) or ".." in branch:
+            raise HTTPException(status_code=400, detail="Invalid GitHub branch format.")
+        try:
+            limit = min(max(int(limit), 1), 30)
+        except (TypeError, ValueError):
+            limit = 10
+
+        cache_key = f"commits:{repo}:{branch}:{limit}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.get(
+                f"{self.api_base}/repos/{repo}/commits",
+                headers=self.headers,
+                params={"sha": branch, "per_page": limit},
+            )
+            if res.status_code != 200:
+                return {"status_code": res.status_code, "commits": []}
+            commits = [
+                {"sha": c["sha"][:7], "message": c["commit"]["message"].splitlines()[0]}
+                for c in res.json()
+            ]
+            result = {"status_code": 200, "commits": commits}
+            self._cache_set(cache_key, result)
+            return result
+
+    @github_network_retry
     async def fetch_repository_files(self, repo: str, branch: str, paths: list[str]) -> dict[str, str]:
         """Fetch bounded text content for selected repository files without writing to GitHub."""
         self._require_token()
