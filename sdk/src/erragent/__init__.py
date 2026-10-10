@@ -18,9 +18,10 @@ from .client import (
     report_incident,
     report_incident_nowait,
 )
-from .config import load_config, resolve_cloud_credentials
+from .config import load_config, load_read_config, resolve_cloud_credentials
 from .context import context, current_context
 from .handler import ErrAgentHandler, _install_exception_hooks
+from .reader import ErrAgentReadError, get_incident, latest_deploy, list_incidents, list_logs
 
 __all__ = [
     "install",
@@ -30,6 +31,12 @@ __all__ = [
     "report_incident_nowait",
     "report_client_error",
     "report_client_error_nowait",
+    "list_incidents",
+    "get_incident",
+    "latest_deploy",
+    "list_logs",
+    "load_read_config",
+    "ErrAgentReadError",
     "ErrAgentNotConfigured",
     "ErrAgentHandler",
     "Middleware",

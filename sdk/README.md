@@ -40,7 +40,8 @@ All configuration is environment-only, matching errAgent's existing convention:
 | `ERRAGENT_SERVICE` | Stable service name reported with every event |
 | `ERRAGENT_LOCAL_URL` | Local-dev daemon URL (e.g. `http://127.0.0.1:8765`), set only when running `erragent serve` |
 | `ERRAGENT_LOCAL_ONLY` | Defaults to local-only whenever `ERRAGENT_LOCAL_URL` is set (see below). Set to `false` to also install the cloud handler alongside it. |
-| `ERRAGENT_TIMEOUT_SECONDS` | HTTP timeout for delivery (default `30`) |
+| `ERRAGENT_READ_SECRET` | Optional. This app's **read** secret, only needed to read its own incidents back (see "Reading your app's own incidents"). Not the ingest secret. |
+| `ERRAGENT_TIMEOUT_SECONDS` | HTTP timeout for delivery and reads (default `30`) |
 
 When `ERRAGENT_LOCAL_URL` is set, `erragent.install()` installs **only** the local handler by
 default, not the cloud one — the local daemon already forwards every error it handles to the
@@ -90,6 +91,44 @@ await erragent.report_incident(
 # fire-and-forget variant for request handlers that can't await
 erragent.report_incident_nowait(error_message="...", stack_trace="...")
 ```
+
+## Reading your app's own incidents
+
+Everything above reports *to* errAgent. If your app also wants to look at what errAgent holds about **itself** (an admin tool, a
+status page, an overnight digest), use the read functions:
+
+```python
+incidents = await erragent.list_incidents(since="24h", status="open", limit=10)
+detail = await erragent.get_incident(incidents[0]["id"])   # + stack trace, suggested fix, operational metadata
+deploy = await erragent.latest_deploy()                    # latest Render deploy, if one is configured for the app
+logs = await erragent.list_logs(level="warn", since="6h", contains="timeout", limit=50)   # recent log lines, oldest first
+```
+
+`list_logs` reads errAgent's live log buffer, which is held in memory: it covers what arrived since errAgent last restarted (up to
+the buffer size per service), not a full history. The result says how far back it reaches (`oldest_buffered`) so "nothing matched"
+can be told apart from "the buffer doesn't go back that far". `level` is a minimum severity, `request_id` follows one request, and
+log context is filtered through the same allowlist as an incident's metadata.
+
+Reads use their own credential, `ERRAGENT_READ_SECRET` (with the same `ERRAGENT_URL` and `ERRAGENT_APP_ID`). It is **not** the ingest
+secret: the ingest secret sits in every reporting app's environment and must not double as a key to read data. An errAgent operator
+issues it per app:
+
+```bash
+python -m backend.scripts.manage_app_read_access services                   # which service names incidents are filed under
+python -m backend.scripts.manage_app_read_access enable --app-id myapp --service myapp [--render-service-id srv-...] [--create]
+python -m backend.scripts.manage_app_read_access rotate  --app-id myapp
+python -m backend.scripts.manage_app_read_access disable --app-id myapp
+```
+
+The secret is shown once and stored only as a hash. It is scoped on the server to the app's team and the service names written
+on its record, so it can only ever read **that app's** incidents (another app's id is a 404, the same as one that doesn't exist).
+Reads work in local-dev mode too (`ERRAGENT_LOCAL_URL` only switches off *reporting* to the cloud).
+
+What comes back is small and content-free: id, status, the first line of the message, a truncated stack trace, the AI analysis
+summary, fix status, and a short allowlist of operational metadata. Anything else an incident carried (a whole conversation state,
+for example) is dropped server-side. Incident text is still data written by whatever failed, so if you pass it to a language model,
+treat it as **untrusted input**, never as instructions. Failures raise `ErrAgentReadError` (with `status_code`, or `None` when
+errAgent can't be reached) and never include the secret.
 
 ## Local-dev remediation
 

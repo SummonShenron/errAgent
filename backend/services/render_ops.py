@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from typing import Any
 
 import httpx
@@ -124,6 +125,51 @@ async def collect_render_status(target: str) -> dict[str, Any]:
         "status": overall,
         "services": services,
     })
+
+
+_SERVICE_ID_RE = re.compile(r"^srv-[A-Za-z0-9]{6,40}$")
+
+
+async def collect_render_service_status(service_id: str | None) -> dict[str, Any]:
+    """Service and latest-deploy status for ONE Render service id, for the app-scoped read route.
+
+    The id comes from the calling app's own `ingest_clients` record, never from the request, and is shape-checked before it is
+    put in a URL. Read-only; never raises (a failure is reported as a status), and never includes the API key or raw errors.
+    """
+    if not service_id or not _SERVICE_ID_RE.match(service_id):
+        return {"provider": "render", "status": "not_configured", "reason": "No Render service is configured for this app."}
+    api_key = os.getenv("RENDER_API_KEY", "").strip()
+    if not api_key:
+        return {"provider": "render", "status": "not_configured", "reason": "RENDER_API_KEY is not configured."}
+
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(headers=headers, timeout=15) as client:
+            payload = await _fetch_render_service(client, service_id)
+    except httpx.HTTPStatusError as exc:
+        return {"provider": "render", "status": "error", "reason": f"Render API returned HTTP {exc.response.status_code}"}
+    except (httpx.HTTPError, ValueError):
+        return {"provider": "render", "status": "error", "reason": "The Render API request failed."}
+
+    service = payload["service"] or {}
+    deploy = payload["latestDeploy"] or {}
+    return {
+        "provider": "render",
+        "status": "ok",
+        "service": {
+            "name": service.get("name"),
+            "type": service.get("type"),
+            "suspended": service.get("suspended"),
+            "updatedAt": service.get("updatedAt"),
+        },
+        "latestDeploy": {
+            "id": deploy.get("id"),
+            "status": deploy.get("status"),
+            "commit": (deploy.get("commit") or {}).get("id"),
+            "createdAt": deploy.get("createdAt"),
+            "finishedAt": deploy.get("finishedAt"),
+        },
+    }
 
 
 def format_render_status(report: dict[str, Any]) -> list[str]:

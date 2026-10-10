@@ -129,6 +129,18 @@ class LogBroker:
         history.sort(key=lambda entry: entry["timestamp"])
         return history[-max(1, min(limit, 200)):]
 
+    async def get_entries_for_services(self, services: set[str]) -> list[dict[str, Any]]:
+        """Every buffered entry whose service name matches one of `services`, compared case-insensitively. For the app-scoped
+        read route, which holds canonical lowercase names while reporting apps send whatever casing they like."""
+        wanted = {str(name).strip().lower() for name in services}
+        async with self._lock:
+            return [
+                entry
+                for service, buffer in self._buffers.items()
+                if service.strip().lower() in wanted
+                for entry in buffer
+            ]
+
     async def clear(self) -> None:
         async with self._lock:
             self._buffers.clear()

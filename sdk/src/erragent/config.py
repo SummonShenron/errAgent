@@ -34,6 +34,33 @@ class ErrAgentConfig:
     local_only: bool
 
 
+@dataclass(frozen=True)
+class ReadConfig:
+    """What an app needs to read ITS OWN incidents back from errAgent (see ``reader.py``)."""
+
+    url: str
+    app_id: str
+    read_secret: str
+    timeout_seconds: float
+
+
+def load_read_config() -> ReadConfig | None:
+    """Resolve the read configuration, or None when it isn't fully present.
+
+    Deliberately separate from ``load_config``: reads need their own credential (``ERRAGENT_READ_SECRET``, never the ingest
+    secret) and always go to the cloud errAgent, so unlike reporting they are not switched off by local-dev mode
+    (``ERRAGENT_LOCAL_URL`` / ``ERRAGENT_LOCAL_ONLY``): a developer running locally can still look at production incidents.
+    """
+    url = os.getenv("ERRAGENT_URL")
+    app_id = os.getenv("ERRAGENT_APP_ID")
+    read_secret = os.getenv("ERRAGENT_READ_SECRET")
+    if not (url and app_id and read_secret):
+        return None
+    return ReadConfig(
+        url=url, app_id=app_id, read_secret=read_secret, timeout_seconds=float(os.getenv("ERRAGENT_TIMEOUT_SECONDS", "30"))
+    )
+
+
 def resolve_cloud_credentials(cloud: CloudConfig) -> tuple[str | None, str | None]:
     """Return (app_id, secret) to actually send, honoring the auth server's "all or nothing"
     per-app credential rule: sending ``x-app-id`` without a matching secret is always rejected

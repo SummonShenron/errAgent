@@ -40,6 +40,8 @@ from backend.utils.app_utils import (
     debug_suppression_bypassed,
 )
 from backend.utils.isolation_auth import decode_access_token, get_current_user
+from backend.utils.app_read_utils import authenticate_read_client, get_app_incident, list_app_incidents, list_app_logs
+from backend.services.render_ops import collect_render_service_status
 from backend.services.github_service import GitHubOpsService
 from backend.services.github_service_factory import get_github_service_for_team
 from backend.services.log_broker import InternalLogHandler, LogEventInput, install_internal_log_handler, log_broker
@@ -1247,6 +1249,69 @@ async def get_incident_detail(incident_id: str, current_user: dict = Depends(get
         "analysis": serialize_mongo_doc(analysis),
         "remediation": serialize_mongo_doc(remediation)
     }
+
+
+# --- APP-SCOPED READS (an app reading ITS OWN incidents; see backend/utils/app_read_utils.py) ---
+# Authenticated with the app's read credential (x-app-id + x-read-secret), never the ingest secret and never a human session.
+# The credential resolves to a team and service names; every query is filtered by both, so one app cannot name another's data.
+def _authenticate_app_read(x_app_id: str | None, x_read_secret: str | None):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    return db, authenticate_read_client(db, x_read_secret, x_app_id)
+
+
+@app.get("/api/v1/app/incidents", tags=["App Read"])
+async def app_list_incidents(
+    status_filter: str | None = Query(default=None, alias="status", max_length=24),
+    environment: str | None = Query(default="production", max_length=32),
+    since: str | None = Query(default=None, max_length=40),
+    limit: int = Query(default=20, ge=1, le=50),
+    x_app_id: str | None = Header(default=None),
+    x_read_secret: str | None = Header(default=None),
+):
+    db, context = _authenticate_app_read(x_app_id, x_read_secret)
+    incidents = list_app_incidents(db, context, status=status_filter, environment=environment, since=since, limit=limit)
+    logger.info("[app-read] app=%s listed %d incident(s).", context["app_id"], len(incidents))
+    return {"incidents": incidents}
+
+
+@app.get("/api/v1/app/incidents/{incident_id}", tags=["App Read"])
+async def app_get_incident(
+    incident_id: str,
+    x_app_id: str | None = Header(default=None),
+    x_read_secret: str | None = Header(default=None),
+):
+    db, context = _authenticate_app_read(x_app_id, x_read_secret)
+    incident = get_app_incident(db, context, incident_id)
+    logger.info("[app-read] app=%s read incident %s.", context["app_id"], incident_id)
+    return {"incident": incident}
+
+
+@app.get("/api/v1/app/logs", tags=["App Read"])
+async def app_list_logs(
+    level: str | None = Query(default=None, max_length=8),
+    since: str | None = Query(default=None, max_length=40),
+    contains: str | None = Query(default=None, max_length=80),
+    request_id: str | None = Query(default=None, max_length=80),
+    limit: int = Query(default=50, ge=1, le=100),
+    x_app_id: str | None = Header(default=None),
+    x_read_secret: str | None = Header(default=None),
+):
+    _db, context = _authenticate_app_read(x_app_id, x_read_secret)
+    buffered = await log_broker.get_entries_for_services(set(context["service_names"]))
+    result = list_app_logs(buffered, context, level=level, since=since, contains=contains, request_id=request_id, limit=limit)
+    logger.info("[app-read] app=%s read %d log line(s).", context["app_id"], len(result["entries"]))
+    return result
+
+
+@app.get("/api/v1/app/deploy", tags=["App Read"])
+async def app_latest_deploy(
+    x_app_id: str | None = Header(default=None),
+    x_read_secret: str | None = Header(default=None),
+):
+    _db, context = _authenticate_app_read(x_app_id, x_read_secret)
+    return await collect_render_service_status(context.get("render_service_id"))
 
 
 # --- 4. INGEST NEW ERROR INCIDENT ---
